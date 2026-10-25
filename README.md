@@ -111,6 +111,19 @@ The stack starts with `phy_io.backend = "None"` so the web UI works even before 
 
 Open **Config** in the sidebar. Prefer the visual forms over raw TOML — that is the point of this fork.
 
+### Dashboard languages
+
+Select **PT** for Portuguese (Portugal) or **FR** for French in the language picker
+(inside the preferences menu on smaller screens). The choice is saved in the browser
+and also used by the login page. On first access, Portuguese and French browser
+language preferences are recognized automatically.
+
+Portuguese and French translations by **Gustavo Encarnação — CS7ATL**. Protocol names,
+identifiers, commands and technical acronyms are preserved. Diagnostic messages and
+logs received directly from the station remain in their original form.
+
+Translation checks: `node contrib/test-dashboard-locales.cjs`.
+
 ### TMO profiles (Cell × Brew)
 
 1. Pick a **TMO Cell** and a **Core Net (Brew)** (or Offline).
@@ -394,7 +407,7 @@ For Asterisk, DAPNET, Snom, GeoAlarm and deep protocol notes, use the upstream d
 - **MidnightBlueLabs** — [tetra-bluestation](https://github.com/MidnightBlueLabs/tetra-bluestation)
 - **Aitor, EA4HBL** — this fork (install, Setup, visual config, OTA UX, Spanish UI).
 - **Yiannis Samouhos, ysamouhos** — Multi-cell support with multiple SDR and AIE.
-- **David Harcus, MM7FDM** — TETRA authentication (TAA1), TEA2/TEA3, SCK OTAR, the Security dashboard page, and USRP B210 support.
+- **David Harcus, MM7FDM** — TETRA authentication (TAA1), TEA2/TEA3, SCK OTAR, the Security dashboard page, USRP B210 support, and the WAP packet-data (SNDCP) gateway with its live status page.
 
 ---
 

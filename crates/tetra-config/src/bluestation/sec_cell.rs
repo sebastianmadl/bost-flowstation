@@ -28,6 +28,49 @@ pub struct CfgHomeModeDisplay {
     pub text: String,
 }
 
+/// Compiled WAP-IP gateway configuration (present when `[cell_info.wap_ip]` exists). The gateway
+/// answers WAP/HTTP requests over the packet-data (SNDCP) bearer; see the SNDCP entity.
+#[derive(Debug, Clone, Copy)]
+pub struct CfgWapIp {
+    /// Master switch for the WAP/SNDCP packet-data gateway. When true the cell runs the gateway
+    /// and advertises `sndcp_service` + `advanced_link` in SYSINFO automatically; when false (the
+    /// default) packet data is simply off. This is the single source of truth — see
+    /// [`CfgCellInfo::wap_enabled`].
+    pub enabled: bool,
+    /// Source IPv4 address the gateway's responses originate from (the BS "server" address).
+    pub address: [u8; 4],
+    /// UDP/TCP port the gateway listens on (default 9200; 0 is rejected).
+    pub port: u16,
+    /// TTL written into response IP datagrams (default 32; 0 is rejected).
+    pub response_ttl: u8,
+    /// Largest uplink UDP request payload accepted, in bytes (1..=1024).
+    pub max_request_payload_bytes: usize,
+}
+
+/// Serde DTO for `[cell_info.wap_ip]`.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WapIpDto {
+    pub enabled: Option<bool>,
+    pub address: Option<String>,
+    pub port: Option<u16>,
+    pub response_ttl: Option<u8>,
+    pub max_request_payload_bytes: Option<usize>,
+}
+
+/// Parse a dotted-quad IPv4 string (e.g. "10.0.0.1") into four octets.
+fn parse_ipv4_octets(s: Option<&str>) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = s?.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    for (i, part) in parts.iter().enumerate() {
+        out[i] = part.parse().ok()?;
+    }
+    Some(out)
+}
+
 /// Cell re-select parameters sent in D-NWRK-BROADCAST with the neighbour list (EN 300 392-2
 /// clause 18.5): when a radio starts looking for a better cell (threshold) and how much better
 /// a neighbour must be before it moves (hysteresis), for slow and fast reselection. dB, 0-30 in
@@ -219,6 +262,10 @@ pub struct CfgCellInfo {
     /// Configured via `[cell_info.sds_broadcast]`. Uses the same structure as home_mode_display.
     pub sds_broadcast: Option<CfgHomeModeDisplay>,
 
+    /// WAP-IP packet-data gateway, configured via `[cell_info.wap_ip]`. Enabled by presence of the
+    /// sub-section together with its `enabled` flag; must agree with `sndcp_service`.
+    pub wap_ip: Option<CfgWapIp>,
+
     /// Neighbor cells to include in D-NWRK-BROADCAST for cell reselection.
     /// Up to 7 entries. MSs use this list to find alternative cells when signal degrades.
     pub neighbor_cells_ca: Vec<CfgNeighborCellCa>,
@@ -273,6 +320,16 @@ pub struct CfgCellInfo {
     pub dgna_attachment_mode: u8,
 }
 
+impl CfgCellInfo {
+    /// Whether the WAP/SNDCP packet-data gateway is active. This is the single source of truth:
+    /// the runtime gateway and the SNDCP/advanced-link SYSINFO advertisement all derive from it,
+    /// so `[cell_info.wap_ip].enabled` is the one master switch — toggling it can never leave the
+    /// cell advertising a service it does not run, and disabling it can never fail validation.
+    pub fn wap_enabled(&self) -> bool {
+        self.wap_ip.is_some_and(|w| w.enabled)
+    }
+}
+
 #[derive(Default, Deserialize)]
 pub struct CellInfoDto {
     pub main_carrier: u16,
@@ -325,6 +382,9 @@ pub struct CellInfoDto {
 
     /// Supplemental SDS broadcast with custom PID. Enabled by presence of this sub-section.
     pub sds_broadcast: Option<HomeModeDisplayDto>,
+
+    /// WAP-IP packet-data gateway. Enabled by presence of this sub-section plus its `enabled` flag.
+    pub wap_ip: Option<WapIpDto>,
 
     /// Neighbor cells for D-NWRK-BROADCAST. Up to 7 entries.
     /// Parsed separately in parsing.rs from toml::Value to avoid serde flatten conflict.
@@ -428,6 +488,13 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
             protocol_id: h.protocol_id.unwrap_or(220),
             text_coding_scheme: h.text_coding_scheme.unwrap_or(HomeModeDisplaySdsTextCodingScheme::LATIN),
             text: h.text.unwrap_or_default(),
+        }),
+        wap_ip: ci.wap_ip.map(|w| CfgWapIp {
+            enabled: w.enabled.unwrap_or(false),
+            address: parse_ipv4_octets(w.address.as_deref()).unwrap_or([10, 0, 0, 1]),
+            port: w.port.filter(|&p| p != 0).unwrap_or(9200),
+            response_ttl: w.response_ttl.filter(|&t| t != 0).unwrap_or(32),
+            max_request_payload_bytes: w.max_request_payload_bytes.unwrap_or(1024).clamp(1, 1024),
         }),
         neighbor_cells_ca: ci.neighbor_cells_ca,
         hangtime_secs: ci.hangtime_secs.unwrap_or(5).clamp(0, 300),

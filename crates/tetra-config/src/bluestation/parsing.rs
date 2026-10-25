@@ -412,6 +412,15 @@ u_plane_dtx = false
 frame_18_ext = false
 ms_txpwr_max_cell = 4
 subscriber_class = 0xFFFF
+sndcp_service = true
+advanced_link = true
+
+[cell_info.wap_ip]
+enabled = true
+address = "10.0.0.1"
+port = 9200
+response_ttl = 32
+max_request_payload_bytes = 1024
 
 [cell_info.cell_reselect]
 slow_threshold_db = 20
@@ -577,6 +586,12 @@ sds_queue_critical = 128
         assert!(cfg.asterisk.enabled);
         assert_eq!(cfg.asterisk.service_numbers, vec!["600".to_string(), "601".to_string()]);
         assert!(cfg.dapnet.enabled);
+        let wap = cfg.cell.wap_ip.expect("[cell_info.wap_ip] must parse when uncommented");
+        assert!(wap.enabled);
+        assert_eq!(wap.address, [10, 0, 0, 1]);
+        assert_eq!(wap.port, 9200);
+        assert_eq!(wap.response_ttl, 32);
+        assert_eq!(wap.max_request_payload_bytes, 1024);
         assert!(cfg.dapnet.rwth_core_enabled);
         assert_eq!(cfg.dapnet.callout_incident_base, 2);
         assert_eq!(cfg.dapnet.ric_issi_routes.get(&632585), Some(&2632585));
@@ -700,6 +715,48 @@ main_carrier_number = 1586
         // Explicitly rolled back to the legacy MM D-ATTACH path.
         let cfg = from_toml_str(&minimal_toml("dgna_use_ss_facility = false")).expect("parse");
         assert!(!cfg.cell.dgna_use_ss_facility, "false => legacy MM D-ATTACH path");
+    }
+
+    #[test]
+    fn wap_ip_profile_resolves_with_overrides_and_defaults() {
+        let cfg = from_toml_str(&minimal_toml(
+            "sndcp_service = true\nadvanced_link = true\n\n[cell_info.wap_ip]\nenabled = true\naddress = \"10.0.0.5\"\nport = 9201\nresponse_ttl = 16",
+        ))
+        .expect("a consistent WAP profile must parse");
+        let w = cfg.cell.wap_ip.expect("wap_ip resolved");
+        assert!(w.enabled);
+        assert_eq!(w.address, [10, 0, 0, 5]);
+        assert_eq!(w.port, 9201);
+        assert_eq!(w.response_ttl, 16);
+        assert_eq!(w.max_request_payload_bytes, 1024, "default request cap");
+
+        // Omitted fields fall back to the spec defaults.
+        let cfg = from_toml_str(&minimal_toml("sndcp_service = true\nadvanced_link = true\n\n[cell_info.wap_ip]\nenabled = true")).expect("parse");
+        let w = cfg.cell.wap_ip.unwrap();
+        assert_eq!((w.address, w.port, w.response_ttl), ([10, 0, 0, 1], 9200, 32));
+    }
+
+    #[test]
+    fn wap_master_switch_never_fails_to_start() {
+        let validated = |extra: &str| from_toml_str(&minimal_toml(extra)).expect("parses").validate();
+
+        // Regression: turning the gateway off while a stale sndcp_service flag is still set must
+        // NEVER fail validation — disabling a feature can't crash the station at startup.
+        assert!(
+            validated("sndcp_service = true\n\n[cell_info.wap_ip]\nenabled = false").is_ok(),
+            "disabling WAP must never fail validation, even with sndcp_service still true"
+        );
+        // Every other combination is also accepted (the flags are advisory now).
+        assert!(validated("").is_ok(), "both off (default)");
+        assert!(validated("sndcp_service = true").is_ok(), "sndcp_service with no gateway: just off");
+        assert!(validated("[cell_info.wap_ip]\nenabled = true").is_ok(), "enabling needs no other flags");
+
+        // wap_enabled() is the single master switch, derived only from [cell_info.wap_ip].enabled.
+        let on = from_toml_str(&minimal_toml("[cell_info.wap_ip]\nenabled = true")).unwrap();
+        assert!(on.cell.wap_enabled());
+        let off = from_toml_str(&minimal_toml("sndcp_service = true\n\n[cell_info.wap_ip]\nenabled = false")).unwrap();
+        assert!(!off.cell.wap_enabled(), "enabled=false is off regardless of sndcp_service");
+        assert!(!from_toml_str(&minimal_toml("sndcp_service = true")).unwrap().cell.wap_enabled(), "no wap_ip section = off");
     }
 
     #[test]

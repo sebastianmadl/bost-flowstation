@@ -456,6 +456,12 @@ impl StackConfig {
             return Err("ms_txpwr_max_cell must be 0-7 (3 bits)");
         }
 
+        // The WAP/SNDCP gateway is driven solely by `[cell_info.wap_ip].enabled`
+        // (CfgCellInfo::wap_enabled): when on, the cell advertises SNDCP + advanced-link and runs
+        // the gateway; when off it does neither. There is deliberately no cross-field agreement
+        // check here — a stale `sndcp_service`/`advanced_link` flag must never make the station
+        // fail to start (disabling a feature can't be fatal).
+
         // Validate timezone if configured
         if let Some(ref tz) = self.cell.timezone
             && tz.parse::<chrono_tz::Tz>().is_err()
