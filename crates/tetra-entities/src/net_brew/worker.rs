@@ -230,8 +230,9 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
     let cells: Vec<BrewBtsCell> = config
         .cells()
         .into_iter()
-        .filter_map(|(_, cell, _)| {
+        .filter_map(|(id, cell, _)| {
             Some(BrewBtsCell {
+                cell: id.0,
                 carrier: cell.main_carrier,
                 carrier_ext: tetra_config::bluestation::carrier_band_plan(cell)?,
                 location_area: cell.location_area,
@@ -1048,7 +1049,7 @@ password = "x"
             json_of(&msg),
             serde_json::json!({
                 "mcc": 232, "mnc": 5,
-                "cells": [{ "carrier": 1528, "carrier_ext": 264, "location_area": 10 }],
+                "cells": [{ "cell": 0, "carrier": 1528, "carrier_ext": 264, "location_area": 10 }],
                 "capabilities": []
             })
         );
@@ -1056,11 +1057,12 @@ password = "x"
 
     #[test]
     fn bts_info_lists_every_cell_of_a_multi_cell_station() {
-        let cfg = config("\n[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
+        let cfg = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
         let msg = bts_info_message(&cfg.config(), &["bts-info".to_string()]).unwrap();
         let cells = json_of(&msg)["cells"].clone();
         assert_eq!(cells[0]["carrier"], 1528);
         assert_eq!(cells[1]["carrier"], 1530);
+        assert_eq!(cells[1]["cell"], 3, "the [[cells]] id, not the position");
         assert_eq!(cells[1]["location_area"], 11);
         assert_eq!(cells[1]["carrier_ext"], 264);
     }

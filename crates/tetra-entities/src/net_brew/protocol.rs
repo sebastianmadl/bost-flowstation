@@ -775,6 +775,9 @@ pub const BREW_EXT_BTS_INFO: &str = "bts-info";
 /// One cell in a [`BREW_SERVICE_BTS_INFO`] message
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrewBtsCell {
+    /// Cell number within the station (0 = primary, then the `[[cells]]` ids); the server names
+    /// the cell `<login>/<cell>`
+    pub cell: u8,
     pub carrier: u16,
     /// Absolute band plan in the "main carrier number extension" layout, never "same as serving"
     pub carrier_ext: u16,
@@ -782,14 +785,14 @@ pub struct BrewBtsCell {
 }
 
 /// Build a Service (0xf4) BTS info message, NULL-terminated JSON:
-/// `{"mcc":232,"mnc":5,"cells":[{"carrier":1528,"carrier_ext":264,"location_area":1}],"capabilities":[]}`
+/// `{"mcc":232,"mnc":5,"cells":[{"cell":0,"carrier":1528,"carrier_ext":264,"location_area":1}],"capabilities":[]}`
 ///
 /// Not part of Brew as TetraPack / BrandMeister speak it: only send it to a server that offered
 /// [`BREW_EXT_BTS_INFO`].
 pub fn build_service_bts_info(mcc: u16, mnc: u16, cells: &[BrewBtsCell], capabilities: &[&str]) -> Vec<u8> {
     let cells: Vec<serde_json::Value> = cells
         .iter()
-        .map(|c| serde_json::json!({ "carrier": c.carrier, "carrier_ext": c.carrier_ext, "location_area": c.location_area }))
+        .map(|c| serde_json::json!({ "cell": c.cell, "carrier": c.carrier, "carrier_ext": c.carrier_ext, "location_area": c.location_area }))
         .collect();
     let json = serde_json::json!({ "mcc": mcc, "mnc": mnc, "cells": cells, "capabilities": capabilities }).to_string();
     let mut buf = Vec::with_capacity(3 + json.len());
