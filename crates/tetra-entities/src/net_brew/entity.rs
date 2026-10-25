@@ -18,7 +18,7 @@ use crate::net_telemetry::{TelemetryEvent, channel::TelemetrySink};
 use crate::network::transports::NetworkTransport;
 use crate::{MessageQueue, TetraEntityTrait};
 use tetra_config::bluestation::{CfgBrew, SharedConfig};
-use tetra_core::{Sap, TdmaTime, tetra_entities::TetraEntity};
+use tetra_core::{CellId, Sap, TdmaTime, tetra_entities::TetraEntity};
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
 use tetra_saps::{
     SapMsg, SapMsgInner,
@@ -289,6 +289,13 @@ impl BrewEntity {
     /// Multi-cell: let network SDS reach radios registered on any cell of the site.
     pub fn set_site_directory(&mut self, directory: SharedDirectory) {
         self.site_directory = Some(directory);
+    }
+
+    /// Tell the server which cell `issi` registered on: in a multi-cell site the one the site
+    /// directory has it on, otherwise the primary. The worker only sends it where offered.
+    fn report_ms_cell(&self, issi: u32) {
+        let cell = ms_cell(self.site_directory.as_ref(), issi);
+        let _ = self.command_sender.send(BrewCommand::ReportMsCell { issi, cell });
     }
 
     /// True if `issi` is registered on this stack or, in a multi-cell site, on any of its cells.
@@ -728,6 +735,7 @@ impl BrewEntity {
                 if routable && self.connected {
                     tracing::info!("BrewEntity: subscriber register issi={} → REGISTER", issi);
                     let _ = self.command_sender.send(BrewCommand::RegisterSubscriber { issi });
+                    self.report_ms_cell(issi);
                 } else if !routable {
                     tracing::debug!("BrewEntity: subscriber register issi={} (filtered, not sent to Brew)", issi);
                 } else {
@@ -820,6 +828,7 @@ impl BrewEntity {
                 continue;
             }
             let _ = self.command_sender.send(BrewCommand::RegisterSubscriber { issi: *issi });
+            self.report_ms_cell(*issi);
             if groups.is_empty() {
                 tracing::info!("BrewEntity: resync issi={} — registered, no group affiliations", issi);
             } else {
@@ -2347,5 +2356,41 @@ impl Drop for BrewEntity {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
+    }
+}
+
+/// The cell of this station `issi` is on: where the site directory has it in a multi-cell
+/// station, otherwise (or not known there) the primary.
+fn ms_cell(directory: Option<&SharedDirectory>, issi: u32) -> CellId {
+    directory
+        .and_then(|d| d.read().expect("site directory").location(issi))
+        .unwrap_or(CellId::PRIMARY)
+}
+
+#[cfg(test)]
+mod ms_cell_tests {
+    use super::*;
+    use crate::net_site::SiteDirectory;
+    use std::sync::{Arc, RwLock};
+    use tetra_saps::control::brew::MmSubscriberUpdate;
+
+    #[test]
+    fn single_cell_stations_report_the_primary() {
+        assert_eq!(ms_cell(None, 2320001), CellId::PRIMARY);
+    }
+
+    #[test]
+    fn multi_cell_stations_report_where_the_directory_has_the_radio() {
+        let directory: SharedDirectory = Arc::new(RwLock::new(SiteDirectory::default()));
+        let register = MmSubscriberUpdate {
+            issi: 2320001,
+            groups: Vec::new(),
+            action: BrewSubscriberAction::Register,
+        };
+        directory.write().unwrap().apply(CellId(3), &register);
+        assert_eq!(ms_cell(Some(&directory), 2320001), CellId(3));
+        assert_eq!(ms_cell(Some(&directory), 2320002), CellId::PRIMARY, "unknown radio");
+        directory.write().unwrap().apply(CellId(1), &register);
+        assert_eq!(ms_cell(Some(&directory), 2320001), CellId(1), "moved within the station");
     }
 }

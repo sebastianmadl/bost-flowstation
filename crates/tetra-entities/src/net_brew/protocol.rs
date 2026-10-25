@@ -803,6 +803,28 @@ pub fn build_service_bts_info(mcc: u16, mnc: u16, cells: &[BrewBtsCell], capabil
     buf
 }
 
+/// Service type reporting the cell (carrier) a radio registered on (brew-server)
+pub const BREW_SERVICE_MS_CELL: u8 = 0x18;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it accepts [`BREW_SERVICE_MS_CELL`]
+pub const BREW_EXT_MS_CELL: &str = "ms-cell";
+
+/// Build a Service (0xf4) MS cell message, NULL-terminated JSON:
+/// `{"issi":2320001,"carrier":1528,"carrier_ext":264}`. `carrier_ext` is the cell's absolute band
+/// plan, as in [`BREW_SERVICE_BTS_INFO`].
+///
+/// Not part of Brew as TetraPack / BrandMeister speak it: only send it to a server that offered
+/// [`BREW_EXT_MS_CELL`].
+pub fn build_service_ms_cell(issi: u32, carrier: u16, carrier_ext: u16) -> Vec<u8> {
+    let json = serde_json::json!({ "issi": issi, "carrier": carrier, "carrier_ext": carrier_ext }).to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(BREW_SERVICE_MS_CELL);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
+}
+
 /// Build a query subscribers service message
 pub fn build_query_subscribers(issis: &[u32]) -> Vec<u8> {
     let json = serde_json::to_string(issis).unwrap_or_else(|_| "[]".to_string());

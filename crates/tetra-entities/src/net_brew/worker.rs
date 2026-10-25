@@ -11,6 +11,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tetra_config::bluestation::CfgBrew;
 use tetra_config::bluestation::SharedConfig;
 use tetra_config::bluestation::StackConfig;
+use tetra_core::CellId;
 use uuid::Uuid;
 
 use crate::net_brew;
@@ -126,6 +127,10 @@ pub enum BrewCommand {
     /// Register a subscriber (ISSI)
     RegisterSubscriber { issi: u32 },
 
+    /// Tell the server which cell of this station a just registered subscriber is on (only to a
+    /// server that offered `ms-cell`)
+    ReportMsCell { issi: u32, cell: CellId },
+
     /// Deregister a subscriber (ISSI)
     DeregisterSubscriber { issi: u32 },
 
@@ -240,6 +245,21 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
         })
         .collect();
     Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, &[]))
+}
+
+/// SERVICE_MS_CELL placing `issi` on this station's cell `cell`, or `None` when the server did not
+/// offer the `ms-cell` extension (TetraPack and BrandMeister never get it), or the cell is unknown
+/// or has no band-plan code.
+fn ms_cell_message(config: &StackConfig, server_extensions: &[String], issi: u32, cell: CellId) -> Option<Vec<u8>> {
+    if !server_extensions.iter().any(|e| e == BREW_EXT_MS_CELL) {
+        return None;
+    }
+    let (_, info, _) = config.cells().into_iter().find(|(id, _, _)| *id == cell)?;
+    Some(build_service_ms_cell(
+        issi,
+        info.main_carrier,
+        tetra_config::bluestation::carrier_band_plan(info)?,
+    ))
 }
 
 /// Pending SDS header data (from CALL_STATE_SHORT_TRANSFER), awaiting matching FRAME_TYPE_SDS_TRANSFER
@@ -644,6 +664,16 @@ impl<T: NetworkTransport> BrewWorker<T> {
                             tracing::error!("BrewWorker: failed to send DTMF: {}", e);
                         } else {
                             tracing::debug!("Brew: sent DTMF uuid={} bits={}", uuid, length_bits);
+                        }
+                    }
+                    BrewCommand::ReportMsCell { issi, cell } => {
+                        let Some(msg) = ms_cell_message(&self.config.config(), self.transport.server_brew_extensions(), issi, cell) else {
+                            continue;
+                        };
+                        if let Err(e) = self.transport.send_reliable(&msg) {
+                            tracing::error!("BrewWorker: failed to send MS cell for ISSI {}: {}", issi, e);
+                        } else {
+                            tracing::debug!("BrewWorker: sent MS cell issi={} cell={}", issi, cell.0);
                         }
                     }
                     BrewCommand::SendRssiUpdate { issi, rssi_dbfs } => {
@@ -1065,6 +1095,72 @@ password = "x"
         assert_eq!(cells[1]["cell"], 3, "the [[cells]] id, not the position");
         assert_eq!(cells[1]["location_area"], 11);
         assert_eq!(cells[1]["carrier_ext"], 264);
+    }
+
+    #[test]
+    fn ms_cell_names_the_cell_by_carrier_and_band_plan() {
+        let cfg = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
+        let offered = ["bts-info".to_string(), "ms-cell".to_string()];
+        let msg = ms_cell_message(&cfg.config(), &offered, 2320001, CellId(3)).unwrap();
+        assert_eq!(&msg[..2], &[BREW_CLASS_SERVICE, BREW_SERVICE_MS_CELL]);
+        assert_eq!(msg.last(), Some(&0), "NULL-terminated");
+        let json: serde_json::Value = serde_json::from_slice(&msg[2..msg.len() - 1]).unwrap();
+        assert_eq!(json, serde_json::json!({ "issi": 2320001, "carrier": 1530, "carrier_ext": 264 }));
+        let primary = ms_cell_message(&cfg.config(), &offered, 7, CellId::PRIMARY).unwrap();
+        assert!(String::from_utf8_lossy(&primary).contains("\"carrier\":1528"));
+        assert!(ms_cell_message(&cfg.config(), &offered, 7, CellId(5)).is_none(), "no such cell");
+    }
+
+    #[test]
+    fn ms_cell_only_for_a_server_that_offers_it() {
+        let cfg = config("").config();
+        assert!(
+            ms_cell_message(&cfg, &[], 7, CellId::PRIMARY).is_none(),
+            "TetraPack / BrandMeister offer no extensions"
+        );
+        assert!(
+            ms_cell_message(&cfg, &["bts-info".to_string()], 7, CellId::PRIMARY).is_none(),
+            "a server with bts-info only (milestone 2) does not get it"
+        );
+    }
+
+    /// Runs the worker's message loop over `commands` (ending with a disconnect) and returns what
+    /// it sent.
+    fn run_commands(transport: MockTransport, commands: Vec<BrewCommand>) -> Vec<Vec<u8>> {
+        let (event_tx, _event_rx) = bounded(16);
+        let (command_tx, command_rx) = bounded(16);
+        let mut worker = BrewWorker::new(config(""), event_tx, command_rx, transport);
+        worker.transport.connect().unwrap();
+        for c in commands {
+            command_tx.send(c).unwrap();
+        }
+        command_tx.send(BrewCommand::Disconnect).unwrap();
+        worker.message_loop().unwrap();
+        worker.transport.sent_payloads().to_vec()
+    }
+
+    #[test]
+    fn registration_is_followed_by_the_cell_only_where_offered() {
+        let commands = || {
+            vec![
+                BrewCommand::RegisterSubscriber { issi: 7 },
+                BrewCommand::ReportMsCell {
+                    issi: 7,
+                    cell: CellId::PRIMARY,
+                },
+            ]
+        };
+        let offered = run_commands(MockTransport::new().with_brew_extensions(&["bts-info", "ms-cell"]), commands());
+        let kinds: Vec<(u8, u8)> = offered.iter().map(|p| (p[0], p[1])).collect();
+        assert_eq!(kinds[0].0, BREW_CLASS_SUBSCRIBER);
+        assert_eq!(kinds[1], (BREW_CLASS_SERVICE, BREW_SERVICE_MS_CELL));
+
+        let plain = run_commands(MockTransport::new(), commands());
+        assert!(
+            plain.iter().all(|p| p[0] != BREW_CLASS_SERVICE),
+            "nothing new towards a plain Brew server"
+        );
+        assert_eq!(plain.len(), offered.len() - 1, "otherwise the same messages");
     }
 
     #[test]
