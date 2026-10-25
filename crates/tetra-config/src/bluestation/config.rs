@@ -144,7 +144,7 @@ const SIBLING_CELL_RESELECTION_TYPES: u8 = 3;
 
 /// "Main carrier number extension" for a neighbour whose band plan differs from the serving
 /// cell's (otherwise a radio would look for the neighbour's carrier number on the serving cell's
-/// plan): frequency band (4 bits), offset (2), duplex spacing (3), reverse operation (1).
+/// plan). See [`carrier_band_plan`].
 fn carrier_number_extension(neighbour: &CfgCellInfo, serving: &CfgCellInfo) -> Option<u16> {
     let same_plan = neighbour.freq_band == serving.freq_band
         && neighbour.freq_offset_hz == serving.freq_offset_hz
@@ -153,12 +153,20 @@ fn carrier_number_extension(neighbour: &CfgCellInfo, serving: &CfgCellInfo) -> O
     if same_plan {
         return None;
     }
-    let offset_id = FreqInfo::freq_offset_hz_to_id(neighbour.freq_offset_hz)?;
+    carrier_band_plan(neighbour)
+}
+
+/// A cell's band plan in the layout of the "main carrier number extension": frequency band
+/// (4 bits), offset (2), duplex spacing (3), reverse operation (1). Together with the main carrier
+/// number it names the cell's frequency independently of any other cell's plan. `None` when the
+/// frequency offset has no code.
+pub fn carrier_band_plan(cell: &CfgCellInfo) -> Option<u16> {
+    let offset_id = FreqInfo::freq_offset_hz_to_id(cell.freq_offset_hz)?;
     Some(
-        ((neighbour.freq_band as u16 & 0xF) << 6)
+        ((cell.freq_band as u16 & 0xF) << 6)
             | ((offset_id as u16 & 0x3) << 4)
-            | ((neighbour.duplex_spacing_id as u16 & 0x7) << 1)
-            | neighbour.reverse_operation as u16,
+            | ((cell.duplex_spacing_id as u16 & 0x7) << 1)
+            | cell.reverse_operation as u16,
     )
 }
 

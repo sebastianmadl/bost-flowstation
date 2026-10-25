@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use tetra_config::bluestation::CfgBrew;
 use tetra_config::bluestation::SharedConfig;
+use tetra_config::bluestation::StackConfig;
 use uuid::Uuid;
 
 use crate::net_brew;
@@ -219,6 +220,27 @@ fn offer_event(sender: &Sender<BrewEvent>, event: BrewEvent, backpressure: Durat
 
 // ─── Worker ───────────────────────────────────────────────────────
 
+/// SERVICE_BTS_INFO announcing every cell of this station (one Brew connection serves them all),
+/// or `None` when the server did not offer the `bts-info` extension: TetraPack and BrandMeister
+/// never get it. A cell whose frequency offset has no band-plan code is left out.
+fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Option<Vec<u8>> {
+    if !server_extensions.iter().any(|e| e == BREW_EXT_BTS_INFO) {
+        return None;
+    }
+    let cells: Vec<BrewBtsCell> = config
+        .cells()
+        .into_iter()
+        .filter_map(|(_, cell, _)| {
+            Some(BrewBtsCell {
+                carrier: cell.main_carrier,
+                carrier_ext: tetra_config::bluestation::carrier_band_plan(cell)?,
+                location_area: cell.location_area,
+            })
+        })
+        .collect();
+    Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, &[]))
+}
+
 /// Pending SDS header data (from CALL_STATE_SHORT_TRANSFER), awaiting matching FRAME_TYPE_SDS_TRANSFER
 #[derive(Debug)]
 struct PendingSds {
@@ -313,6 +335,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
                     tracing::info!("BrewWorker: transport connected");
                     let server_version = self.transport.server_brew_version();
                     self.send_event(BrewEvent::Connected { server_version });
+                    self.announce_cells();
                 }
                 Err(e) => {
                     tracing::error!(
@@ -342,6 +365,19 @@ impl<T: NetworkTransport> BrewWorker<T> {
                     std::thread::sleep(self.brew_config.reconnect_delay);
                 }
             }
+        }
+    }
+
+    /// Tell the server which cells this station serves, if it understands that (see
+    /// [`bts_info_message`]).
+    fn announce_cells(&mut self) {
+        let Some(msg) = bts_info_message(&self.config.config(), self.transport.server_brew_extensions()) else {
+            return;
+        };
+        if let Err(e) = self.transport.send_reliable(&msg) {
+            tracing::error!("BrewWorker: failed to send BTS info: {}", e);
+        } else {
+            tracing::info!("BrewWorker: announced cells to the server (BTS info)");
         }
     }
 
@@ -928,6 +964,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::transports::mock::MockTransport;
     use crossbeam_channel::bounded;
 
     fn voice() -> BrewEvent {
@@ -963,5 +1000,95 @@ mod tests {
         // Full: with no backpressure window it is reported as undelivered rather than queued.
         assert!(offer_event(&tx, signalling(), Duration::ZERO).is_err());
         assert_eq!(rx.len(), 1);
+    }
+
+    const CONFIG: &str = r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "None"
+
+[net_info]
+mcc = 232
+mnc = 5
+
+[cell_info]
+main_carrier = 1528
+freq_band = 4
+freq_offset = 0
+duplex_spacing = 4
+reverse_operation = false
+location_area = 10
+
+[brew]
+host = "brew.example"
+port = 3000
+tls = false
+username = 1
+password = "x"
+"#;
+
+    fn config(extra: &str) -> SharedConfig {
+        let cfg = tetra_config::bluestation::parsing::from_toml_str(&format!("{CONFIG}{extra}")).expect("test config parses");
+        SharedConfig::from_parts(cfg, None)
+    }
+
+    fn json_of(msg: &[u8]) -> serde_json::Value {
+        assert_eq!(&msg[..2], &[BREW_CLASS_SERVICE, BREW_SERVICE_BTS_INFO]);
+        assert_eq!(msg.last(), Some(&0), "NULL-terminated");
+        serde_json::from_slice(&msg[2..msg.len() - 1]).unwrap()
+    }
+
+    #[test]
+    fn bts_info_lists_the_cell_with_its_absolute_band_plan() {
+        let msg = bts_info_message(&config("").config(), &["bts-info".to_string()]).unwrap();
+        // band 4, offset 0, duplex spacing 4, no reverse operation: (4 << 6) | (4 << 1)
+        assert_eq!(
+            json_of(&msg),
+            serde_json::json!({
+                "mcc": 232, "mnc": 5,
+                "cells": [{ "carrier": 1528, "carrier_ext": 264, "location_area": 10 }],
+                "capabilities": []
+            })
+        );
+    }
+
+    #[test]
+    fn bts_info_lists_every_cell_of_a_multi_cell_station() {
+        let cfg = config("\n[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
+        let msg = bts_info_message(&cfg.config(), &["bts-info".to_string()]).unwrap();
+        let cells = json_of(&msg)["cells"].clone();
+        assert_eq!(cells[0]["carrier"], 1528);
+        assert_eq!(cells[1]["carrier"], 1530);
+        assert_eq!(cells[1]["location_area"], 11);
+        assert_eq!(cells[1]["carrier_ext"], 264);
+    }
+
+    #[test]
+    fn bts_info_only_for_a_server_that_offers_it() {
+        let cfg = config("").config();
+        assert!(bts_info_message(&cfg, &[]).is_none(), "TetraPack / BrandMeister offer no extensions");
+        assert!(bts_info_message(&cfg, &["something-else".to_string()]).is_none());
+    }
+
+    fn worker(transport: MockTransport) -> BrewWorker<MockTransport> {
+        let (event_tx, _event_rx) = bounded(16);
+        let (_command_tx, command_rx) = bounded(16);
+        BrewWorker::new(config(""), event_tx, command_rx, transport)
+    }
+
+    #[test]
+    fn connect_announces_cells_only_where_offered() {
+        let mut offered = worker(MockTransport::new().with_brew_extensions(&["bts-info"]));
+        offered.transport.connect().unwrap();
+        offered.announce_cells();
+        assert_eq!(offered.transport.sent_payloads().len(), 1);
+        assert_eq!(json_of(&offered.transport.sent_payloads()[0])["cells"][0]["carrier"], 1528);
+
+        let mut plain = worker(MockTransport::new());
+        plain.transport.connect().unwrap();
+        plain.announce_cells();
+        assert!(plain.transport.sent_payloads().is_empty(), "nothing new towards a plain Brew server");
     }
 }
