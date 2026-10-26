@@ -35,6 +35,7 @@ use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
 use tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocationDemand;
 use tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink;
+use tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIdentity;
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
 use tetra_saps::control::enums::{circuit_mode_type::CircuitModeType, communication_type::CommunicationType};
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
@@ -353,6 +354,20 @@ fn location_update_pdu(issi: u32, lu_type: LocationUpdateType, groups: &[u32]) -
     }
 }
 
+/// U-ATTACH/DETACH GROUP IDENTITY with "detach all and attach" (table 16.49), as a radio sends
+/// its group report.
+fn u_attach_detach_all(issi: u32, groups: &[u32]) -> SapMsg {
+    let lu = location_update_pdu(issi, LocationUpdateType::DemandLocationUpdating, groups);
+    let pdu = UAttachDetachGroupIdentity {
+        group_identity_report: false,
+        group_identity_attach_detach_mode: true,
+        group_report_response: None,
+        group_identity_uplink: lu.group_identity_location_demand.and_then(|d| d.group_identity_uplink),
+        proprietary: None,
+    };
+    uplink(issi, MleProtocolDiscriminator::Mm, |b| pdu.to_bitbuf(b).unwrap())
+}
+
 fn u_setup(issi: u32, gssi: u32) -> SapMsg {
     let pdu = USetup {
         area_selection: 0,
@@ -462,6 +477,13 @@ fn restore_ack(air: &[SapMsg], issi: u32) -> Option<u16> {
 
 fn restore_fail(air: &[SapMsg], issi: u32) -> bool {
     air_to(air, issi).iter().any(|bits| bits.starts_with(&format!("{PD_MLE}101")))
+}
+
+fn group_release_sent(air: &[SapMsg], gssi: u32) -> bool {
+    air_to(air, gssi).iter().any(|bits| {
+        bits.strip_prefix(PD_CMCE)
+            .is_some_and(|rest| BitBuffer::from_bitstr(rest).peek_bits(5) == Some(CmcePduTypeDl::DRelease.into_raw()))
+    })
 }
 
 fn group_setup_call_id(air: &[SapMsg], gssi: u32) -> Option<u16> {
@@ -858,4 +880,58 @@ fn sim_forwarded_registration_rejected_by_the_target_mm() {
             assert_eq!(sim.relay.location[&issi], from, "nothing moved");
         }
     }
+}
+
+/// Milestone 4 field test case A: the radio moves to a station where nobody listens to the running
+/// call and does not restore it. It answers the station's D-LOCATION UPDATE COMMAND with a demand
+/// location update (detach all and attach, its group), which brings the call up there; then it
+/// sends its own roaming location update and the same group report again as U-ATTACH/DETACH
+/// GROUP IDENTITY (table 16.49). The call must keep running on the station (before: MM deaffiliated
+/// the group for a moment, CMCE sent D-RELEASE and set the call up again with a new identifier).
+#[test]
+fn sim_group_report_after_reselection_keeps_the_call_running() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let mut sim = Sim::new(&las, &EXTENSIONS);
+
+    // Group g's members sit on stations g and g + 5, so the other eight stations have no listener.
+    let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
+    for &(issi, st, gssi) in &radios {
+        sim.register(st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    }
+
+    let mut moved = 0;
+    for (g, gssi) in GROUPS.into_iter().enumerate() {
+        sim.clear_air();
+        let &(talker, _, _) = radios.iter().find(|(_, _, grp)| *grp == gssi).unwrap();
+        let st = sim.relay.location[&talker];
+        let session = sim.start_call(st, talker, gssi);
+        sim.steps(20);
+
+        let mut targets = (0..STATIONS).filter(|s| s % 5 != g);
+        for &(issi, _, grp) in &radios {
+            if grp != gssi || issi == talker {
+                continue;
+            }
+            let to = targets.next().expect("a free station per listener");
+            assert_eq!(sim.local_call_id(to, gssi), None, "nobody on station {to} listened before");
+
+            let mut lu = location_update_pdu(issi, LocationUpdateType::DemandLocationUpdating, &[gssi]);
+            lu.group_identity_location_demand.as_mut().unwrap().group_identity_attach_detach_mode = 1;
+            sim.submit(to, uplink(issi, MleProtocolDiscriminator::Mm, |b| lu.to_bitbuf(b).unwrap()));
+            sim.run_until(&format!("station {to} sets the call on {gssi} up for ISSI {issi}"), |s| {
+                s.local_call_id(to, gssi).is_some()
+            });
+            let call_id = sim.local_call_id(to, gssi);
+
+            sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[]);
+            sim.submit(to, u_attach_detach_all(issi, &[gssi]));
+            sim.steps(100);
+            assert!(!group_release_sent(&sim.stations[to].air, gssi), "station {to} released the call on {gssi}");
+            assert_eq!(sim.local_call_id(to, gssi), call_id, "station {to} kept the call identifier");
+            assert!(sim.relay.calls.contains_key(&session), "the over on {gssi} still runs");
+            moved += 1;
+        }
+        sim.end_call(st, talker, gssi, session);
+    }
+    assert!(moved >= 25, "only {moved} radios exercised");
 }

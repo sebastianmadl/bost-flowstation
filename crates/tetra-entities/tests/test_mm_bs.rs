@@ -1255,3 +1255,126 @@ fn test_moved_to_sibling_cell_drops_registration_silently() {
         "CMCE learns the radio is gone (drops its listener counts)"
     );
 }
+
+// ── Detach all + attach (group report) ───────────────────────────────────────────────────────
+
+fn attach_entry(gssi: u32) -> tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink {
+    tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink {
+        class_of_usage: Some(4),
+        group_identity_detachment_uplink: None,
+        gssi: Some(gssi),
+        address_extension: None,
+        vgssi: None,
+    }
+}
+
+fn submit_mm_uplink(test: &mut ComponentTest, issi: u32, write: impl FnOnce(&mut BitBuffer)) {
+    let mut sdu = BitBuffer::new_autoexpand(64);
+    write(&mut sdu);
+    sdu.seek(0);
+    test.submit_message(SapMsg {
+        sap: Sap::LmmSap,
+        src: TetraEntity::Mle,
+        dest: TetraEntity::Mm,
+        msg: SapMsgInner::LmmMleUnitdataInd(LmmMleUnitdataInd {
+            sdu,
+            handle: 0,
+            received_address: TetraAddress::issi(issi),
+        }),
+    });
+    test.run_stack(Some(2));
+}
+
+/// Location update of `issi` attaching `groups`; `detach_all` sets attach/detach mode 1.
+fn submit_location_update_with_groups(test: &mut ComponentTest, issi: u32, lu_type: LocationUpdateType, detach_all: bool, groups: &[u32]) {
+    let demand = ULocationUpdateDemand {
+        location_update_type: lu_type,
+        request_to_append_la: false,
+        cipher_control: false,
+        ciphering_parameters: None,
+        class_of_ms: None,
+        energy_saving_mode: None,
+        la_information: None,
+        ssi: Some(issi as u64),
+        address_extension: None,
+        group_identity_location_demand: Some(tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocationDemand {
+            group_identity_attach_detach_mode: detach_all as u8,
+            group_identity_uplink: Some(groups.iter().map(|&g| attach_entry(g)).collect()),
+        }),
+        group_report_response: None,
+        authentication_uplink: None,
+        extended_capabilities: None,
+        proprietary: None,
+    };
+    submit_mm_uplink(test, issi, |b| demand.to_bitbuf(b).expect("serialize U-LOCATION-UPDATE-DEMAND"));
+}
+
+fn submit_attach_detach_all(test: &mut ComponentTest, issi: u32, groups: &[u32]) {
+    let pdu = tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIdentity {
+        group_identity_report: false,
+        group_identity_attach_detach_mode: true,
+        group_report_response: None,
+        group_identity_uplink: Some(groups.iter().map(|&g| attach_entry(g)).collect()),
+        proprietary: None,
+    };
+    submit_mm_uplink(test, issi, |b| pdu.to_bitbuf(b).expect("serialize U-ATTACH/DETACH GROUP IDENTITY"));
+}
+
+/// Subscriber updates MM sent towards CMCE: (action, groups).
+fn subscriber_updates(msgs: &[SapMsg]) -> Vec<(BrewSubscriberAction, Vec<u32>)> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::MmSubscriberUpdate(u) if m.dest == TetraEntity::Cmce => Some((u.action, u.groups.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mm_with_cmce_sink() -> ComponentTest {
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime::default()));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+    test
+}
+
+/// The group report a radio sends after D-LOCATION UPDATE COMMAND re-attaches its groups with
+/// "detach all and attach" (TS 100 392-2 clause 16.4.3, table 16.49). A group it attaches again
+/// must stay affiliated: deaffiliating it for a moment releases a running call to it (seen in the
+/// milestone 4 field test, D-RELEASE on air and a new call identifier).
+#[test]
+fn test_detach_all_attach_keeps_reattached_group_affiliated() {
+    debug::setup_logging_verbose();
+    const ISSI: u32 = 2320972;
+    let mut test = mm_with_cmce_sink();
+    submit_location_update_with_groups(&mut test, ISSI, LocationUpdateType::RoamingLocationUpdating, false, &[9, 10]);
+    test.dump_sinks();
+
+    submit_attach_detach_all(&mut test, ISSI, &[9, 11]);
+    let updates = subscriber_updates(&test.dump_sinks());
+    let deaffiliated: Vec<u32> = updates
+        .iter()
+        .filter(|(a, _)| *a == BrewSubscriberAction::Deaffiliate)
+        .flat_map(|(_, g)| g.clone())
+        .collect();
+    assert_eq!(deaffiliated, vec![10], "only the group the radio dropped, got {updates:?}");
+    assert!(updates.iter().any(|(a, g)| *a == BrewSubscriberAction::Affiliate && g.contains(&11)));
+    let attached = test.config.state_read().subscribers.attached_groups_of(ISSI);
+    assert!(attached.contains(&9) && attached.contains(&11) && !attached.contains(&10));
+}
+
+/// Same for a location update with attach/detach mode 1 (the answer to D-LOCATION UPDATE COMMAND).
+#[test]
+fn test_location_update_detach_all_keeps_reattached_group_affiliated() {
+    debug::setup_logging_verbose();
+    const ISSI: u32 = 2320972;
+    let mut test = mm_with_cmce_sink();
+    submit_location_update_with_groups(&mut test, ISSI, LocationUpdateType::RoamingLocationUpdating, false, &[9]);
+    test.dump_sinks();
+
+    submit_location_update_with_groups(&mut test, ISSI, LocationUpdateType::DemandLocationUpdating, true, &[9]);
+    let updates = subscriber_updates(&test.dump_sinks());
+    assert!(
+        !updates.iter().any(|(a, _)| *a == BrewSubscriberAction::Deaffiliate),
+        "re-attached group must not be deaffiliated, got {updates:?}"
+    );
+    assert!(test.config.state_read().subscribers.attached_groups_of(ISSI).contains(&9));
+}

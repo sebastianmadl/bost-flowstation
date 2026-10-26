@@ -387,6 +387,30 @@ impl MmBs {
         Self::send_d_location_update_command(queue, issi, 0);
     }
 
+    /// Finish a "detach all currently attached group identities and attach group identities
+    /// defined in the group identity uplink element" (TS 100 392-2 table 16.49): only the
+    /// groups the MS had before and does not hold after the attach are deaffiliated. A group
+    /// it re-attaches stays affiliated throughout, so a running call to it is not released
+    /// (a group report re-attaches every group this way, clauses 16.4.3 and 16.8.3).
+    fn deaffiliate_groups_left_after_detach_all(&mut self, queue: &mut MessageQueue, issi: u32, prior_groups: Vec<u32>) {
+        let attached: HashSet<u32> = self
+            .client_mgr
+            .get_client_by_issi(issi)
+            .map(|client| client.groups.iter().copied().collect())
+            .unwrap_or_default();
+        let left: Vec<u32> = prior_groups.into_iter().filter(|gssi| !attached.contains(gssi)).collect();
+        if left.is_empty() {
+            return;
+        }
+        {
+            let mut state = self.config.state_write();
+            for &gssi in &left {
+                state.subscribers.deaffiliate(issi, gssi);
+            }
+        }
+        self.emit_subscriber_update(queue, issi, left, BrewSubscriberAction::Deaffiliate);
+    }
+
     fn emit_subscriber_update(&self, queue: &mut MessageQueue, issi: u32, groups: Vec<u32>, action: BrewSubscriberAction) {
         // If brew is active, forward subscriber updates to the Brew entity.
         // Register/Deregister must always be sent for brew-routable ISSIs,
@@ -833,6 +857,7 @@ impl MmBs {
             // ETSI Table 16.49 (clause 16.10.17): mode=1 means "detach all currently
             // attached group identities and attach group identities defined in the
             // group identity uplink element."
+            let mut detached_prior = Vec::new();
             if gild.group_identity_attach_detach_mode == 1 {
                 let prior_groups: Vec<u32> = self
                     .client_mgr
@@ -841,14 +866,8 @@ impl MmBs {
                     .unwrap_or_default();
                 if let Err(e) = self.client_mgr.client_detach_all_groups(issi) {
                     tracing::warn!("Failed detaching all groups for MS {}: {:?}", issi, e);
-                } else if !prior_groups.is_empty() {
-                    {
-                        let mut state = self.config.state_write();
-                        for &gssi in &prior_groups {
-                            state.subscribers.deaffiliate(issi, gssi);
-                        }
-                    }
-                    self.emit_subscriber_update(queue, issi, prior_groups, BrewSubscriberAction::Deaffiliate);
+                } else {
+                    detached_prior = prior_groups;
                 }
             }
 
@@ -858,6 +877,7 @@ impl MmBs {
             } else {
                 None
             };
+            self.deaffiliate_groups_left_after_detach_all(queue, issi, detached_prior);
             let gila = GroupIdentityLocationAccept {
                 group_identity_accept_reject: 0, // Accept
                 group_identity_downlink: accepted_groups,
@@ -1342,6 +1362,7 @@ impl MmBs {
         }
 
         // If group_identity_attach_detach_mode == 1, we first detach all groups
+        let mut detached_prior = Vec::new();
         if pdu.group_identity_attach_detach_mode == true {
             if !self.client_mgr.client_is_known(issi) {
                 // Client unknown (e.g. never registered via location update).
@@ -1367,17 +1388,7 @@ impl MmBs {
                     .map(|client| client.groups.iter().copied().collect())
                     .unwrap_or_default();
                 match self.client_mgr.client_detach_all_groups(issi) {
-                    Ok(_) => {
-                        if !prior_groups.is_empty() {
-                            {
-                                let mut state = self.config.state_write();
-                                for &gssi in &prior_groups {
-                                    state.subscribers.deaffiliate(issi, gssi);
-                                }
-                            }
-                            self.emit_subscriber_update(queue, issi, prior_groups, BrewSubscriberAction::Deaffiliate);
-                        }
-                    }
+                    Ok(_) => detached_prior = prior_groups,
                     Err(e) => {
                         tracing::warn!("Failed detaching all groups for MS {}: {:?}", issi, e);
                         return;
@@ -1468,6 +1479,7 @@ impl MmBs {
 
         // Try to attach to requested groups, and retrieve list of accepted GroupIdentityDownlink elements
         let accepted_gid = self.try_attach_detach_groups(queue, issi, &giu_clamped);
+        self.deaffiliate_groups_left_after_detach_all(queue, issi, detached_prior);
 
         // Group affiliations changed — persist for restart recovery (debounced).
         self.recovery_mark_dirty();
