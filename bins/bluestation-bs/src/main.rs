@@ -548,8 +548,16 @@ fn main() {
     // Multi-cell: every cell advertises its siblings as neighbours for reselection.
     stack_cfg.add_sibling_neighbours();
 
-    // Build immutable, cheaply clonable SharedConfig and build the base station stack
-    let mut cfg = SharedConfig::from_parts(stack_cfg, None);
+    // Build immutable, cheaply clonable SharedConfig and build the base station stack. The
+    // primary config was already parsed+validated by load_config_with_fallback, so this should
+    // not fail; exit cleanly rather than panic if it somehow does.
+    let mut cfg = match SharedConfig::try_from_parts(stack_cfg, None) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ERROR: Invalid stack configuration: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // If the dashboard OR Telegram alerts are enabled, set up the log capture channel BEFORE
     // logging initialises (Telegram forwards WARN/ERROR lines as its critical-status catch-all).
@@ -605,7 +613,17 @@ fn main() {
         stack_config
             .extra_cells
             .iter()
-            .filter_map(|c| Some((c.id, SharedConfig::from_parts(stack_config.for_extra_cell(c.id)?, None))))
+            .filter_map(|c| {
+                let cell_cfg = stack_config.for_extra_cell(c.id)?;
+                // A bad extra cell must not crash the whole station — skip it with a warning.
+                match SharedConfig::try_from_parts(cell_cfg, None) {
+                    Ok(sc) => Some((c.id, sc)),
+                    Err(e) => {
+                        eprintln!("WARNING: skipping extra cell {:?}: {e}", c.id);
+                        None
+                    }
+                }
+            })
             .collect()
     };
     tetra_entities::net_site::register_extra_cells(extra_cell_cfgs.clone());
@@ -799,6 +817,7 @@ fn main() {
                     use tetra_entities::health::registry as health_registry;
                     use tetra_entities::net_geoalarm::parse_lip_position_text;
                     use tetra_entities::net_telemetry::TelemetryEvent;
+                    use tetra_entities::radio_directory;
                     // Approximate attached-radio count, maintained from registration telemetry, fed to
                     // the health registry (Radios domain). Re-registrations of an already-known radio
                     // don't emit MsRegistration, so increment/decrement stays balanced.
@@ -809,16 +828,24 @@ fn main() {
                                 // Feed the lite health registry (cheap, before the fan-out clones).
                                 match &event {
                                     TelemetryEvent::BrewConnected { connected, .. } => health_registry().set_brew_up(*connected),
-                                    TelemetryEvent::MsRegistration { .. } => {
+                                    TelemetryEvent::MsRegistration { issi } => {
                                         radio_count += 1;
                                         health_registry().set_registered_radios(radio_count);
                                         health_registry().note_radio_activity();
+                                        radio_directory::on_register(*issi);
                                     }
-                                    TelemetryEvent::MsDeregistration { .. } | TelemetryEvent::MsTimeoutDrop { .. } => {
+                                    TelemetryEvent::MsDeregistration { issi } | TelemetryEvent::MsTimeoutDrop { issi } => {
                                         radio_count = radio_count.saturating_sub(1);
                                         health_registry().set_registered_radios(radio_count);
+                                        radio_directory::on_deregister(*issi);
                                     }
-                                    TelemetryEvent::MsRssi { .. } => health_registry().note_radio_activity(),
+                                    TelemetryEvent::MsRssi { issi, rssi_dbfs } => {
+                                        health_registry().note_radio_activity();
+                                        radio_directory::on_rssi(*issi, *rssi_dbfs);
+                                    }
+                                    TelemetryEvent::MsGroupsSnapshot { issi, gssis } => radio_directory::set_groups(*issi, gssis),
+                                    TelemetryEvent::MsGroupAttach { issi, gssis } => radio_directory::attach_groups(*issi, gssis),
+                                    TelemetryEvent::MsGroupDetach { issi, gssis } => radio_directory::detach_groups(*issi, gssis),
                                     TelemetryEvent::SdsLog { .. } => health_registry().note_sds(),
                                     _ => {}
                                 }
