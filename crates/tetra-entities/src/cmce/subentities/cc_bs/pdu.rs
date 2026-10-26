@@ -16,6 +16,8 @@ impl CcBsSubentity {
             ul_slot_preempted_issi: HashMap::new(),
             telemetry: None,
             ambience_armed: HashMap::new(),
+            deferred_restores: Vec::new(),
+            restore_listeners: HashSet::new(),
         }
     }
 
@@ -323,8 +325,12 @@ impl CcBsSubentity {
         Self::build_d_disconnect(d_setup_pdu.call_identifier, disconnect_cause)
     }
 
+    /// `call_identifier` is the one the MS restores with; `new_call_identifier` is this cell's,
+    /// when it differs (TS 100 392-2 clauses 14.7.1.3 and 14.5.2.2.4: the MS uses the new one
+    /// in all later signalling).
     pub(super) fn build_d_call_restore(
         call_identifier: u16,
+        new_call_identifier: Option<u16>,
         transmission_grant: TransmissionGrant,
         call_status: Option<CallStatus>,
     ) -> BitBuffer {
@@ -333,7 +339,7 @@ impl CcBsSubentity {
             transmission_grant: transmission_grant.into_raw() as u8,
             transmission_request_permission: false,
             reset_call_time_out_timer_t310_: true,
-            new_call_identifier: None,
+            new_call_identifier: new_call_identifier.map(u64::from),
             call_time_out: None,
             call_status: call_status.map(CallStatus::into_raw),
             modify: None,
@@ -519,6 +525,11 @@ impl CcBsSubentity {
                 tracing::info!("CMCE: subscriber register issi={} known={}", issi, known);
             }
             BrewSubscriberAction::Deregister => {
+                self.deferred_restores.retain(|r| r.sender.ssi != issi);
+                let restored: Vec<u32> = self.restore_listeners.iter().filter(|(i, _)| *i == issi).map(|(_, g)| *g).collect();
+                for gssi in restored {
+                    self.drop_restore_listener(queue, issi, gssi);
+                }
                 if let Some(existing) = self.subscriber_groups.remove(&issi) {
                     for gssi in existing {
                         self.dec_group_listener(gssi);
@@ -540,6 +551,12 @@ impl CcBsSubentity {
                     }
                 }
                 for gssi in &new_groups {
+                    // A restore already counted this MS for the group: MM's affiliation takes
+                    // the count over instead of adding a second one.
+                    if self.restore_listeners.remove(&(issi, *gssi)) {
+                        tracing::debug!("CMCE: affiliation of issi={} to gssi={} replaces its restore listener", issi, gssi);
+                        continue;
+                    }
                     let first_listener = !self.has_listener(*gssi);
                     self.inc_group_listener(*gssi);
                     // Promote Brew pending inbound once the first local ear appears.
@@ -1036,8 +1053,13 @@ impl CcBsSubentity {
 
     /// Release a group call: send D-RELEASE, close circuits, clean up state
     pub(super) fn release_group_call(&mut self, queue: &mut MessageQueue, call_id: u16, disconnect_cause: DisconnectCause) {
+        let mut released_gssi = None;
         if let Some(call) = self.active_calls.get_mut(&call_id) {
             call.begin_release(disconnect_cause);
+            released_gssi = Some(call.dest_gssi);
+        }
+        if let Some(gssi) = released_gssi {
+            self.drop_restore_listeners_for_group(gssi);
         }
 
         let Some(cached) = self.cached_setups.get(&call_id) else {

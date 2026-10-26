@@ -41,8 +41,13 @@ the native codec). Suggested test with two Pluto+ and Brew enabled, in this orde
 
 - Bit layout from our reading of EN 300 392-2 (verify on a terminal): the 16-bit cell re-select
   parameters (slow thr | fast thr | slow hyst | fast hyst, 2 dB units), the neighbour main carrier
-  number extension (band 4 | offset 2 | duplex 3 | reverse 1), D-NEW-CELL channel command valid = 1,
-  fail causes sent as 0, `cell_reselection_types_supported` = 3 meaning "both".
+  number extension (band 4 | offset 2 | duplex 3 | reverse 1). Checked against TS 100 392-2 V3.10.1:
+  D-NEW-CELL channel command valid 1 = change channel immediately (18.5.6); D-RESTORE-FAIL fail cause
+  3 = restoration cannot be done on cell (18.3.4.7, 18.5.7); D-PREPARE-FAIL fail cause 0 = temporary
+  break in service; `cell_reselection_types_supported` (table 18.22) means 0 forward registration not
+  supported, 1 not supported + expedited cell reselection recommended, 2 supported, 3 supported +
+  expedited recommended. It does not select announced or unannounced reselection; the auto
+  neighbours' 3 means "forward registration supported, expedited recommended".
 - Voice between cells: playout buffer depth / latency (reuses Brew's `VoiceJitterBuffer`).
 - Hangtime handovers between cells (a cell's CMCE handling a network call start while its own call
   hangs, and a local PTT during a network call).

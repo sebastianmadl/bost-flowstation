@@ -117,6 +117,13 @@ pub enum BrewEvent {
     /// DTMF digits received from network
     CircuitDtmf { uuid: Uuid, length_bits: u16, data: Vec<u8> },
 
+    /// A serving station asks this station (the target) to prepare an announced cell reselection
+    /// (`SERVICE_HO_PREPARE` / `SERVICE_HO_FORWARD_REG`, relayed by the server)
+    HandoverRequest(BrewHoRequest),
+
+    /// Answer to a handover request this station sent (`SERVICE_HO_RESULT`)
+    HandoverResult(BrewHoResult),
+
     /// Error from server
     ServerError { error_type: u8, data: Vec<u8> },
 }
@@ -207,6 +214,10 @@ pub enum BrewCommand {
     /// MM → Brew: send RSSI measurement for an MS to the Brew server (Service 0xf4)
     SendRssiUpdate { issi: u32, rssi_dbfs: f32 },
 
+    /// Answer a handover request the server relayed to this station (only to a server that
+    /// offered `handover-v1`)
+    SendHandoverResult(BrewHoResult),
+
     /// Disconnect gracefully
     Disconnect,
 }
@@ -244,7 +255,15 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
             })
         })
         .collect();
-    Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, &[]))
+    let capabilities: &[&str] = if handles_handover(config, server_extensions) { &[BREW_EXT_HANDOVER] } else { &[] };
+    Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, capabilities))
+}
+
+/// This station answers handover requests from other stations: the server relays them
+/// (`handover-v1` offered) and the station is a single cell. A linked multi-cell station hands
+/// over between its own cells through the site switch; between stations it is not a target yet.
+fn handles_handover(config: &StackConfig, server_extensions: &[String]) -> bool {
+    !config.is_site_linked() && server_extensions.iter().any(|e| e == BREW_EXT_HANDOVER)
 }
 
 /// SERVICE_MS_CELL placing `issi` on this station's cell `cell`, or `None` when the server did not
@@ -684,6 +703,22 @@ impl<T: NetworkTransport> BrewWorker<T> {
                             tracing::debug!("BrewWorker: sent RSSI issi={} rssi={:.1}dBFS", issi, rssi_dbfs);
                         }
                     }
+                    BrewCommand::SendHandoverResult(result) => {
+                        if !handles_handover(&self.config.config(), self.transport.server_brew_extensions()) {
+                            continue;
+                        }
+                        let msg = build_service_ho_result(&result);
+                        if let Err(e) = self.transport.send_reliable(&msg) {
+                            tracing::error!("BrewWorker: failed to send handover result for ISSI {}: {}", result.issi, e);
+                        } else {
+                            tracing::info!(
+                                "BrewWorker: sent handover result issi={} transaction={} status={}",
+                                result.issi,
+                                result.transaction_id,
+                                result.status
+                            );
+                        }
+                    }
                     BrewCommand::Disconnect => {
                         self.graceful_teardown();
                         return Ok(());
@@ -726,13 +761,32 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         data: err.data,
                     });
                 }
-                BrewMessage::Service(svc) => {
-                    tracing::debug!("BrewWorker: service type={}: {}", svc.service_type, svc.json_data);
-                }
+                BrewMessage::Service(svc) => self.handle_service(svc),
             },
             Err(e) => {
                 tracing::warn!("BrewWorker: failed to parse message ({} bytes): {}", data.len(), e);
             }
+        }
+    }
+
+    /// Handle a service message. Only the handover messages are acted on, and only when this
+    /// station announced `handover-v1` (the server sends them to no one else).
+    fn handle_service(&mut self, svc: BrewServiceMessage) {
+        match svc.service_type {
+            BREW_SERVICE_HO_PREPARE | BREW_SERVICE_HO_FORWARD_REG | BREW_SERVICE_HO_RESULT
+                if handles_handover(&self.config.config(), self.transport.server_brew_extensions()) =>
+            {
+                let parsed = if svc.service_type == BREW_SERVICE_HO_RESULT {
+                    parse_ho_result(&svc.json_data).map(BrewEvent::HandoverResult)
+                } else {
+                    parse_ho_request(svc.service_type, &svc.json_data).map(BrewEvent::HandoverRequest)
+                };
+                match parsed {
+                    Ok(event) => self.send_event(event),
+                    Err(e) => tracing::warn!("BrewWorker: malformed handover message type={:#x}: {}", svc.service_type, e),
+                }
+            }
+            _ => tracing::debug!("BrewWorker: service type={}: {}", svc.service_type, svc.json_data),
         }
     }
 
@@ -1188,5 +1242,95 @@ password = "x"
         plain.transport.connect().unwrap();
         plain.announce_cells();
         assert!(plain.transport.sent_payloads().is_empty(), "nothing new towards a plain Brew server");
+    }
+
+    // ── Handover messages (target side) ──
+
+    const HANDOVER: [&str; 3] = ["bts-info", "handover-v1", "ms-cell"];
+
+    #[test]
+    fn bts_info_announces_handover_only_where_offered_and_single_cell() {
+        let offered: Vec<String> = HANDOVER.iter().map(|e| e.to_string()).collect();
+        let single = bts_info_message(&config("").config(), &offered).unwrap();
+        assert_eq!(json_of(&single)["capabilities"], serde_json::json!(["handover-v1"]));
+
+        let no_ho = bts_info_message(&config("").config(), &["bts-info".to_string(), "ms-cell".to_string()]).unwrap();
+        assert_eq!(json_of(&no_ho)["capabilities"], serde_json::json!([]), "milestone 3 server: no capability");
+
+        let multi = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
+        assert!(multi.config().is_site_linked());
+        let multi = bts_info_message(&multi.config(), &offered).unwrap();
+        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "multi-cell stations are not a target yet");
+    }
+
+    fn worker_with_events(transport: MockTransport) -> (BrewWorker<MockTransport>, Receiver<BrewEvent>) {
+        let (event_tx, event_rx) = bounded(16);
+        let (_command_tx, command_rx) = bounded(16);
+        (BrewWorker::new(config(""), event_tx, command_rx, transport), event_rx)
+    }
+
+    fn forward_reg() -> BrewHoRequest {
+        BrewHoRequest {
+            transaction_id: 77,
+            issi: 2320001,
+            target_carrier: 1528,
+            target_carrier_ext: 264,
+            target_mcc: Some(232),
+            target_mnc: Some(5),
+            target_location_area: Some(10),
+            sdu: Some(BrewHoSdu { bytes: vec![0xa1, 0xb2, 0xc0], len_bits: 18 }),
+        }
+    }
+
+    #[test]
+    fn handover_request_reaches_the_entity_only_where_offered() {
+        let (mut offered, events) = worker_with_events(MockTransport::new().with_brew_extensions(&HANDOVER));
+        offered.transport.connect().unwrap();
+        offered.handle_incoming_binary(&build_service_ho_request(&forward_reg()));
+        match events.try_recv() {
+            Ok(BrewEvent::HandoverRequest(req)) => assert_eq!(req, forward_reg()),
+            other => panic!("expected the handover request, got {other:?}"),
+        }
+
+        // A server that never offered handover-v1 cannot have meant this station.
+        let (mut plain, events) = worker_with_events(MockTransport::new().with_brew_extensions(&["bts-info", "ms-cell"]));
+        plain.transport.connect().unwrap();
+        plain.handle_incoming_binary(&build_service_ho_request(&forward_reg()));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn malformed_handover_request_is_dropped() {
+        let (mut w, events) = worker_with_events(MockTransport::new().with_brew_extensions(&HANDOVER));
+        w.transport.connect().unwrap();
+        let mut bad = vec![BREW_CLASS_SERVICE, BREW_SERVICE_HO_FORWARD_REG];
+        let json = r#"{"transaction_id":1,"issi":5,"target_carrier":1528,"target_carrier_ext":264,"sdu":"a1","sdu_len_bits":18}"#;
+        bad.extend_from_slice(json.as_bytes());
+        bad.push(0);
+        w.handle_incoming_binary(&bad);
+        assert!(events.try_recv().is_err(), "sdu shorter than sdu_len_bits");
+    }
+
+    #[test]
+    fn handover_result_is_sent_only_where_offered() {
+        let result = || {
+            vec![BrewCommand::SendHandoverResult(BrewHoResult {
+                transaction_id: 77,
+                issi: 2320001,
+                status: BREW_HO_STATUS_OK,
+                reason: None,
+                sdu: Some(BrewHoSdu { bytes: vec![0x0f, 0x80], len_bits: 9 }),
+            })]
+        };
+        let sent = run_commands(MockTransport::new().with_brew_extensions(&HANDOVER), result());
+        let msg = sent.iter().find(|p| p[..2] == [BREW_CLASS_SERVICE, BREW_SERVICE_HO_RESULT]).expect("HO_RESULT sent");
+        let json: serde_json::Value = serde_json::from_slice(&msg[2..msg.len() - 1]).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "transaction_id": 77, "issi": 2320001, "status": 0, "sdu": "0f80", "sdu_len_bits": 9 })
+        );
+
+        let plain = run_commands(MockTransport::new(), result());
+        assert!(plain.iter().all(|p| p[0] != BREW_CLASS_SERVICE), "never towards TetraPack / BrandMeister");
     }
 }

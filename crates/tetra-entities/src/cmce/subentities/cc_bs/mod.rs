@@ -55,7 +55,7 @@ use lifecycle::{
     PREEMPT_MIN_HOLD_TS, PREEMPT_POST_CEASE_TS, PREEMPT_READY_DEADLINE_TS,
 };
 use pdu::is_emergency_priority;
-use procedures::{GroupTransitionError, IndividualTransitionError};
+use procedures::{DeferredRestore, GroupTransitionError, IndividualTransitionError};
 use state::{
     ActiveCall, CachedSetup, CallOrigin, CcFormalEvent, CcFormalState, GroupCallState, IndividualCall, IndividualCallState,
     TxDemandQueueResult,
@@ -87,4 +87,8 @@ pub struct CcBsSubentity {
     /// ISSIs armed for ambience listening by the control channel ahead of the network setup
     /// that carries the speech path: ISSI -> time the command arrived.
     ambience_armed: HashMap<u32, TdmaTime>,
+    /// U-CALL RESTOREs waiting for a Brew group call to come up on this cell
+    deferred_restores: Vec<DeferredRestore>,
+    /// (ISSI, GSSI) listener counts added by a restore rather than an MM affiliation
+    restore_listeners: HashSet<(u32, u32)>,
 }

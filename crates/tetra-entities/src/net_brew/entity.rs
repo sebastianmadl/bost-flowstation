@@ -26,6 +26,9 @@ use tetra_saps::{
     tmd::TmdCircuitDataReq,
 };
 
+use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
+
+use super::protocol::{BREW_HO_STATUS_OK, BREW_HO_STATUS_REJECTED, BrewHoRequest, BrewHoResult, BrewHoSdu};
 use super::worker::{BREW_EVENT_CHANNEL_CAPACITY, BrewCommand, BrewEvent, BrewWorker};
 
 /// Hangtime before releasing group call circuit to allow reuse without re-signaling.
@@ -220,6 +223,11 @@ pub struct BrewEntity {
     /// not in this (primary) stack's subscriber list, so network SDS checks this too.
     site_directory: Option<SharedDirectory>,
 
+    /// Target side of an announced reselection from another station: forwarded registrations
+    /// handed to MLE/MM, ISSI -> (server transaction id, when). MM's answer goes back as
+    /// SERVICE_HO_RESULT.
+    ho_forwards: HashMap<u32, (u32, Instant)>,
+
     /// Rate limiting for RSSI export: tracks last sent time per ISSI.
     /// Only used when feature_rssi_export is enabled in config.
     rssi_last_sent: HashMap<u32, Instant>,
@@ -276,6 +284,7 @@ impl BrewEntity {
             brew_version_announced: false,
             telemetry_sink: None,
             site_directory: None,
+            ho_forwards: HashMap::new(),
             rssi_last_sent: HashMap::new(),
             worker_handle: Some(handle),
         }
@@ -591,6 +600,16 @@ impl BrewEntity {
                     // active_calls / dl_jitter would leak this session and spam jitter warnings
                     // every 5s for a circuit that is already gone.
                     self.drop_network_circuit(uuid);
+                }
+                BrewEvent::HandoverRequest(req) => self.handle_handover_request(queue, req),
+                BrewEvent::HandoverResult(res) => {
+                    // This station sends no handover requests yet, so there is nothing to finish.
+                    tracing::debug!(
+                        "BrewEntity: handover result for ISSI {} (transaction {}, status {}) ignored",
+                        res.issi,
+                        res.transaction_id,
+                        res.status
+                    );
                 }
                 BrewEvent::CircuitDtmf { uuid, length_bits, data } => {
                     tracing::debug!("BrewEntity: CIRCUIT DTMF uuid={} bits={}", uuid, length_bits);
@@ -1977,6 +1996,9 @@ impl TetraEntityTrait for BrewEntity {
             SapMsgInner::MmSubscriberUpdate(update) => {
                 self.handle_subscriber_update(update);
             }
+            SapMsgInner::CmceCallControl(CallControl::SiteForwardRegistrationResult { issi, sdu }) => {
+                self.finish_forward_registration(issi, sdu);
+            }
             SapMsgInner::MsRssiUpdate { issi, rssi_dbfs } => {
                 self.handle_rssi_update(issi, rssi_dbfs);
             }
@@ -1987,6 +2009,89 @@ impl TetraEntityTrait for BrewEntity {
                 tracing::debug!("BrewEntity: unexpected rx_prim from {:?} on {:?}", message.src, message.sap);
             }
         }
+    }
+}
+
+// ─── Announced reselection from another station (target side) ─────
+
+/// How long MLE/MM may take to answer a forwarded registration (MLE drops it after 3 s too; the
+/// server has answered the serving station with "timeout" long before).
+const HO_FORWARD_ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+
+impl BrewEntity {
+    /// A serving station relayed an announced cell reselection to this station
+    /// (TS 100 392-2 clause 18.3.4.7, U-PREPARE clause 18.4.1.4.6).
+    ///
+    /// - With a registration (`SERVICE_HO_FORWARD_REG`, the MM PDU from U-PREPARE): hand it to
+    ///   MLE as if forwarded by a sibling cell. MM registers the radio here (which moves the ISSI
+    ///   to this station on Brew) and its answer goes back for D-NEW-CELL.
+    /// - Without (`SERVICE_HO_PREPARE`): nothing to register; answer ok. The radio restores its
+    ///   call with U-RESTORE on arrival, as after any reselection.
+    fn handle_handover_request(&mut self, queue: &mut MessageQueue, req: BrewHoRequest) {
+        let Some(sdu) = req.sdu else {
+            tracing::info!(
+                "BrewEntity: handover prepare for ISSI {} on carrier {} (transaction {}), nothing to register",
+                req.issi,
+                req.target_carrier,
+                req.transaction_id
+            );
+            self.send_handover_result(req.transaction_id, req.issi, BREW_HO_STATUS_OK, None);
+            return;
+        };
+        tracing::info!(
+            "BrewEntity: forwarded registration for ISSI {} on carrier {} (transaction {}) → MM",
+            req.issi,
+            req.target_carrier,
+            req.transaction_id
+        );
+        self.ho_forwards.retain(|_, (_, at)| at.elapsed() < HO_FORWARD_ANSWER_TIMEOUT);
+        self.ho_forwards.insert(req.issi, (req.transaction_id, Instant::now()));
+        queue.push_back(SapMsg {
+            sap: Sap::Control,
+            src: TetraEntity::Brew,
+            dest: TetraEntity::Mle,
+            msg: SapMsgInner::CmceCallControl(CallControl::SiteForwardRegistration {
+                issi: req.issi,
+                target_carrier: req.target_carrier,
+                sdu: sdu.to_bitbuffer(),
+            }),
+        });
+    }
+
+    /// MM answered a registration forwarded by another station: return it to the serving station.
+    /// A D-LOCATION UPDATE REJECT is reported as rejected, so the serving station sends
+    /// D-PREPARE-FAIL with it (clause 18.4.1.4.3).
+    fn finish_forward_registration(&mut self, issi: u32, answer: Option<tetra_core::BitBuffer>) {
+        let Some((transaction_id, at)) = self.ho_forwards.remove(&issi) else {
+            tracing::debug!("BrewEntity: forwarded registration answer for ISSI {} without a request", issi);
+            return;
+        };
+        if at.elapsed() >= HO_FORWARD_ANSWER_TIMEOUT {
+            tracing::info!("BrewEntity: MM answered ISSI {}'s forwarded registration too late, dropped", issi);
+            return;
+        }
+        let rejected = answer
+            .as_ref()
+            .and_then(|a| a.peek_bits_startoffset(0, 4))
+            .is_some_and(|t| t == MmPduTypeDl::DLocationUpdateReject.into_raw());
+        let status = if rejected { BREW_HO_STATUS_REJECTED } else { BREW_HO_STATUS_OK };
+        tracing::info!(
+            "BrewEntity: forwarded registration for ISSI {} {} (transaction {})",
+            issi,
+            if rejected { "rejected" } else { "accepted" },
+            transaction_id
+        );
+        self.send_handover_result(transaction_id, issi, status, answer.as_ref().map(BrewHoSdu::from_bitbuffer));
+    }
+
+    fn send_handover_result(&self, transaction_id: u32, issi: u32, status: u8, sdu: Option<BrewHoSdu>) {
+        let _ = self.command_sender.send(BrewCommand::SendHandoverResult(BrewHoResult {
+            transaction_id,
+            issi,
+            status,
+            reason: None,
+            sdu,
+        }));
     }
 }
 

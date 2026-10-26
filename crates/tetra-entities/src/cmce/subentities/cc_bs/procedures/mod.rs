@@ -10,3 +10,4 @@ mod uplink;
 
 pub(super) use group::GroupTransitionError;
 pub(super) use individual::IndividualTransitionError;
+pub(super) use restoration::DeferredRestore;

@@ -825,6 +825,213 @@ pub fn build_service_ms_cell(issi: u32, carrier: u16, carrier_ext: u16) -> Vec<u
     buf
 }
 
+/// Service type: serving station asks the target to prepare an announced cell reselection
+/// (U-PREPARE without a registration, TS 100 392-2 clause 18.4.1.4.6)
+pub const BREW_SERVICE_HO_PREPARE: u8 = 0x15;
+/// Service type: as [`BREW_SERVICE_HO_PREPARE`], carrying the MM registration from U-PREPARE
+pub const BREW_SERVICE_HO_FORWARD_REG: u8 = 0x16;
+/// Service type: the target's answer to [`BREW_SERVICE_HO_PREPARE`] / [`BREW_SERVICE_HO_FORWARD_REG`]
+pub const BREW_SERVICE_HO_RESULT: u8 = 0x17;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it relays the handover messages, and
+/// the capability this station announces in [`BREW_SERVICE_BTS_INFO`] when it answers them
+pub const BREW_EXT_HANDOVER: &str = "handover-v1";
+
+/// `SERVICE_HO_RESULT` status: the target registered the radio (or is prepared)
+pub const BREW_HO_STATUS_OK: u8 = 0;
+/// `SERVICE_HO_RESULT` status: the target's MM rejected the registration
+pub const BREW_HO_STATUS_REJECTED: u8 = 1;
+/// `SERVICE_HO_RESULT` status (server only): no Basestation serves the target cell
+pub const BREW_HO_STATUS_NO_TARGET: u8 = 2;
+/// `SERVICE_HO_RESULT` status (server only): the target did not answer in time
+pub const BREW_HO_STATUS_TIMEOUT: u8 = 3;
+
+/// Largest MM SDU carried in a handover message
+pub const BREW_HO_MAX_SDU_BITS: u16 = 4096;
+
+/// An MM PDU inside a handover message: `sdu` (hex) plus `sdu_len_bits`, padding at the end
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrewHoSdu {
+    pub bytes: Vec<u8>,
+    pub len_bits: u16,
+}
+
+impl BrewHoSdu {
+    /// Pack the bits of `bits` from its start to its end (at most [`BREW_HO_MAX_SDU_BITS`]).
+    pub fn from_bitbuffer(bits: &tetra_core::BitBuffer) -> Self {
+        let bitstr = bits.to_bitstr();
+        let len = bitstr.len().min(BREW_HO_MAX_SDU_BITS as usize);
+        let mut bytes = vec![0u8; len.div_ceil(8)];
+        for (i, bit) in bitstr.bytes().take(len).enumerate() {
+            if bit == b'1' {
+                bytes[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+        Self { bytes, len_bits: len as u16 }
+    }
+
+    pub fn to_bitbuffer(&self) -> tetra_core::BitBuffer {
+        let bits: String = (0..self.len_bits as usize)
+            .map(|i| if self.bytes[i / 8] & (0x80 >> (i % 8)) != 0 { '1' } else { '0' })
+            .collect();
+        tetra_core::BitBuffer::from_bitstr(&bits)
+    }
+
+    fn hex(&self) -> String {
+        self.bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn parse(json: &serde_json::Value) -> Result<Option<Self>, String> {
+        match (json.get("sdu"), json.get("sdu_len_bits")) {
+            (None, None) => Ok(None),
+            (Some(sdu), Some(len)) => {
+                let hex = sdu.as_str().ok_or("sdu is not a string")?;
+                let len_bits = len.as_u64().filter(|l| *l <= BREW_HO_MAX_SDU_BITS as u64).ok_or("bad sdu_len_bits")? as u16;
+                if hex.len() % 2 != 0 || hex.len() / 2 != (len_bits as usize).div_ceil(8) {
+                    return Err("sdu length does not match sdu_len_bits".into());
+                }
+                let bytes = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                    .collect::<Result<Vec<u8>, _>>()
+                    .map_err(|_| "sdu is not hex")?;
+                Ok(Some(Self { bytes, len_bits }))
+            }
+            _ => Err("sdu and sdu_len_bits go together".into()),
+        }
+    }
+}
+
+/// `SERVICE_HO_PREPARE` (no `sdu`) or `SERVICE_HO_FORWARD_REG` (with `sdu`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrewHoRequest {
+    pub transaction_id: u32,
+    pub issi: u32,
+    pub target_carrier: u16,
+    /// Absolute band plan of the target cell, as in [`BREW_SERVICE_BTS_INFO`]
+    pub target_carrier_ext: u16,
+    pub target_mcc: Option<u16>,
+    pub target_mnc: Option<u16>,
+    pub target_location_area: Option<u16>,
+    /// The MM PDU from U-PREPARE: present for `SERVICE_HO_FORWARD_REG`
+    pub sdu: Option<BrewHoSdu>,
+}
+
+/// `SERVICE_HO_RESULT`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrewHoResult {
+    pub transaction_id: u32,
+    pub issi: u32,
+    pub status: u8,
+    /// Why there is no target (server, with [`BREW_HO_STATUS_NO_TARGET`]), e.g. `gone`
+    pub reason: Option<String>,
+    /// The target's MM answer for D-NEW-CELL
+    pub sdu: Option<BrewHoSdu>,
+}
+
+fn json_uint(json: &serde_json::Value, key: &str, max: u64) -> Result<u64, String> {
+    json.get(key)
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v <= max)
+        .ok_or_else(|| format!("missing or out of range: {key}"))
+}
+
+fn json_opt_uint(json: &serde_json::Value, key: &str, max: u64) -> Result<Option<u64>, String> {
+    match json.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(_) => json_uint(json, key, max).map(Some),
+    }
+}
+
+/// Parse a `SERVICE_HO_PREPARE` / `SERVICE_HO_FORWARD_REG` payload (unknown fields ignored).
+pub fn parse_ho_request(service_type: u8, json_data: &str) -> Result<BrewHoRequest, String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    let sdu = BrewHoSdu::parse(&json)?;
+    match (service_type, &sdu) {
+        (BREW_SERVICE_HO_PREPARE, None) | (BREW_SERVICE_HO_FORWARD_REG, Some(_)) => {}
+        (BREW_SERVICE_HO_FORWARD_REG, None) => return Err("forward registration without sdu".into()),
+        (BREW_SERVICE_HO_PREPARE, Some(_)) => return Err("prepare with sdu".into()),
+        _ => return Err(format!("not a handover request: service type {service_type:#x}")),
+    }
+    Ok(BrewHoRequest {
+        transaction_id: json_uint(&json, "transaction_id", u32::MAX as u64)? as u32,
+        issi: json_uint(&json, "issi", 0xff_ffff)? as u32,
+        target_carrier: json_uint(&json, "target_carrier", 4095)? as u16,
+        target_carrier_ext: json_uint(&json, "target_carrier_ext", 1023)? as u16,
+        target_mcc: json_opt_uint(&json, "target_mcc", 1023)?.map(|v| v as u16),
+        target_mnc: json_opt_uint(&json, "target_mnc", 16383)?.map(|v| v as u16),
+        target_location_area: json_opt_uint(&json, "target_location_area", 16383)?.map(|v| v as u16),
+        sdu,
+    })
+}
+
+/// Parse a `SERVICE_HO_RESULT` payload (unknown fields ignored).
+pub fn parse_ho_result(json_data: &str) -> Result<BrewHoResult, String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    Ok(BrewHoResult {
+        transaction_id: json_uint(&json, "transaction_id", u32::MAX as u64)? as u32,
+        issi: json_uint(&json, "issi", 0xff_ffff)? as u32,
+        status: json_uint(&json, "status", u8::MAX as u64)? as u8,
+        reason: json.get("reason").and_then(|r| r.as_str()).map(str::to_string),
+        sdu: BrewHoSdu::parse(&json)?,
+    })
+}
+
+fn service_json(service_type: u8, json: serde_json::Value) -> Vec<u8> {
+    let json = json.to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(service_type);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
+}
+
+/// Build `SERVICE_HO_PREPARE` (no SDU) or `SERVICE_HO_FORWARD_REG` (with SDU).
+///
+/// Not part of Brew as TetraPack / BrandMeister speak it: only send it to a server that offered
+/// [`BREW_EXT_HANDOVER`].
+pub fn build_service_ho_request(req: &BrewHoRequest) -> Vec<u8> {
+    let mut json = serde_json::json!({
+        "transaction_id": req.transaction_id,
+        "issi": req.issi,
+        "target_carrier": req.target_carrier,
+        "target_carrier_ext": req.target_carrier_ext,
+    });
+    let target = [
+        ("target_mcc", req.target_mcc),
+        ("target_mnc", req.target_mnc),
+        ("target_location_area", req.target_location_area),
+    ];
+    for (key, value) in target {
+        if let Some(v) = value {
+            json[key] = v.into();
+        }
+    }
+    let service_type = match &req.sdu {
+        Some(sdu) => {
+            json["sdu"] = sdu.hex().into();
+            json["sdu_len_bits"] = sdu.len_bits.into();
+            BREW_SERVICE_HO_FORWARD_REG
+        }
+        None => BREW_SERVICE_HO_PREPARE,
+    };
+    service_json(service_type, json)
+}
+
+/// Build `SERVICE_HO_RESULT`. Only sent in answer to a handover request the server relayed.
+pub fn build_service_ho_result(res: &BrewHoResult) -> Vec<u8> {
+    let mut json = serde_json::json!({ "transaction_id": res.transaction_id, "issi": res.issi, "status": res.status });
+    if let Some(reason) = &res.reason {
+        json["reason"] = reason.as_str().into();
+    }
+    if let Some(sdu) = &res.sdu {
+        json["sdu"] = sdu.hex().into();
+        json["sdu_len_bits"] = sdu.len_bits.into();
+    }
+    service_json(BREW_SERVICE_HO_RESULT, json)
+}
+
 /// Build a query subscribers service message
 pub fn build_query_subscribers(issis: &[u32]) -> Vec<u8> {
     let json = serde_json::to_string(issis).unwrap_or_else(|_| "[]".to_string());
@@ -839,6 +1046,92 @@ pub fn build_query_subscribers(issis: &[u32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Handover messages (docs/protocol.md of the handover project) ──
+
+    #[test]
+    fn ho_sdu_keeps_odd_bit_lengths() {
+        let bits = tetra_core::BitBuffer::from_bitstr("101000011011001011");
+        let sdu = BrewHoSdu::from_bitbuffer(&bits);
+        assert_eq!(sdu, BrewHoSdu { bytes: vec![0xa1, 0xb2, 0xc0], len_bits: 18 });
+        assert_eq!(sdu.to_bitbuffer().to_bitstr(), "101000011011001011");
+    }
+
+    #[test]
+    fn ho_request_roundtrip_both_kinds() {
+        let mut req = BrewHoRequest {
+            transaction_id: 7,
+            issi: 2320001,
+            target_carrier: 1530,
+            target_carrier_ext: 264,
+            target_mcc: None,
+            target_mnc: None,
+            target_location_area: Some(1),
+            sdu: Some(BrewHoSdu { bytes: vec![0xa1, 0xb2, 0xc0], len_bits: 18 }),
+        };
+        let msg = build_service_ho_request(&req);
+        assert_eq!(&msg[..2], &[BREW_CLASS_SERVICE, BREW_SERVICE_HO_FORWARD_REG]);
+        let BrewMessage::Service(svc) = parse_brew_message(&msg).unwrap() else { panic!() };
+        assert!(svc.json_data.contains("\"sdu\":\"a1b2c0\""), "lower-case hex: {}", svc.json_data);
+        assert_eq!(parse_ho_request(svc.service_type, &svc.json_data).unwrap(), req);
+
+        req.sdu = None;
+        let msg = build_service_ho_request(&req);
+        assert_eq!(msg[1], BREW_SERVICE_HO_PREPARE);
+        let BrewMessage::Service(svc) = parse_brew_message(&msg).unwrap() else { panic!() };
+        assert_eq!(parse_ho_request(svc.service_type, &svc.json_data).unwrap(), req);
+    }
+
+    #[test]
+    fn ho_request_from_the_server_parses() {
+        // As brew-server forwards it to the target: its own id, network filled in, unknown field.
+        let json = r#"{"transaction_id":4000000000,"issi":2320001,"target_carrier":1528,"target_carrier_ext":264,
+            "target_mcc":232,"target_mnc":5,"target_location_area":2,"sdu":"A1B2C0","sdu_len_bits":18,"future":true}"#;
+        let req = parse_ho_request(BREW_SERVICE_HO_FORWARD_REG, json).unwrap();
+        assert_eq!(req.transaction_id, 4_000_000_000);
+        assert_eq!((req.target_mcc, req.target_mnc, req.target_location_area), (Some(232), Some(5), Some(2)));
+        assert_eq!(req.sdu.unwrap().bytes, vec![0xa1, 0xb2, 0xc0], "upper-case hex accepted");
+    }
+
+    #[test]
+    fn ho_request_rejects_bad_input() {
+        let base = r#""transaction_id":1,"issi":5,"target_carrier":1528,"target_carrier_ext":264"#;
+        let bad = [
+            (BREW_SERVICE_HO_FORWARD_REG, format!("{{{base}}}")),                                    // no sdu
+            (BREW_SERVICE_HO_PREPARE, format!(r#"{{{base},"sdu":"a0","sdu_len_bits":3}}"#)),        // prepare with sdu
+            (BREW_SERVICE_HO_FORWARD_REG, format!(r#"{{{base},"sdu":"a0"}}"#)),                     // half the pair
+            (BREW_SERVICE_HO_FORWARD_REG, format!(r#"{{{base},"sdu":"a0b0","sdu_len_bits":3}}"#)),  // too long
+            (BREW_SERVICE_HO_FORWARD_REG, format!(r#"{{{base},"sdu":"zz","sdu_len_bits":3}}"#)),    // not hex
+            (BREW_SERVICE_HO_FORWARD_REG, format!(r#"{{{base},"sdu":"a0","sdu_len_bits":5000}}"#)), // too big
+            (BREW_SERVICE_HO_PREPARE, r#"{"transaction_id":1,"issi":16777216,"target_carrier":1528,"target_carrier_ext":264}"#.to_string()),
+            (BREW_SERVICE_HO_PREPARE, r#"{"transaction_id":1,"issi":5,"target_carrier":4096,"target_carrier_ext":264}"#.to_string()),
+            (BREW_SERVICE_HO_PREPARE, r#"{"transaction_id":1,"issi":5,"target_carrier":1528,"target_carrier_ext":1024}"#.to_string()),
+            (BREW_SERVICE_HO_PREPARE, format!(r#"{{{base},"target_location_area":16384}}"#)),
+            (BREW_SERVICE_HO_RESULT, format!("{{{base}}}")),                                         // not a request
+            (BREW_SERVICE_HO_PREPARE, "not json".to_string()),
+        ];
+        for (service_type, json) in bad {
+            assert!(parse_ho_request(service_type, &json).is_err(), "accepted {json}");
+        }
+    }
+
+    #[test]
+    fn ho_result_roundtrip_and_server_reason() {
+        let res = BrewHoResult {
+            transaction_id: 7,
+            issi: 2320001,
+            status: BREW_HO_STATUS_REJECTED,
+            reason: None,
+            sdu: Some(BrewHoSdu { bytes: vec![0x0f, 0x80], len_bits: 9 }),
+        };
+        let msg = build_service_ho_result(&res);
+        assert_eq!(&msg[..2], &[BREW_CLASS_SERVICE, BREW_SERVICE_HO_RESULT]);
+        let BrewMessage::Service(svc) = parse_brew_message(&msg).unwrap() else { panic!() };
+        assert_eq!(parse_ho_result(&svc.json_data).unwrap(), res);
+
+        let gone = parse_ho_result(r#"{"transaction_id":7,"issi":2320001,"status":2,"reason":"gone"}"#).unwrap();
+        assert_eq!((gone.status, gone.reason.as_deref(), gone.sdu), (BREW_HO_STATUS_NO_TARGET, Some("gone"), None));
+    }
 
     #[test]
     fn test_parse_group_tx_v0_no_mnemonic() {

@@ -14,6 +14,7 @@ use tetra_pdus::mle::pdus::{
     u_prepare::UPrepare, u_restore::URestore,
 };
 use tetra_saps::control::call_control::CallControl;
+use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
 use tetra_saps::lcmc::LcmcMleUnitdataInd;
 use tetra_saps::lmm::LmmMleUnitdataInd;
 use tetra_saps::ltpd::LtpdMleUnitdataInd;
@@ -48,10 +49,13 @@ const FORWARD_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long CMCE may take to answer the U-CALL RESTORE carried by a U-RESTORE.
 const RESTORE_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
-/// D-NEW-CELL "channel command valid": change channel immediately (EN 300 392-2 clause 18.5.3).
+/// D-NEW-CELL "channel command valid": change channel immediately (TS 100 392-2 clause 18.5.6).
 const CHANNEL_COMMAND_CHANGE_IMMEDIATELY: u8 = 1;
-/// D-PREPARE-FAIL / D-RESTORE-FAIL "fail cause" 0.
-const FAIL_CAUSE_UNSPECIFIED: u8 = 0;
+/// D-PREPARE-FAIL "fail cause" 0: temporary break in service (clause 18.5.7).
+const FAIL_CAUSE_TEMPORARY_BREAK: u8 = 0;
+/// D-RESTORE-FAIL "fail cause" 3: restoration cannot be done on cell, the value clause
+/// 18.3.4.7 requires for a failed restore (clause 18.5.7).
+const FAIL_CAUSE_RESTORATION_NOT_POSSIBLE: u8 = 3;
 
 /// Multiframes at which D-NWRK-BROADCAST is sent within each hyperframe.
 /// Two broadcasts per hyperframe (~30.6s interval) for faster time/date display on terminals.
@@ -116,7 +120,7 @@ impl MleBs {
                 pdu.cell_identifier_ca
             );
             let fail = DPrepareFail {
-                fail_cause: FAIL_CAUSE_UNSPECIFIED,
+                fail_cause: FAIL_CAUSE_TEMPORARY_BREAK,
                 sdu: None,
             };
             self.send_mle_pdu(queue, addr, link_id, endpoint_id, |b| fail.to_bitbuf(b));
@@ -189,7 +193,7 @@ impl MleBs {
         if rejected {
             tracing::info!("MLE: forwarded registration of {} rejected → D-PREPARE-FAIL", issi);
             let fail = DPrepareFail {
-                fail_cause: FAIL_CAUSE_UNSPECIFIED,
+                fail_cause: FAIL_CAUSE_TEMPORARY_BREAK,
                 sdu: answer,
             };
             self.send_mle_pdu(queue, addr, p.link_id, p.endpoint_id, |b| fail.to_bitbuf(b));
@@ -246,7 +250,7 @@ impl MleBs {
         let Some(sdu) = pdu.sdu else {
             tracing::info!("MLE: U-RESTORE from {} without U-CALL RESTORE → D-RESTORE-FAIL", addr.ssi);
             let fail = DRestoreFail {
-                fail_cause: FAIL_CAUSE_UNSPECIFIED,
+                fail_cause: FAIL_CAUSE_RESTORATION_NOT_POSSIBLE,
             };
             self.send_mle_pdu(queue, addr, link_id, endpoint_id, |b| fail.to_bitbuf(b));
             return;
@@ -278,6 +282,19 @@ impl MleBs {
         endpoint_id: EndpointId,
         write: impl FnOnce(&mut BitBuffer) -> Result<(), tetra_core::PduParseErr>,
     ) {
+        self.send_mle_pdu_with_chan_alloc(queue, addr, link_id, endpoint_id, None, write);
+    }
+
+    /// As `send_mle_pdu`, with a layer 2 channel allocation sent along with the PDU.
+    fn send_mle_pdu_with_chan_alloc(
+        &self,
+        queue: &mut MessageQueue,
+        addr: TetraAddress,
+        link_id: LinkId,
+        endpoint_id: EndpointId,
+        chan_alloc: Option<CmceChanAllocReq>,
+        write: impl FnOnce(&mut BitBuffer) -> Result<(), tetra_core::PduParseErr>,
+    ) {
         let mut body = BitBuffer::new_autoexpand(32);
         body.write_bits(MleProtocolDiscriminator::Mle.into_raw(), 3);
         if let Err(e) = write(&mut body) {
@@ -306,7 +323,7 @@ impl MleBs {
                 data_class_info: None,
                 req_handle: 0,
                 graceful_degradation: None,
-                chan_alloc: None,
+                chan_alloc,
                 tx_reporter: None,
             }),
         });
@@ -527,14 +544,17 @@ impl MleBs {
                     let ack = DRestoreAck {
                         sdu: Some(prim.sdu.clone()),
                     };
-                    self.send_mle_pdu(queue, addr, link_id, endpoint_id, |b| ack.to_bitbuf(b));
+                    // CMCE's channel allocation for the restored call goes with the D-CALL RESTORE
+                    // it carries (TS 100 392-2 clause 14.5.2.2.4).
+                    let chan_alloc = prim.chan_alloc.take();
+                    self.send_mle_pdu_with_chan_alloc(queue, addr, link_id, endpoint_id, chan_alloc, |b| ack.to_bitbuf(b));
                     return;
                 }
                 Some(CmcePduTypeDl::DRelease) => {
                     self.pending_restores.remove(&ssi);
                     tracing::info!("MLE: D-RESTORE-FAIL to {} (call could not be restored)", ssi);
                     let fail = DRestoreFail {
-                        fail_cause: FAIL_CAUSE_UNSPECIFIED,
+                        fail_cause: FAIL_CAUSE_RESTORATION_NOT_POSSIBLE,
                     };
                     self.send_mle_pdu(queue, addr, link_id, endpoint_id, |b| fail.to_bitbuf(b));
                     return;
@@ -685,6 +705,7 @@ impl TetraEntityTrait for MleBs {
 mod tests {
     use tetra_core::SsiType;
     use tetra_saps::lcmc::LcmcMleUnitdataReq;
+    use tetra_saps::lcmc::enums::{alloc_type::ChanAllocType, ul_dl_assignment::UlDlAssignment};
     use tetra_saps::tla::TlaTlDataIndBl;
 
     use super::*;
@@ -855,14 +876,59 @@ main_carrier_number = 1525
         });
         assert_eq!(to_cmce.as_deref(), Some("0101100000000000100"), "U-CALL RESTORE handed to CMCE");
 
-        // CMCE answers with D-CALL RESTORE (type 14 = 01110): wrapped in D-RESTORE-ACK.
+        // CMCE answers with D-CALL RESTORE (type 14 = 01110): wrapped in D-RESTORE-ACK, O-bit 0
+        // (TS 100 392-2 Annex E, table E.23).
         mle.rx_prim(&mut q, cmce_answer("01110000000000010"));
-        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec!["1001".to_string() + "01110000000000010"]);
+        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec!["1000".to_string() + "01110000000000010"]);
 
         // A later, unrelated CMCE PDU for the same MS goes out normally (discriminator CMCE).
         mle.rx_prim(&mut q, cmce_answer("01110000000000010"));
         let msgs = drain(&mut q);
         assert!(sent_mle_pdus(&msgs).is_empty());
+    }
+
+    #[test]
+    fn u_restore_in_the_same_la_reaches_cmce() {
+        // Table E.29: no MCC/MNC/LA, O-bit 0, the U-CALL RESTORE right after it.
+        let mut mle = MleBs::new(config(false));
+        let mut q = MessageQueue::new();
+        mle.rx_prim(&mut q, uplink_mle(|b| b.write_bits(0b1000_0101_1000, 12)));
+        let to_cmce = drain(&mut q).into_iter().find_map(|m| match m.msg {
+            SapMsgInner::LcmcMleUnitdataInd(ind) if m.dest == TetraEntity::Cmce => Some(ind.sdu.to_bitstr()),
+            _ => None,
+        });
+        assert_eq!(to_cmce.as_deref(), Some("01011000"));
+    }
+
+    #[test]
+    fn d_restore_ack_carries_the_channel_allocation_of_the_restore() {
+        let mut mle = MleBs::new(config(false));
+        let mut q = MessageQueue::new();
+        let restore = URestore {
+            mcc: None,
+            mnc: None,
+            la: Some(2),
+            sdu: Some(BitBuffer::from_bitstr("01011")),
+        };
+        mle.rx_prim(&mut q, uplink_mle(|b| restore.to_bitbuf(b).unwrap()));
+        drain(&mut q);
+        let mut answer = cmce_answer("01110000000000010");
+        if let SapMsgInner::LcmcMleUnitdataReq(prim) = &mut answer.msg {
+            prim.chan_alloc = Some(CmceChanAllocReq {
+                usage: Some(5),
+                alloc_type: ChanAllocType::Replace,
+                carrier: Some(1530),
+                timeslots: [false, true, false, false],
+                ul_dl_assigned: UlDlAssignment::Both,
+            });
+        }
+        mle.rx_prim(&mut q, answer);
+        let chan = drain(&mut q).into_iter().find_map(|m| match m.msg {
+            SapMsgInner::TlaTlDataReqBl(r) => r.chan_alloc,
+            _ => None,
+        });
+        let chan = chan.expect("D-RESTORE-ACK goes out with the channel allocation (clause 14.5.2.2.4)");
+        assert_eq!((chan.carrier, chan.timeslots, chan.usage), (Some(1530), [false, true, false, false], Some(5)));
     }
 
     #[test]
@@ -879,7 +945,8 @@ main_carrier_number = 1525
         drain(&mut q);
         // CMCE rejects with D-RELEASE (type 6 = 00110).
         mle.rx_prim(&mut q, cmce_answer("001100000000000"));
-        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec!["101000".to_string()], "D-RESTORE-FAIL");
+        // D-RESTORE-FAIL, fail cause "restoration cannot be done on cell" (clause 18.3.4.7).
+        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec!["101110".to_string()]);
     }
 
     // ── Forward registration (type 1 announced reselection) ─────────────────────────────────
@@ -927,7 +994,7 @@ main_carrier_number = 1525
         );
         assert_eq!(
             sent_mle_pdus(&drain(&mut q)),
-            vec![format!("000{}{}{}", "01", "1", MM_ACCEPT)],
+            vec![format!("000{}{}{}", "01", "0", MM_ACCEPT)],
             "D-NEW-CELL carrying the target cell's D-LOCATION UPDATE ACCEPT"
         );
     }
@@ -944,7 +1011,7 @@ main_carrier_number = 1525
                 sdu: Some(BitBuffer::from_bitstr(MM_REJECT)),
             }),
         );
-        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec![format!("001001{}", MM_REJECT)]);
+        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec![format!("001000{}", MM_REJECT)], "O-bit 0, table E.22");
     }
 
     #[test]
