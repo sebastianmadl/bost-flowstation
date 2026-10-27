@@ -3597,3 +3597,146 @@ fn test_site_linked_group_call_reports_priority_to_switch() {
         .expect("FloorGranted sent to the switch");
     assert!(prio < grant, "priority comes first");
 }
+
+/// Network over on `gssi` whose talker `talker` is registered here (it was heard through the
+/// network and then came to this cell unannounced). Returns the test and the call id.
+fn network_over_of_moved_talker(gssi: u32, talker: u32, listener: u32, brew_uuid: uuid::Uuid) -> (ComponentTest, u16) {
+    let mut test = ComponentTest::from_config(brew_test_config(), Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew],
+    );
+    register_subscriber(&mut test, listener, gssi);
+    register_subscriber(&mut test, talker, gssi);
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::NetworkCallStart {
+            brew_uuid,
+            source_issi: talker,
+            dest_gssi: gssi,
+            priority: 0,
+        }),
+    });
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let call_id = msgs
+        .iter()
+        .find_map(|msg| match &msg.msg {
+            SapMsgInner::CmceCallControl(CallControl::NetworkCallReady { brew_uuid: u, call_id, .. }) if *u == brew_uuid => {
+                Some(*call_id)
+            }
+            _ => None,
+        })
+        .expect("Expected the network over to become ready");
+    (test, call_id)
+}
+
+fn local_floor_granted_to(msgs: &[SapMsg], dest: TetraEntity, issi: u32) -> bool {
+    msgs.iter().any(|m| {
+        m.dest == dest && matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::FloorGranted { source_issi, .. }) if *source_issi == issi)
+    })
+}
+
+/// The old station's late end of the over: must not take the floor from the talker here.
+fn end_old_session_keeps_over(test: &mut ComponentTest, gssi: u32, brew_uuid: uuid::Uuid) {
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::NetworkCallEnd { brew_uuid }),
+    });
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(
+        find_lcmc_req(&msgs, gssi, CmcePduTypeDl::DTxCeased).is_none(),
+        "the old session's end must not end the moved talker's over here"
+    );
+    assert!(
+        !msgs.iter().any(|m| matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::FloorReleased { .. }))),
+        "the old session's end must not release the floor here"
+    );
+}
+
+/// Case C: a talker heard here through the network comes over unannounced and presses PTT again
+/// (U-SETUP, late entry). It keeps its floor (TS 100 392-2 clause 14.5.2.2.1 a)); another
+/// member still gets "granted to another user".
+#[test]
+fn test_moved_network_talker_late_entry_keeps_floor() {
+    debug::setup_logging_verbose();
+    let gssi = 340;
+    let talker = 3400001;
+    let listener = 3400002;
+    let brew_uuid = uuid::Uuid::from_u128(0x3400);
+    let (mut test, call_id) = network_over_of_moved_talker(gssi, talker, listener, brew_uuid);
+
+    test.submit_message(build_u_setup_msg(listener, gssi));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, listener, CmcePduTypeDl::DConnect).expect("Expected D-CONNECT to the listener");
+    let d_connect = DConnect::from_bitbuf(&mut sdu).unwrap();
+    assert_eq!(d_connect.transmission_grant, TransmissionGrant::GrantedToOtherUser);
+    assert!(!local_floor_granted_to(&msgs, TetraEntity::Brew, listener));
+
+    test.submit_message(build_u_setup_msg(talker, gssi));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, talker, CmcePduTypeDl::DConnect).expect("Expected D-CONNECT to the talker");
+    let d_connect = DConnect::from_bitbuf(&mut sdu).unwrap();
+    assert_eq!(d_connect.call_identifier, call_id);
+    assert_eq!(d_connect.transmission_grant, TransmissionGrant::Granted, "the moved talker keeps its floor");
+    assert!(local_floor_granted_to(&msgs, TetraEntity::Umac, talker), "UMAC must arm UL inactivity");
+    assert!(local_floor_granted_to(&msgs, TetraEntity::Brew, talker), "the over now goes out from here");
+
+    end_old_session_keeps_over(&mut test, gssi, brew_uuid);
+}
+
+/// Case C with U-TX DEMAND: the moved talker is granted at once instead of being queued.
+#[test]
+fn test_moved_network_talker_tx_demand_is_granted() {
+    debug::setup_logging_verbose();
+    let gssi = 341;
+    let talker = 3410001;
+    let listener = 3410002;
+    let brew_uuid = uuid::Uuid::from_u128(0x3410);
+    let (mut test, call_id) = network_over_of_moved_talker(gssi, talker, listener, brew_uuid);
+
+    test.submit_message(build_u_tx_demand_msg(listener, call_id));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, listener, CmcePduTypeDl::DTxGranted).expect("Expected D-TX GRANTED to the listener");
+    let granted = DTxGranted::from_bitbuf(&mut sdu).unwrap();
+    assert_eq!(granted.transmission_grant, TransmissionGrant::RequestQueued.into_raw() as u8);
+
+    test.submit_message(build_u_tx_demand_msg(talker, call_id));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, talker, CmcePduTypeDl::DTxGranted).expect("Expected D-TX GRANTED to the talker");
+    let granted = DTxGranted::from_bitbuf(&mut sdu).unwrap();
+    assert_eq!(granted.transmission_grant, TransmissionGrant::Granted.into_raw() as u8);
+    assert!(local_floor_granted_to(&msgs, TetraEntity::Umac, talker));
+    assert!(local_floor_granted_to(&msgs, TetraEntity::Brew, talker));
+
+    end_old_session_keeps_over(&mut test, gssi, brew_uuid);
+}
+
+/// Restore by the network talker: granted as before, and now also the old session is forgotten.
+#[test]
+fn test_moved_network_talker_restore_forgets_old_session() {
+    debug::setup_logging_verbose();
+    let gssi = 342;
+    let talker = 3420001;
+    let listener = 3420002;
+    let brew_uuid = uuid::Uuid::from_u128(0x3420);
+    let (mut test, call_id) = network_over_of_moved_talker(gssi, talker, listener, brew_uuid);
+
+    test.submit_message(build_u_call_restore_msg(talker, call_id, gssi, true));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (restore, _) = d_call_restore_to(&msgs, talker).expect("Expected D-CALL RESTORE to the talker");
+    assert_eq!(restore.transmission_grant, TransmissionGrant::Granted.into_raw() as u8);
+    assert!(local_floor_granted_to(&msgs, TetraEntity::Brew, talker));
+
+    end_old_session_keeps_over(&mut test, gssi, brew_uuid);
+}

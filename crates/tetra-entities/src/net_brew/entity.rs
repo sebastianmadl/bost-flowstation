@@ -652,6 +652,7 @@ impl BrewEntity {
                 }
                 BrewEvent::HandoverRequest(req) => self.handle_handover_request(queue, req),
                 BrewEvent::HandoverResult(res) => self.handle_handover_result(queue, res),
+                BrewEvent::MsMoved { issi } => self.handle_ms_moved(queue, issi),
                 BrewEvent::CircuitDtmf { uuid, length_bits, data } => {
                     tracing::debug!("BrewEntity: CIRCUIT DTMF uuid={} bits={}", uuid, length_bits);
                     // DTMF from network → CMCE (CMCE can forward to local MS via U-INFO if needed)
@@ -1712,6 +1713,32 @@ impl BrewEntity {
         tracing::debug!("BrewEntity: drop requested for unknown uuid={}", brew_uuid);
     }
 
+    /// A network talker came to this cell unannounced and CMCE gave it the floor of the over it
+    /// was heard on. Its old session (sent by the station it left) ends here: no more downlink
+    /// from it, and its late GROUP_IDLE finds nothing.
+    fn drop_moved_talker_session(&mut self, carrier_num: u16, ts: u8, source_issi: u32, dest_gssi: u32) {
+        let moved: Vec<Uuid> = self
+            .active_calls
+            .values()
+            .filter(|c| {
+                c.source_issi == source_issi
+                    && c.dest_gssi == dest_gssi
+                    && c.carrier_num == Some(carrier_num)
+                    && c.ts == Some(ts)
+            })
+            .map(|c| c.uuid)
+            .collect();
+        for uuid in moved {
+            tracing::info!(
+                "BrewEntity: talker {} keyed up here, ending its network session uuid={} gssi={}",
+                source_issi,
+                uuid,
+                dest_gssi
+            );
+            self.drop_network_call(uuid);
+        }
+    }
+
     /// CMCE had no listeners — hold the session until Affiliate promotes it (no circuit yet).
     fn hold_inbound_no_listeners(&mut self, brew_uuid: Uuid, dest_gssi: u32) {
         let Some(call) = self.active_calls.remove(&brew_uuid) else {
@@ -2376,6 +2403,42 @@ impl BrewEntity {
         }
     }
 
+    /// The server reports that `issi` registered on another station without a handover prepared
+    /// here: the radio left (unannounced reselection). An over it is talking in here ends now, as
+    /// when its uplink falls silent, instead of holding the group's floor until the uplink
+    /// inactivity timer fires; the SwMI controls who transmits (TS 100 392-2 clause 14.5.2.2.1 a)).
+    /// The station then stops serving it, without deregistering it on the server (the other
+    /// station owns the ISSI). A radio this station is sending away itself is left to that path.
+    fn handle_ms_moved(&mut self, queue: &mut MessageQueue, issi: u32) {
+        let sending_away = self.ho_departing.contains_key(&issi) || self.ho_requests.values().any(|r| r.issi == issi);
+        if sending_away || self.moved_away.contains_key(&issi) {
+            tracing::debug!("BrewEntity: ISSI {} reported on another station, already leaving", issi);
+            return;
+        }
+        let talking: Vec<(u16, u8)> = self
+            .ul_forwarded
+            .iter()
+            .filter(|(_, c)| c.kind == UlForwardKind::Group && c.source_issi == issi)
+            .map(|(slot, _)| *slot)
+            .collect();
+        for (carrier_num, ts) in talking {
+            tracing::info!(
+                "BrewEntity: talker {} left for another station, ending its over on carrier={} ts={}",
+                issi,
+                carrier_num,
+                ts
+            );
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Brew,
+                dest: TetraEntity::Cmce,
+                msg: SapMsgInner::CmceCallControl(CallControl::UlInactivityTimeout { carrier_num, ts }),
+            });
+        }
+        self.ho_departing.insert(issi, Instant::now());
+        self.drop_departed(queue);
+    }
+
     /// Serving side: radios sent to another station with its registration accept are dropped
     /// from MM here, without deregistering them on the server (the other station owns the ISSI
     /// now). CMCE sees the deregistration too and stops serving their groups if nobody else here
@@ -2469,6 +2532,7 @@ impl BrewEntity {
         ts: u8,
     ) {
         self.abort_pending_tails_on_slot(queue, carrier_num, ts, "local FloorGranted");
+        self.drop_moved_talker_session(carrier_num, ts, source_issi, dest_gssi);
 
         if !self.connected {
             tracing::trace!("BrewEntity: not connected, ignoring local call start");

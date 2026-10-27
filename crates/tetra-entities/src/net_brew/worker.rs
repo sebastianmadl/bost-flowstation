@@ -124,6 +124,10 @@ pub enum BrewEvent {
     /// Answer to a handover request this station sent (`SERVICE_HO_RESULT`)
     HandoverResult(BrewHoResult),
 
+    /// A radio registered here registered on another station without a prepared handover
+    /// (`SERVICE_MS_MOVED`, only from a server that offered `ms-moved`)
+    MsMoved { issi: u32 },
+
     /// Error from server
     ServerError { error_type: u8, data: Vec<u8> },
 }
@@ -259,8 +263,14 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
             })
         })
         .collect();
-    let capabilities: &[&str] = if handles_handover(config, server_extensions) { &[BREW_EXT_HANDOVER] } else { &[] };
-    Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, capabilities))
+    let mut capabilities: Vec<&str> = Vec::new();
+    if handles_handover(config, server_extensions) {
+        capabilities.push(BREW_EXT_HANDOVER);
+        if server_extensions.iter().any(|e| e == BREW_EXT_MS_MOVED) {
+            capabilities.push(BREW_EXT_MS_MOVED);
+        }
+    }
+    Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, &capabilities))
 }
 
 /// This station answers handover requests from other stations: the server relays them
@@ -814,6 +824,15 @@ impl<T: NetworkTransport> BrewWorker<T> {
                     Err(e) => tracing::warn!("BrewWorker: malformed handover message type={:#x}: {}", svc.service_type, e),
                 }
             }
+            BREW_SERVICE_MS_MOVED
+                if handles_handover(&self.config.config(), self.transport.server_brew_extensions())
+                    && self.transport.server_brew_extensions().iter().any(|e| e == BREW_EXT_MS_MOVED) =>
+            {
+                match parse_ms_moved(&svc.json_data) {
+                    Ok(issi) => self.send_event(BrewEvent::MsMoved { issi }),
+                    Err(e) => tracing::warn!("BrewWorker: malformed MS moved message: {}", e),
+                }
+            }
             _ => tracing::debug!("BrewWorker: service type={}: {}", svc.service_type, svc.json_data),
         }
     }
@@ -1289,6 +1308,45 @@ password = "x"
         assert!(multi.config().is_site_linked());
         let multi = bts_info_message(&multi.config(), &offered).unwrap();
         assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "multi-cell stations are not a target yet");
+    }
+
+    #[test]
+    fn bts_info_asks_for_ms_moved_only_where_offered() {
+        let mut offered: Vec<String> = HANDOVER.iter().map(|e| e.to_string()).collect();
+        offered.push(BREW_EXT_MS_MOVED.to_string());
+        let single = bts_info_message(&config("").config(), &offered).unwrap();
+        assert_eq!(json_of(&single)["capabilities"], serde_json::json!(["handover-v1", "ms-moved"]));
+
+        let multi = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
+        let multi = bts_info_message(&multi.config(), &offered).unwrap();
+        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "only with handover-v1");
+    }
+
+    fn ms_moved(json: &str) -> Vec<u8> {
+        let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_MS_MOVED];
+        msg.extend_from_slice(json.as_bytes());
+        msg.push(0);
+        msg
+    }
+
+    #[test]
+    fn ms_moved_reaches_the_entity_only_where_offered() {
+        let mut offered: Vec<&str> = HANDOVER.to_vec();
+        offered.push(BREW_EXT_MS_MOVED);
+        let (mut w, events) = worker_with_events(MockTransport::new().with_brew_extensions(&offered));
+        w.transport.connect().unwrap();
+        w.handle_incoming_binary(&ms_moved(r#"{"issi":2320001,"later":true}"#));
+        assert!(matches!(events.try_recv(), Ok(BrewEvent::MsMoved { issi: 2320001 })));
+        for bad in [r#"{"issi":"x"}"#, r#"{"issi":16777216}"#, r#"{}"#, "not json"] {
+            w.handle_incoming_binary(&ms_moved(bad));
+            assert!(events.try_recv().is_err(), "malformed {bad} is dropped");
+        }
+
+        // A server that did not offer ms-moved cannot have meant this station.
+        let (mut plain, events) = worker_with_events(MockTransport::new().with_brew_extensions(&HANDOVER));
+        plain.transport.connect().unwrap();
+        plain.handle_incoming_binary(&ms_moved(r#"{"issi":2320001}"#));
+        assert!(events.try_recv().is_err());
     }
 
     fn worker_with_events(transport: MockTransport) -> (BrewWorker<MockTransport>, Receiver<BrewEvent>) {

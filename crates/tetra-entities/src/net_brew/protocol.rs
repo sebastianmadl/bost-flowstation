@@ -825,6 +825,22 @@ pub fn build_service_ms_cell(issi: u32, carrier: u16, carrier_ext: u16) -> Vec<u
     buf
 }
 
+/// Service type the server sends to the station a radio was registered on when it registered on
+/// another station without a handover prepared through the server: `{"issi":2320001}`
+/// (brew-server)
+pub const BREW_SERVICE_MS_MOVED: u8 = 0x19;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it can send
+/// [`BREW_SERVICE_MS_MOVED`]; the station then names it in its `SERVICE_BTS_INFO` capabilities
+/// to get them
+pub const BREW_EXT_MS_MOVED: &str = "ms-moved";
+
+/// Parse a [`BREW_SERVICE_MS_MOVED`] payload: the ISSI that left (unknown fields ignored).
+pub fn parse_ms_moved(json_data: &str) -> Result<u32, String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    Ok(json_uint(&json, "issi", 0xff_ffff)? as u32)
+}
+
 /// Service type: serving station asks the target to prepare an announced cell reselection
 /// (U-PREPARE without a registration, TS 100 392-2 clause 18.4.1.4.6)
 pub const BREW_SERVICE_HO_PREPARE: u8 = 0x15;

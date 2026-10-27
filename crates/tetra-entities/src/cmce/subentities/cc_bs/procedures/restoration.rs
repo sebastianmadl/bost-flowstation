@@ -184,6 +184,9 @@ impl CcBsSubentity {
         // Clause 14.5.2.2.4: "granted to another user" switches the MS's U-plane on to receive,
         // "not granted" leaves it off; a listener restored into a running over must hear it.
         let grant = if request_to_transmit && (!call.tx_active || call.source_issi == sender.ssi) {
+            // A talker that was heard here through the network keeps its floor; forget the
+            // network session (see `take_over_moved_talker`).
+            call.take_over_moved_talker(sender.ssi);
             call.grant_floor(sender.ssi, Some(sender));
             TransmissionGrant::Granted
         } else if call.tx_active {

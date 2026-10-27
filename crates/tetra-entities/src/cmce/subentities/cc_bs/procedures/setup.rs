@@ -369,7 +369,7 @@ impl CcBsSubentity {
         calling_party: TetraAddress,
         call_id: u16,
     ) {
-        let Some(call) = self.active_calls.get(&call_id) else {
+        let Some(call) = self.active_calls.get_mut(&call_id) else {
             return;
         };
         let dest_gssi = call.dest_gssi;
@@ -378,8 +378,9 @@ impl CcBsSubentity {
         let usage = call.usage;
         let call_timeout = call.call_timeout;
         // Hand the floor to the joiner only when nobody is speaking (call in hangtime), exactly as
-        // a U-TX DEMAND would; an ongoing speaker keeps it.
-        let grant_floor = !call.is_tx_active();
+        // a U-TX DEMAND would; an ongoing speaker keeps it, unless the joiner is that speaker
+        // coming over from another station unannounced (see `take_over_moved_talker`).
+        let grant_floor = !call.is_tx_active() || call.take_over_moved_talker(calling_party.ssi);
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
             panic!()

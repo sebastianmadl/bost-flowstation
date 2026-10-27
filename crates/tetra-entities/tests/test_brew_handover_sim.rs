@@ -24,10 +24,12 @@ use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress};
 use tetra_entities::net_brew::entity::BrewEntity;
 use tetra_entities::net_brew::protocol::*;
 use tetra_entities::network::transports::{NetworkAddress, NetworkError, NetworkMessage, NetworkTransport};
-use tetra_pdus::cmce::enums::{cmce_pdu_type_dl::CmcePduTypeDl, party_type_identifier::PartyTypeIdentifier};
+use tetra_pdus::cmce::enums::{
+    cmce_pdu_type_dl::CmcePduTypeDl, party_type_identifier::PartyTypeIdentifier, transmission_grant::TransmissionGrant,
+};
 use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation;
 use tetra_pdus::cmce::pdus::{
-    d_call_restore::DCallRestore, d_info::DInfo, d_setup::DSetup, u_call_restore::UCallRestore, u_setup::USetup,
+    d_call_restore::DCallRestore, d_connect::DConnect, d_info::DInfo, d_setup::DSetup, u_call_restore::UCallRestore, u_setup::USetup,
     u_tx_ceased::UTxCeased,
 };
 use tetra_pdus::mle::enums::mle_protocol_discriminator::MleProtocolDiscriminator;
@@ -38,6 +40,7 @@ use tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocatio
 use tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink;
 use tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIdentity;
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
+use tetra_saps::control::call_control::CallControl;
 use tetra_saps::control::enums::{circuit_mode_type::CircuitModeType, communication_type::CommunicationType};
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
 use tetra_saps::tla::{TlaTlDataIndBl, TlaTlDataReqBl};
@@ -114,6 +117,7 @@ impl NetworkTransport for ChannelTransport {
 struct RelayCall {
     gssi: u32,
     owner: usize,
+    talker: u32,
     group_tx: Vec<u8>,
     peers: HashSet<usize>,
 }
@@ -139,6 +143,13 @@ struct Relay {
     /// Carriers whose station "goes away" after answering: the serving station gets status 2
     /// `gone` instead of the answer (the target may already have registered the radio).
     gone_carriers: HashSet<u16>,
+    /// ISSIs a station asked to hand over (HO_PREPARE / HO_FORWARD_REG): their next move is a
+    /// prepared one
+    prepared: HashSet<u32>,
+    /// Every MS_MOVED notice sent: (issi, station told)
+    ms_moved: Vec<(u32, usize)>,
+    /// GROUP_TX refused because another station's over held the group's floor: (station, gssi)
+    floor_refused: Vec<(usize, u32)>,
 }
 
 impl Relay {
@@ -153,6 +164,10 @@ impl Relay {
                     }
                     self.groups.entry(sub.number).or_default().extend(sub.groups.iter().copied());
                     self.late_entry(sub.number, from, &send);
+                    let prepared = self.prepared.remove(&sub.number);
+                    if let Some(left) = old.filter(|o| *o != from && !prepared) {
+                        self.radio_moved(sub.number, left, from, &send);
+                    }
                 }
                 BREW_SUBSCRIBER_DEREGISTER => {
                     self.deregistrations.push((sub.number, from));
@@ -175,6 +190,11 @@ impl Relay {
             },
             Ok(BrewMessage::CallControl(cc)) => match cc.payload {
                 BrewCallPayload::GroupTransmission(gt) if cc.call_state == CALL_STATE_GROUP_TX => {
+                    // brew-server: one over per group; another station's over keeps the floor.
+                    if self.calls.iter().any(|(id, c)| *id != cc.identifier && c.gssi == gt.destination && c.owner != from) {
+                        self.floor_refused.push((from, gt.destination));
+                        return;
+                    }
                     let peers: HashSet<usize> = self
                         .location
                         .iter()
@@ -189,6 +209,7 @@ impl Relay {
                         RelayCall {
                             gssi: gt.destination,
                             owner: from,
+                            talker: gt.source,
                             group_tx: data.to_vec(),
                             peers,
                         },
@@ -241,6 +262,7 @@ impl Relay {
                     // brew-server's relay: the capable station serving the carrier gets the request
                     // under the relay's own id; nobody → "no target" at once.
                     let mut req = parse_ho_request(svc.service_type, &svc.json_data).unwrap();
+                    self.prepared.insert(req.issi);
                     let target = self.cells.iter().find(|(st, (carriers, caps))| {
                         **st != from && carriers.contains(&req.target_carrier) && caps.iter().any(|c| c == BREW_EXT_HANDOVER)
                     });
@@ -281,6 +303,30 @@ impl Relay {
         }
     }
 
+    /// brew-server `handover::radio_moved`: the station a radio left unprepared is told (if it
+    /// asked for `ms-moved`), and an over the radio was talking in there ends on the network (if
+    /// the new station has handover-v1), so the radio can talk on from the new station.
+    fn radio_moved(&mut self, issi: u32, left: usize, to: usize, send: &impl Fn(usize, &[u8])) {
+        let caps = |st: usize| self.cells.get(&st).map(|(_, c)| c.clone()).unwrap_or_default();
+        if caps(left).iter().any(|c| c == BREW_EXT_MS_MOVED) {
+            let mut notice = vec![BREW_CLASS_SERVICE, BREW_SERVICE_MS_MOVED];
+            notice.extend_from_slice(format!(r#"{{"issi":{issi}}}"#).as_bytes());
+            notice.push(0);
+            send(left, &notice);
+            self.ms_moved.push((issi, left));
+        }
+        if !caps(to).iter().any(|c| c == BREW_EXT_HANDOVER) {
+            return;
+        }
+        let talking: Vec<Uuid> = self.calls.iter().filter(|(_, c)| c.owner == left && c.talker == issi).map(|(id, _)| *id).collect();
+        for id in talking {
+            let call = self.calls.remove(&id).unwrap();
+            for p in &call.peers {
+                send(*p, &build_group_idle(&id, 0));
+            }
+        }
+    }
+
     /// The server side of a forwarded registration towards the target (milestone 3 relay).
     fn forward_registration(&self, target_carrier: u16, req: &BrewHoRequest, wires: &[Arc<Mutex<Wire>>]) -> usize {
         let (target, _) = self
@@ -294,6 +340,25 @@ impl Relay {
 }
 
 // ─── Stations ───────────────────────────────────────────────────────────────────────────────────
+
+fn relay_brew() -> CfgBrew {
+    CfgBrew {
+        host: "relay.sim".into(),
+        port: 3000,
+        tls: false,
+        username: None,
+        password: None,
+        reconnect_delay: Duration::from_secs(1),
+        jitter_initial_latency_frames: 0,
+        feature_sds_enabled: true,
+        whitelisted_ssis: None,
+        feature_rssi_export: false,
+        feature_lip_forward: false,
+        lip_forward_issi: None,
+        pbx_gateway_issis: None,
+        backhaul_hysteresis_secs: 0,
+    }
+}
 
 struct Station {
     test: ComponentTest,
@@ -309,22 +374,7 @@ fn station(index: usize, location_area: u16, extensions: &[&str], configure: &dy
     config.cell.main_carrier = carrier;
     config.cell.location_area = location_area;
     config.cell.local_ssi_ranges = SortedDisjointSsiRanges::from_vec_ssirange(vec![]);
-    config.brew = Some(CfgBrew {
-        host: "relay.sim".into(),
-        port: 3000,
-        tls: false,
-        username: None,
-        password: None,
-        reconnect_delay: Duration::from_secs(1),
-        jitter_initial_latency_frames: 0,
-        feature_sds_enabled: true,
-        whitelisted_ssis: None,
-        feature_rssi_export: false,
-        feature_lip_forward: false,
-        lip_forward_issi: None,
-        pbx_gateway_issis: None,
-        backhaul_hysteresis_secs: 0,
-    });
+    config.brew = Some(relay_brew());
     configure(index, &mut config);
     let mut test = ComponentTest::from_config(config, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
     test.populate_entities(
@@ -730,6 +780,7 @@ fn sim_ten_stations_thirty_radios_unannounced_reselection_keeps_calls() {
     }
     assert!(restored >= 25, "only {restored} restores exercised");
 
+    assert!(sim.relay.ms_moved.is_empty(), "nobody is told without ms-moved");
     // The network has every radio where it last went.
     for &(issi, _, _) in &radios {
         assert!(sim.relay.location.contains_key(&issi), "ISSI {issi} still registered");
@@ -1390,4 +1441,172 @@ fn sim_announced_reselection_that_the_target_does_not_take() {
         checked += 1;
     }
     assert!(checked >= 25);
+}
+
+/// Last D-CONNECT sent to `issi`: its transmission grant.
+fn d_connect_grant(air: &[SapMsg], issi: u32) -> Option<TransmissionGrant> {
+    air_to(air, issi).iter().rev().find_map(|bits| {
+        let mut b = BitBuffer::from_bitstr(bits.strip_prefix(PD_CMCE)?);
+        (b.peek_bits(5) == Some(CmcePduTypeDl::DConnect.into_raw())).then_some(())?;
+        DConnect::from_bitbuf(&mut b).ok().map(|c| c.transmission_grant)
+    })
+}
+
+/// Field case C: a talker changes station unannounced in the middle of its over and presses PTT
+/// again on the new station (U-SETUP, as the MTP6650 does). With `ms-moved` the network ends the
+/// over on the station it left and tells that station, which drops the radio without
+/// deregistering it; the new station gives the talker the floor (TS 100 392-2 clause
+/// 14.5.2.2.1 a)) whether the network's end of the old over reaches it before or after the
+/// U-SETUP, and the new over goes out on the network. Every one of the 30 radios talks once:
+/// half move to a station with listeners of the group, half to one without.
+#[test]
+fn sim_talker_that_moves_unannounced_keeps_talking() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED];
+    let mut sim = Sim::new(&las, &extensions);
+    assert!(
+        sim.relay
+            .cells
+            .values()
+            .all(|(_, caps)| caps == &vec![BREW_EXT_HANDOVER.to_string(), BREW_EXT_MS_MOVED.to_string()]),
+        "stations ask for ms-moved where the server offers it"
+    );
+
+    let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
+    for &(issi, st, gssi) in &radios {
+        sim.register(st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    }
+
+    let mut moved = Vec::new();
+    for &(talker, _, gssi) in &radios {
+        sim.clear_air();
+        let from = sim.relay.location[&talker];
+        let old_session = sim.start_call(from, talker, gssi);
+        sim.steps(20);
+
+        let to = (from + if talker % 2 == 0 { 5 } else { 3 }) % STATIONS;
+        sim.register(to, talker, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+        sim.submit(to, u_setup(talker, gssi));
+        sim.run_until(&format!("ISSI {talker} talks from station {to}"), |s| {
+            s.relay.calls.values().any(|c| c.gssi == gssi && c.owner == to && c.talker == talker)
+        });
+        assert_eq!(
+            d_connect_grant(&sim.stations[to].air, talker),
+            Some(TransmissionGrant::Granted),
+            "ISSI {talker} keeps the floor on station {to}"
+        );
+        assert!(!sim.relay.calls.contains_key(&old_session), "the over on station {from} ended on the network");
+        assert!(sim.relay.ms_moved.contains(&(talker, from)), "station {from} was told");
+        assert!(sim.relay.floor_refused.is_empty(), "no over was refused: {:?}", sim.relay.floor_refused);
+
+        // The new over holds: the old over's late end (GROUP_IDLE from the station the radio
+        // left, after it ends its own leg) must not take the floor away here.
+        sim.steps(100);
+        let session = *sim
+            .relay
+            .calls
+            .iter()
+            .find(|(_, c)| c.gssi == gssi && c.owner == to && c.talker == talker)
+            .expect("the new over still runs")
+            .0;
+        sim.end_call(to, talker, gssi, session);
+        moved.push((talker, from, to));
+    }
+    assert!(moved.len() >= 25);
+
+    sim.run_until("the stations dropped the radios that left", |s| {
+        moved.iter().all(|(issi, from, _)| {
+            s.relay.location.get(issi) == Some(from)
+                || !s.stations[*from].test.get_shared_config().state_read().subscribers.is_registered(*issi)
+        })
+    });
+    for (issi, from, _) in &moved {
+        assert!(!sim.relay.deregistrations.contains(&(*issi, *from)), "station {from} deregistered ISSI {issi} on the network");
+    }
+}
+
+/// The Brew side of case C on the new station: once CMCE gives the moved talker the floor of the
+/// over it was heard on, that network session is over here. The old station's GROUP_IDLE that
+/// follows must not start a pending tail on the slot the talker now sends on (its playout and
+/// NetworkCallEnd would hit the new over).
+#[test]
+fn moved_talker_floor_ends_its_network_session_on_the_new_station() {
+    let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
+    config.brew = Some(relay_brew());
+    let mut test = ComponentTest::from_config(config, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![], vec![TetraEntity::Cmce, TetraEntity::Umac]);
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let transport = ChannelTransport {
+        wire: wire.clone(),
+        extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
+        connected: false,
+    };
+    test.register_entity(BrewEntity::new(test.get_shared_config(), transport));
+    let (talker, gssi, other) = (3_100_001, 2001, 3_100_002);
+    let old = Uuid::from_u128(0xC0);
+    let to_cmce = |test: &mut ComponentTest, cc: CallControl| {
+        test.submit_message(SapMsg {
+            sap: Sap::Control,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Brew,
+            msg: SapMsgInner::CmceCallControl(cc),
+        })
+    };
+    let run = |test: &mut ComponentTest, wire: &Arc<Mutex<Wire>>, ms: u64| {
+        let mut out = Vec::new();
+        let until = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < until {
+            test.run_stack(Some(1));
+            out.extend(test.dump_sinks());
+            wire.lock().unwrap().to_server.clear();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        out
+    };
+    let ends = |msgs: &[SapMsg], uuid: Uuid| {
+        msgs.iter()
+            .any(|m| matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::NetworkCallEnd { brew_uuid }) if *brew_uuid == uuid))
+    };
+    run(&mut test, &wire, 50);
+
+    for (round, (speaker, uuid)) in [(other, Uuid::from_u128(0xC1)), (talker, old)].into_iter().enumerate() {
+        let group_tx = build_group_tx(&uuid, speaker, gssi, 0, 0, None);
+        wire.lock().unwrap().to_station.push_back(group_tx);
+        let msgs = run(&mut test, &wire, 100);
+        assert!(msgs.iter().any(
+            |m| matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::NetworkCallStart { brew_uuid, .. }) if *brew_uuid == uuid)
+        ));
+        let (call_id, ts) = (5 + round as u16, 2 + round as u8);
+        to_cmce(
+            &mut test,
+            CallControl::NetworkCallReady {
+                brew_uuid: uuid,
+                call_id,
+                carrier_num: 1521,
+                ts,
+                usage: 4,
+            },
+        );
+        run(&mut test, &wire, 50);
+        // CMCE hands the floor of that over to the talker that came here.
+        to_cmce(
+            &mut test,
+            CallControl::FloorGranted {
+                call_id,
+                source_issi: talker,
+                dest_gssi: gssi,
+                carrier_num: 1521,
+                ts,
+            },
+        );
+        run(&mut test, &wire, 50);
+        wire.lock().unwrap().to_station.push_back(build_group_idle(&uuid, 0));
+        let msgs = run(&mut test, &wire, 1500);
+        if speaker == talker {
+            assert!(!ends(&msgs, uuid), "the moved talker's old session left a tail on its new over");
+        } else {
+            // Somebody else's over is not touched (CMCE would not hand its floor over anyway).
+            assert!(ends(&msgs, uuid), "another talker's over ends as before");
+        }
+    }
 }

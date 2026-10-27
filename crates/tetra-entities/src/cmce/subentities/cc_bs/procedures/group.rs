@@ -121,7 +121,9 @@ impl CcBsSubentity {
         let carrier_num = call.carrier_num;
         let dest_ssi = call.dest_gssi;
         let current_speaker = call.source_issi;
-        let grant_now = matches!(state, GroupCallState::NoActiveSpeaker { .. });
+        // The network talker of this over has moved here unannounced and keys up again: it
+        // keeps the floor (see `take_over_moved_talker`).
+        let grant_now = matches!(state, GroupCallState::NoActiveSpeaker { .. }) || call.take_over_moved_talker(requesting_party.ssi);
         let queue_result = if grant_now {
             call.grant_floor(requesting_party.ssi, Some(requesting_party));
             None
