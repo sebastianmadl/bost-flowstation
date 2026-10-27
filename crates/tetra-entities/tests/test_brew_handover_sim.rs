@@ -609,6 +609,8 @@ struct Sim {
     stations: Vec<Station>,
     wires: Vec<Arc<Mutex<Wire>>>,
     relay: Relay,
+    /// TDMA ticks run so far
+    ticks: usize,
 }
 
 impl Sim {
@@ -629,6 +631,7 @@ impl Sim {
             stations,
             wires,
             relay: Relay::default(),
+            ticks: 0,
         };
         sim.run_until("every station announced its cell", |s| s.relay.cells.len() == location_areas.len());
         sim
@@ -637,6 +640,7 @@ impl Sim {
     /// One TDMA tick on every station, then deliver what the stations sent to the relay. Paced so
     /// the stations' TDMA time does not outrun the worker threads (CMCE timers run on TDMA time).
     fn step(&mut self) {
+        self.ticks += 1;
         for s in &mut self.stations {
             s.test.run_stack(Some(1));
             s.air.extend(s.test.dump_sinks().into_iter().filter(|m| m.dest == TetraEntity::Llc));
@@ -1608,5 +1612,50 @@ fn moved_talker_floor_ends_its_network_session_on_the_new_station() {
             // Somebody else's over is not touched (CMCE would not hand its floor over anyway).
             assert!(ends(&msgs, uuid), "another talker's over ends as before");
         }
+    }
+}
+
+/// Field cases A and B: listeners that leave unannounced. With `ms-moved` the station they left
+/// stops serving them, and once no radio of the group is left there it releases its leg of the
+/// network call instead of sending it to nobody until the call ends. Stations i and i + 5 hold
+/// the three radios each of group i; the talker is on station i, the three on station i + 5 move
+/// to three other stations and restore there.
+#[test]
+fn sim_station_left_by_all_listeners_releases_the_call() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let mut sim = Sim::new(&las, &["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED]);
+    let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
+    for &(issi, st, gssi) in &radios {
+        sim.register(st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    }
+
+    for (i, gssi) in GROUPS.into_iter().enumerate() {
+        sim.clear_air();
+        let (talker, left) = (FIRST_ISSI + i as u32, i + 5);
+        let session = sim.start_call(i, talker, gssi);
+        let started = sim.ticks;
+        sim.run_until(&format!("station {left} runs the call on {gssi}"), |s| s.local_call_id(left, gssi).is_some());
+        let leavers: Vec<u32> = radios.iter().filter(|(_, st, _)| *st == left).map(|(issi, _, _)| *issi).collect();
+        assert_eq!(leavers.len(), 3);
+        for (n, &issi) in leavers.iter().enumerate() {
+            let to = (left + 1 + n) % STATIONS;
+            let old_call_id = sim.local_call_id(left, gssi).unwrap();
+            assert!(!group_release_sent(&sim.stations[left].air, gssi), "station {left} released while radios of {gssi} are there");
+            sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+            sim.submit(to, u_restore(issi, old_call_id, gssi, Some(las[left] as u64)));
+            sim.run_until(&format!("ISSI {issi} is restored on station {to}"), |s| restore_ack(&s.stations[to].air, issi).is_some());
+        }
+        sim.run_until(&format!("station {left} released its leg of the call on {gssi}"), |s| {
+            group_release_sent(&s.stations[left].air, gssi)
+        });
+        // The sim sends no voice, so CMCE's network media watchdog would release the leg after
+        // 720 ticks anyway; the release must come well before that.
+        assert!(sim.ticks - started < 500, "station {left} released only after {} ticks", sim.ticks - started);
+        assert!(sim.relay.calls.contains_key(&session), "the call itself runs on");
+        for &issi in &leavers {
+            assert!(sim.relay.ms_moved.contains(&(issi, left)));
+            assert!(!sim.relay.deregistrations.contains(&(issi, left)), "station {left} deregistered ISSI {issi}");
+        }
+        sim.end_call(i, talker, gssi, session);
     }
 }
