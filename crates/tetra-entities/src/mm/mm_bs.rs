@@ -963,19 +963,13 @@ impl MmBs {
         // Registration / affiliation / EE state changed â€” persist for restart recovery (debounced).
         self.recovery_mark_dirty();
 
-        // Preserve the accepted location update type (EN 300 392-2 cl. 16.9.2.2): some radios key
-        // attach-completion off the accept type, so answering an ItsiAttach with
-        // PeriodicLocationUpdating leaves them believing the attach never completed. The periodic
-        // interval is not carried in D-LOCATION-UPDATE-ACCEPT anyway â€” it is signalled by the
-        // broadcast timers, and this stack re-attracts radios with an explicit
-        // D-LOCATION-UPDATE-COMMAND at T351 expiry (see tick_start), which is what the terminals
-        // in the field actually respond to.
-        let periodic_secs = self.config.config().cell.periodic_registration_secs;
-        let accept_type = if periodic_secs > 0 && pdu.location_update_type != LocationUpdateType::ItsiAttach {
-            LocationUpdateType::PeriodicLocationUpdating
-        } else {
-            pdu.location_update_type
-        };
+        // The location update accept type "shall indicate the type of registration" (TS 100 392-2
+        // clause 16.10.35a, table 16.68), so the accept names the registration the MS asked for.
+        // Tables 16.67 and 16.68 differ only in the migrating values 001 and 101, which never get
+        // here (rejected above). Some radios key attach-completion off the accept type. The
+        // periodic interval is not carried in D-LOCATION-UPDATE-ACCEPT; this stack re-attracts
+        // radios with an explicit D-LOCATION-UPDATE-COMMAND at T351 expiry (see tick_start).
+        let accept_type = pdu.location_update_type;
 
         // Build D-LOCATION UPDATE ACCEPT pdu
         let pdu_response = DLocationUpdateAccept {

@@ -542,14 +542,9 @@ fn test_registration_rate_limit_drops_repeat_flood_from_one_issi() {
     );
 }
 
-/// ETSI EN 300 392-2 cl. 16.9.2.2: the accept must preserve the accepted location update type.
-/// Answering an ItsiAttach with PeriodicLocationUpdating leaves radios that key attach-completion
-/// off the accept type believing the attach never completed.
-#[test]
-fn test_itsi_attach_accept_preserves_accept_type() {
-    debug::setup_logging_verbose();
-    const ATTACHER: u32 = 2260812;
-
+/// Location update accept type MM answers a registration of `lu_type` with, on a cell with
+/// periodic registration configured.
+fn accept_type_for(issi: u32, lu_type: LocationUpdateType) -> Option<u64> {
     let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
     config.cell.periodic_registration_secs = 300;
     let mut test = ComponentTest::from_config(config, Some(TdmaTime::default()));
@@ -557,11 +552,11 @@ fn test_itsi_attach_accept_preserves_accept_type() {
     let mm = MmBs::new(test.get_shared_config(), None, None);
     test.register_entity(mm);
 
-    submit_location_update(&mut test, ATTACHER, 0, LocationUpdateType::ItsiAttach);
+    submit_location_update(&mut test, issi, 0, lu_type);
     let msgs = test.dump_sinks();
 
     let want = MmPduTypeDl::DLocationUpdateAccept.into_raw();
-    let accept_type = msgs.iter().find_map(|m| {
+    msgs.iter().find_map(|m| {
         let SapMsgInner::LmmMleUnitdataReq(ref req) = m.msg else {
             return None;
         };
@@ -570,12 +565,35 @@ fn test_itsi_attach_accept_preserves_accept_type() {
             return None;
         }
         sdu.read_field(3, "location_update_accept_type").ok()
-    });
+    })
+}
+
+/// TS 100 392-2 clause 16.10.35a: the accept type "shall indicate the type of registration".
+/// Answering an ItsiAttach with PeriodicLocationUpdating leaves radios that key attach-completion
+/// off the accept type believing the attach never completed.
+#[test]
+fn test_itsi_attach_accept_preserves_accept_type() {
+    debug::setup_logging_verbose();
     assert_eq!(
-        accept_type,
+        accept_type_for(2260812, LocationUpdateType::ItsiAttach),
         Some(LocationUpdateType::ItsiAttach.into_raw()),
         "an ItsiAttach must be accepted as an ItsiAttach"
     );
+}
+
+/// Clause 16.10.35a, table 16.68: a roaming, demand (the answer to D-LOCATION UPDATE COMMAND,
+/// clause 16.4.3) or periodic registration is accepted as that type, also with periodic
+/// registration configured (before: always "periodic location updating").
+#[test]
+fn test_location_update_accept_type_names_the_registration() {
+    debug::setup_logging_verbose();
+    for (lu_type, accepted) in [
+        (LocationUpdateType::RoamingLocationUpdating, 0b000),
+        (LocationUpdateType::PeriodicLocationUpdating, 0b010),
+        (LocationUpdateType::DemandLocationUpdating, 0b110),
+    ] {
+        assert_eq!(accept_type_for(2320972, lu_type), Some(accepted), "{lu_type:?}");
+    }
 }
 
 /// DGNA assign (SS-DGNA default): a dashboard control command makes MM affiliate the GSSI in the

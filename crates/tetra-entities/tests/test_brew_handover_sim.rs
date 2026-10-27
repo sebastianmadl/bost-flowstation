@@ -410,7 +410,8 @@ fn u_tx_ceased(issi: u32, call_id: u16) -> SapMsg {
 fn u_restore(issi: u32, call_id: u16, gssi: u32, old_la: Option<u64>) -> SapMsg {
     let call_restore = UCallRestore {
         call_identifier: call_id,
-        request_to_transmit_send_data: false,
+        // A listener: "request that other MS may transmit" (table 14.74).
+        request_to_transmit_send_data: true,
         other_party_type_identifier: 1,
         other_party_short_number_address: None,
         other_party_ssi: Some(gssi as u64),
@@ -934,4 +935,111 @@ fn sim_group_report_after_reselection_keeps_the_call_running() {
         sim.end_call(st, talker, gssi, session);
     }
     assert!(moved >= 25, "only {moved} radios exercised");
+}
+
+/// Location update accept type of the last D-LOCATION UPDATE ACCEPT a station sent to `issi`
+/// (3 bits after the PDU type, table 16.68).
+fn accept_type(air: &[SapMsg], issi: u32) -> Option<u64> {
+    let prefix = mm_pdu(MmPduTypeDl::DLocationUpdateAccept);
+    air_to(air, issi)
+        .iter()
+        .rev()
+        .find_map(|bits| bits.strip_prefix(&prefix).map(|rest| BitBuffer::from_bitstr(rest).peek_bits(3).unwrap()))
+}
+
+fn accepts(air: &[SapMsg], issi: u32) -> usize {
+    let prefix = mm_pdu(MmPduTypeDl::DLocationUpdateAccept);
+    air_to(air, issi).iter().filter(|bits| bits.starts_with(&prefix)).count()
+}
+
+/// `issi` registers on `station` with `lu_type`; returns the accept type of the answer.
+fn register_accepted_as(sim: &mut Sim, station: usize, issi: u32, lu_type: LocationUpdateType, groups: &[u32]) -> Option<u64> {
+    let before = accepts(&sim.stations[station].air, issi);
+    sim.register(station, issi, lu_type, groups);
+    sim.run_until(&format!("ISSI {issi} gets an accept on station {station}"), |s| {
+        accepts(&s.stations[station].air, issi) > before
+    });
+    accept_type(&sim.stations[station].air, issi)
+}
+
+/// Transmission grant of the D-CALL RESTORE in the D-RESTORE-ACK a station sent to `issi`.
+fn restore_grant(air: &[SapMsg], issi: u32) -> Option<u8> {
+    air_to(air, issi).iter().find_map(|bits| {
+        let rest = bits.strip_prefix(&format!("{PD_MLE}1000"))?;
+        DCallRestore::from_bitbuf(&mut BitBuffer::from_bitstr(rest)).ok().map(|r| r.transmission_grant)
+    })
+}
+
+/// Three stations (one LA each), five radios on one group. Every registration is accepted as the
+/// type the radio asked for (clause 16.10.35a, table 16.68): roaming, demand (the answer to the
+/// station's D-LOCATION UPDATE COMMAND) and periodic. Listeners that move mid-call restore with
+/// "request that other MS may transmit" (table 14.74) and get "granted to another user" while
+/// the talker talks, and "not granted" between overs (clause 14.5.2.2.4).
+#[test]
+fn sim_three_stations_five_radios_accept_types_and_restore_grants() {
+    const GRANTED_TO_OTHER_USER: u8 = 3;
+    const NOT_GRANTED: u8 = 1;
+    let mut sim = Sim::new(&[1, 2, 3], &EXTENSIONS);
+    let gssi = GROUPS[0];
+    let radios: Vec<(u32, usize)> = (0..5u32).map(|r| (FIRST_ISSI + r, r as usize % 3)).collect();
+    for &(issi, st) in &radios {
+        let accepted = register_accepted_as(&mut sim, st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+        assert_eq!(accepted, Some(0b000), "roaming accept for {issi}");
+    }
+
+    // Periodic registration on the current station.
+    let (periodic, st) = radios[1];
+    let accepted = register_accepted_as(&mut sim, st, periodic, LocationUpdateType::PeriodicLocationUpdating, &[gssi]);
+    assert_eq!(accepted, Some(0b010), "periodic accept");
+
+    // Radio 0 talks on station 0; the others move one station on and restore as listeners.
+    sim.clear_air();
+    let (talker, talker_st) = radios[0];
+    let session = sim.start_call(talker_st, talker, gssi);
+    sim.steps(20);
+    for &(issi, _) in &radios[1..] {
+        let from = sim.relay.location[&issi];
+        let to = (from + 1) % 3;
+        let old_call_id = sim.local_call_id(from, gssi).unwrap_or(1);
+        // Odd radios leave the group out, so the station commands a group report (demand).
+        let reports_group = issi % 2 == 0;
+        let reported = if reports_group { vec![gssi] } else { vec![] };
+        let accepted = register_accepted_as(&mut sim, to, issi, LocationUpdateType::RoamingLocationUpdating, &reported);
+        assert_eq!(accepted, Some(0b000), "roaming accept for {issi} on {to}");
+        sim.submit(to, u_restore(issi, old_call_id, gssi, Some(from as u64 + 1)));
+        sim.run_until(&format!("ISSI {issi} gets an answer on station {to}"), |s| {
+            restore_ack(&s.stations[to].air, issi).is_some() || restore_fail(&s.stations[to].air, issi)
+        });
+        assert_eq!(restore_ack(&sim.stations[to].air, issi), sim.local_call_id(to, gssi), "{issi} restored on {to}");
+        assert_eq!(restore_grant(&sim.stations[to].air, issi), Some(GRANTED_TO_OTHER_USER), "{issi} listens on {to}");
+        if !reports_group {
+            assert!(
+                air_to(&sim.stations[to].air, issi).iter().any(|b| b.starts_with(&mm_pdu(MmPduTypeDl::DLocationUpdateCommand))),
+                "station {to} asks {issi} for its groups"
+            );
+            let accepted = register_accepted_as(&mut sim, to, issi, LocationUpdateType::DemandLocationUpdating, &[gssi]);
+            assert_eq!(accepted, Some(0b110), "demand accept for {issi} on {to}");
+        }
+    }
+
+    // Between overs: the talker releases PTT, a listener moves to the talker's station within
+    // hang time and restores without asking to transmit. The floor is free but not its to take.
+    let call_id = sim.local_call_id(talker_st, gssi).unwrap();
+    sim.submit(talker_st, u_tx_ceased(talker, call_id));
+    sim.steps(2);
+    let &(mover, _) = radios[1..].iter().find(|(issi, _)| sim.relay.location[issi] != talker_st).unwrap();
+    let from = sim.relay.location[&mover];
+    sim.stations[talker_st].air.clear();
+    sim.register(talker_st, mover, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    sim.submit(talker_st, u_restore(mover, sim.local_call_id(from, gssi).unwrap_or(1), gssi, Some(from as u64 + 1)));
+    sim.run_until(&format!("ISSI {mover} gets an answer between overs"), |s| {
+        restore_ack(&s.stations[talker_st].air, mover).is_some() || restore_fail(&s.stations[talker_st].air, mover)
+    });
+    assert_eq!(restore_grant(&sim.stations[talker_st].air, mover), Some(NOT_GRANTED), "listener not granted between overs");
+
+    sim.run_until("the over ended on the network", |s| !s.relay.calls.contains_key(&session));
+    sim.steps(600);
+    for &(issi, _) in &radios {
+        assert!(sim.relay.location.contains_key(&issi), "ISSI {issi} still registered");
+    }
 }

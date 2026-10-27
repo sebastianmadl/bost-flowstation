@@ -325,11 +325,12 @@ fn build_u_disconnect_msg(sender_issi: u32, call_id: u16) -> SapMsg {
     lcmc_ind(sender_issi, sdu)
 }
 
-/// Helper: build a U-CALL RESTORE for `call_id`, optionally asking for the floor.
+/// Helper: build a U-CALL RESTORE for `call_id`, optionally asking for the floor ("request to
+/// transmit/send data" 0 asks to transmit, 1 lets another MS transmit, table 14.74).
 fn build_u_call_restore_msg(sender_issi: u32, call_id: u16, other_party_ssi: u32, request_to_transmit: bool) -> SapMsg {
     let u_call_restore = UCallRestore {
         call_identifier: call_id,
-        request_to_transmit_send_data: request_to_transmit,
+        request_to_transmit_send_data: !request_to_transmit,
         other_party_type_identifier: 1, // SSI
         other_party_short_number_address: None,
         other_party_ssi: Some(other_party_ssi as u64),

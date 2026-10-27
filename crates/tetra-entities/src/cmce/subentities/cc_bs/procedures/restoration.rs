@@ -41,6 +41,9 @@ impl CcBsSubentity {
     ) {
         let restored_call_id = pdu.call_identifier;
         let mut call_id = restored_call_id;
+        // "Request to transmit/send data": 0 asks to transmit, 1 asks that another MS may
+        // transmit (TS 100 392-2 clause 14.8.36, table 14.74).
+        let request_to_transmit = !pdu.request_to_transmit_send_data;
         // The other party of a group call is its GSSI. The basic service information (note 3 to
         // clause 14.7.2.2) tells an individual call apart; without it, assume a group call as the
         // multi-cell lookup always did.
@@ -88,7 +91,7 @@ impl CcBsSubentity {
                         endpoint_id,
                         call_id,
                         gssi,
-                        request_to_transmit: pdu.request_to_transmit_send_data,
+                        request_to_transmit,
                         since: self.dltime,
                     },
                 );
@@ -111,7 +114,7 @@ impl CcBsSubentity {
             // the U-TX DEMAND path). Granting while the peer is talking gives two simultaneous
             // transmitters and a stale floor_holder the UL-inactivity watchdog never ceases.
             // Duplex calls keep floor_holder = None, so they still always grant.
-            let grant = if !pdu.request_to_transmit_send_data {
+            let grant = if !request_to_transmit {
                 TransmissionGrant::NotGranted
             } else if call.floor_holder.is_none() || call.is_floor_held_by(sender.ssi) {
                 if call.is_simplex() {
@@ -135,7 +138,7 @@ impl CcBsSubentity {
                 endpoint_id,
                 restored_call_id,
                 call_id,
-                pdu.request_to_transmit_send_data,
+                request_to_transmit,
             );
             return;
         }
