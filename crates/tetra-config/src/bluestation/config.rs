@@ -5,7 +5,7 @@ use tetra_core::freqs::FreqInfo;
 
 use crate::bluestation::{
     CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgExtraCell, CfgGeoalarm, CfgHealth, CfgNetInfo, CfgPhyIo, CfgRecovery,
-    CfgSecurity, CfgSnomNotify, CfgSoapySdr, CfgTpg2200Action, CfgWxService, PhyBackend, StackState,
+    CfgSecurity, CfgSnomNotify, CfgSoapySdr, CfgTpg2200Action, CfgWxService, PhyBackend, StackState, rxlev_access_min_code,
 };
 
 use super::sec_brew::CfgBrew;
@@ -142,6 +142,8 @@ pub struct StackConfig {
 /// station's cells (0 = none, 1 = announced, 2 = unannounced, 3 = both).
 const SIBLING_CELL_RESELECTION_TYPES: u8 = 3;
 
+const RXLEV_ACCESS_MIN_RANGE: &str = "rxlev_access_min_dbm must be -125 to -50 in 5 dB steps (table 21.65)";
+
 /// "Main carrier number extension" for a neighbour whose band plan differs from the serving
 /// cell's (otherwise a radio would look for the neighbour's carrier number on the serving cell's
 /// plan). See [`carrier_band_plan`].
@@ -276,7 +278,9 @@ impl StackConfig {
                     location_area: (sibling.location_area != cell.location_area).then_some(sibling.location_area),
                     maximum_ms_transmit_power: (sibling.ms_txpwr_max_cell != cell.ms_txpwr_max_cell)
                         .then_some(sibling.ms_txpwr_max_cell),
-                    minimum_rx_access_level: None,
+                    // 18.5.12: needed by the MS for C2 when it differs from the serving cell.
+                    minimum_rx_access_level: (sibling.rxlev_access_min_dbm != cell.rxlev_access_min_dbm)
+                        .then(|| sibling.rxlev_access_min()),
                     subscriber_class: None,
                     bs_service_details: None,
                     timeshare_cell_information_or_security_parameters: None,
@@ -389,6 +393,9 @@ impl StackConfig {
             if c.cell.ms_txpwr_max_cell > 7 {
                 return Err(format!("{}: ms_txpwr_max_cell must be 0-7 (3 bits)", c.id));
             }
+            if rxlev_access_min_code(c.cell.rxlev_access_min_dbm).is_none() {
+                return Err(format!("{}: {RXLEV_ACCESS_MIN_RANGE}", c.id));
+            }
             Self::validate_cell_rf(self.phy_io.backend, &c.cell, c.soapysdr.as_ref()).map_err(|e| format!("{}: {e}", c.id))?;
         }
 
@@ -454,6 +461,9 @@ impl StackConfig {
 
         if self.cell.ms_txpwr_max_cell > 7 {
             return Err("ms_txpwr_max_cell must be 0-7 (3 bits)");
+        }
+        if rxlev_access_min_code(self.cell.rxlev_access_min_dbm).is_none() {
+            return Err(RXLEV_ACCESS_MIN_RANGE);
         }
 
         // The WAP/SNDCP gateway is driven solely by `[cell_info.wap_ip].enabled`

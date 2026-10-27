@@ -718,6 +718,29 @@ main_carrier_number = 1586
     }
 
     #[test]
+    fn rxlev_access_min_defaults_to_minus_110_and_is_configurable() {
+        // Absent: -110 dBm, SYSINFO code 3 (table 21.65), config still valid.
+        let cfg = from_toml_str(&minimal_toml("")).expect("parse");
+        assert_eq!(cfg.cell.rxlev_access_min_dbm, -110);
+        assert_eq!(cfg.cell.rxlev_access_min(), 3);
+        cfg.validate().expect("default is valid");
+
+        // Ends of table 21.65 and a value in between.
+        for (dbm, code) in [(-125, 0), (-75, 10), (-50, 15)] {
+            let cfg = from_toml_str(&minimal_toml(&format!("rxlev_access_min_dbm = {dbm}"))).expect("parse");
+            cfg.validate().expect("coded level is valid");
+            assert_eq!(cfg.cell.rxlev_access_min(), code, "{dbm} dBm");
+        }
+
+        // Not one of the 16 coded levels.
+        for dbm in [-130, -45, -77, 0] {
+            let cfg = from_toml_str(&minimal_toml(&format!("rxlev_access_min_dbm = {dbm}"))).expect("parse");
+            let err = cfg.validate().unwrap_err();
+            assert!(err.contains("rxlev_access_min_dbm"), "{dbm}: {err}");
+        }
+    }
+
+    #[test]
     fn try_from_parts_errors_instead_of_panicking_on_bad_config() {
         use crate::bluestation::SharedConfig;
         // ms_txpwr_max_cell = 8 is out of the 0-7 range and fails validate().

@@ -254,6 +254,9 @@ voice_service = true
 # u_plane_dtx             = false   # advertise U-plane DTX (discontinuous TX) support (default false)
 # frame_18_ext            = false   # frame-18 extension flag in SYNC (default false)
 # ms_txpwr_max_cell       = 4       # max MS TX power index (Table 18.57; 4 = 30 dBm / 1 W; default 4)
+# rxlev_access_min_dbm    = -110    # RXLEV_ACCESS_MIN in SYSINFO (table 21.65; -125..-50 dBm in 5 dB steps;
+#                                   # default -110). A higher value lowers C1, so radios reselect a better
+#                                   # neighbour earlier, but radios below it cannot access this cell.
 # subscriber_class        = 0xFFFF  # 16-bit mask of subscriber classes allowed on this cell (default all)
 
 ###############################################################################

@@ -290,6 +290,7 @@ location_area = 2
         assert_eq!(added.cell_reselection_types_supported, 3, "announced and unannounced");
         assert_eq!(added.main_carrier_number_extension, None, "same band plan");
         assert_eq!(added.maximum_ms_transmit_power, None, "same max power");
+        assert_eq!(added.minimum_rx_access_level, None, "same RX access level");
         assert_eq!(cfg.cell.neighbor_cells_ca[0].cell_reselection_types_supported, 1, "configured entry untouched");
         assert_eq!(cfg.for_extra_cell(CellId(2)).unwrap().cell.neighbor_cells_ca.len(), 2);
     }
@@ -317,6 +318,28 @@ location_area = 2
         assert_eq!(back.main_carrier_number, 1521);
         assert_eq!(back.main_carrier_number_extension, Some((4 << 6) | (0 << 4) | (4 << 1)), "primary's plan, offset 0");
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn sibling_with_another_rx_access_level_is_described_to_radios() {
+        // Primary -75 dBm (code 10, table 21.65), the extra cell keeps the -110 dBm default
+        // (code 3) by overriding the inherited value.
+        let mut cfg = parse(
+            "rxlev_access_min_dbm = -75\n[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\nrxlev_access_min_dbm = -110\n",
+        )
+        .unwrap();
+        cfg.add_sibling_neighbours();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.cell.neighbor_cells_ca[0].minimum_rx_access_level, Some(3), "18.5.12");
+        assert_eq!(cfg.extra_cells[0].cell.neighbor_cells_ca[0].minimum_rx_access_level, Some(10));
+    }
+
+    #[test]
+    fn extra_cell_inherits_rx_access_level_and_bad_override_is_rejected() {
+        let cfg = parse("rxlev_access_min_dbm = -80\n[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n").unwrap();
+        assert_eq!(cfg.extra_cells[0].cell.rxlev_access_min(), 9, "inherited from [cell_info]");
+        let cfg = parse("[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\nrxlev_access_min_dbm = -77\n").unwrap();
+        assert!(cfg.validate().unwrap_err().contains("rxlev_access_min_dbm"));
     }
 
     #[test]

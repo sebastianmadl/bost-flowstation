@@ -1691,3 +1691,18 @@ fn test_downlink_to_encrypted_radio_is_encrypted() {
     let clear_sdu: String = (0..sdu_bits.len()).map(|_| if block.read_bit().unwrap() == 1 { '1' } else { '0' }).collect();
     assert_eq!(clear_sdu, sdu_bits, "TM-SDU decrypts with the slot's key stream");
 }
+
+#[test]
+fn sysinfo_carries_the_configured_rxlev_access_min() {
+    use tetra_config::bluestation::SharedConfig;
+    // Default config: -110 dBm, code 3 (TS 100 392-2 table 21.65), in both SYSINFO variants.
+    let precomps = UmacBs::generate_precomps(&SharedConfig::from_parts(common::default_stack::default_test_config_bs(), None));
+    assert_eq!(precomps.mac_sysinfo1.rxlev_access_min, 3);
+    assert_eq!(precomps.mac_sysinfo2.rxlev_access_min, 3);
+
+    let mut config = common::default_stack::default_test_config_bs();
+    config.cell.rxlev_access_min_dbm = -75;
+    let precomps = UmacBs::generate_precomps(&SharedConfig::from_parts(config, None));
+    assert_eq!(precomps.mac_sysinfo1.rxlev_access_min, 10);
+    assert_eq!(precomps.mac_sysinfo2.rxlev_access_min, 10);
+}
