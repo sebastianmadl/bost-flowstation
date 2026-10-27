@@ -176,7 +176,9 @@ pub enum DlSchedElem {
     /// Pre-built STCH block for FACCH/stealing a half-slot from traffic channel.
     /// Contains MAC-U-SIGNAL (3 bits) + TM-SDU = 124 type1 bits.
     /// Delivers time-critical signaling (D-TX CEASED, D-TX GRANTED) per EN 300 392-2, clause 23.5.
-    Stealing(BitBuffer, Option<TxReporter>),
+    /// The optional second block steals the second half slot too (clause 23.8.4.2.1): it then
+    /// holds the MAC-END of a message fragmented over the two halves of the slot.
+    Stealing(BitBuffer, Option<BitBuffer>, Option<TxReporter>),
 }
 
 const EMPTY_SCHED_ELEM: TimeslotSchedule = TimeslotSchedule {
@@ -875,7 +877,19 @@ impl BsChannelScheduler {
     /// The block must be 124 type1 bits containing MAC-U-SIGNAL header + TM-SDU.
     pub fn dl_enqueue_stealing(&mut self, ts: u8, block: BitBuffer, tx_reporter: Option<TxReporter>) {
         tracing::info!("dl_enqueue_stealing: ts {} enqueueing STCH block ({} bits)", ts, block.get_len());
-        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(block, tx_reporter));
+        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(block, None, tx_reporter));
+    }
+
+    /// Enqueues a full stolen slot: `first` goes in the first half slot, `second` in the second
+    /// half slot (both STCH, ETSI TS 100 392-2 clause 23.8.4.2.1).
+    pub fn dl_enqueue_stealing_full_slot(&mut self, ts: u8, first: BitBuffer, second: BitBuffer, tx_reporter: Option<TxReporter>) {
+        tracing::info!(
+            "dl_enqueue_stealing_full_slot: ts {} enqueueing STCH blocks ({} + {} bits)",
+            ts,
+            first.get_len(),
+            second.get_len()
+        );
+        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(first, Some(second), tx_reporter));
     }
 
     fn dl_enqueue_tma_frag_next_frame(&mut self, fragger: BsFragger) {
@@ -1225,7 +1239,7 @@ impl BsChannelScheduler {
                             buf_opt = Some(buf);
                         }
 
-                        DlSchedElem::Stealing(_, tx_reporter) => {
+                        DlSchedElem::Stealing(_, _, tx_reporter) => {
                             // Stealing items should only appear on traffic timeslots; discard if found here
                             tracing::warn!(
                                 "dl_build_block_from_signalling_schedule: Stealing item found on non-traffic ts {}, discarding",
@@ -1268,7 +1282,7 @@ impl BsChannelScheduler {
     /// - tch_block: speech/silence (274 bits)
     /// - stch_block: STCH signaling (124 bits) for FACCH stealing (EN 300 392-2, clause 23.5)
     /// Also reports transmission, if a TxReporter was attached to the DlSchedElem::Stealing element
-    fn dl_build_traffic_block(&mut self, ts: TdmaTime) -> (BitBuffer, Option<BitBuffer>) {
+    fn dl_build_traffic_block(&mut self, ts: TdmaTime) -> (BitBuffer, Option<BitBuffer>, Option<BitBuffer>) {
         // Get speech data or silence
         let mut tch_buf = if let Some(block) = self.circuits.take_block(self.carrier_num, ts.t) {
             // Raw ACELP speech (274 bits for TCH/S). The Vec may be LARGER (e.g. 280
@@ -1296,15 +1310,15 @@ impl BsChannelScheduler {
         };
 
         // Check for FACCH/stealing: take a queued Stealing item (highest priority signaling)
-        let (stch_opt, tx_reporter_opt) = {
+        let (stch_opt, stch2_opt, tx_reporter_opt) = {
             let q = &mut self.dltx_queues[ts.t as usize - 1];
             if let Some(i) = q.iter().position(|e| matches!(e, DlSchedElem::Stealing(..))) {
                 match q.remove(i) {
-                    DlSchedElem::Stealing(buf, tx_reporter) => (Some(buf), tx_reporter),
+                    DlSchedElem::Stealing(buf, second, tx_reporter) => (Some(buf), second, tx_reporter),
                     _ => unreachable!(),
                 }
             } else {
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -1333,7 +1347,7 @@ impl BsChannelScheduler {
             }
         }
 
-        (tch_buf, stch_opt)
+        (tch_buf, stch_opt, stch2_opt)
     }
 
     /// Return first queued grant.
@@ -1455,9 +1469,33 @@ impl BsChannelScheduler {
         let ul_phy = if ul_is_traffic { PhysicalChannel::Tp } else { PhysicalChannel::Cp };
 
         let mut elem = if dl_is_traffic {
-            let (tch_buf, stch_opt) = self.dl_build_traffic_block(ts);
+            let (tch_buf, stch_opt, stch2_opt) = self.dl_build_traffic_block(ts);
 
-            if let Some(stch_buf) = stch_opt {
+            if let (Some(stch_buf), Some(stch2_buf)) = (&stch_opt, stch2_opt) {
+                let stch_buf = stch_buf.clone();
+                tracing::info!(
+                    "finalize_ts_for_tick: FACCH stealing both half slots on ts {} (stch={} + {} bits)",
+                    ts.t,
+                    stch_buf.get_len(),
+                    stch2_buf.get_len()
+                );
+                TmvUnitdataReqSlot {
+                    carrier_num,
+                    ts,
+                    blk1: Some(TmvUnitdataReq {
+                        logical_channel: LogicalChannel::Stch,
+                        mac_block: stch_buf,
+                        scrambling_code: self.scrambling_code,
+                    }),
+                    blk2: Some(TmvUnitdataReq {
+                        logical_channel: LogicalChannel::Stch,
+                        mac_block: stch2_buf,
+                        scrambling_code: self.scrambling_code,
+                    }),
+                    bbk: None,
+                    ul_phy_chan: ul_phy,
+                }
+            } else if let Some(stch_buf) = stch_opt {
                 tracing::info!(
                     "finalize_ts_for_tick: FACCH stealing on ts {} (stch={} bits, tch={} bits)",
                     ts.t,

@@ -218,6 +218,10 @@ pub enum BrewCommand {
     /// offered `handover-v1`)
     SendHandoverResult(BrewHoResult),
 
+    /// Ask the station serving a neighbour cell to prepare an MS's arrival (serving side). To a
+    /// server without `handover-v1` nothing is sent; the worker answers "no target" itself.
+    SendHandoverRequest(BrewHoRequest),
+
     /// Disconnect gracefully
     Disconnect,
 }
@@ -716,6 +720,30 @@ impl<T: NetworkTransport> BrewWorker<T> {
                                 result.issi,
                                 result.transaction_id,
                                 result.status
+                            );
+                        }
+                    }
+                    BrewCommand::SendHandoverRequest(req) => {
+                        if !handles_handover(&self.config.config(), self.transport.server_brew_extensions()) {
+                            self.send_event(BrewEvent::HandoverResult(BrewHoResult {
+                                transaction_id: req.transaction_id,
+                                issi: req.issi,
+                                status: BREW_HO_STATUS_NO_TARGET,
+                                reason: Some("not_capable".to_string()),
+                                sdu: None,
+                                channel: None,
+                            }));
+                            continue;
+                        }
+                        let msg = build_service_ho_request(&req);
+                        if let Err(e) = self.transport.send_reliable(&msg) {
+                            tracing::error!("BrewWorker: failed to send handover request for ISSI {}: {}", req.issi, e);
+                        } else {
+                            tracing::info!(
+                                "BrewWorker: sent handover request issi={} transaction={} target_carrier={}",
+                                req.issi,
+                                req.transaction_id,
+                                req.target_carrier
                             );
                         }
                     }
@@ -1279,6 +1307,7 @@ password = "x"
             target_mnc: Some(5),
             target_location_area: Some(10),
             sdu: Some(BrewHoSdu { bytes: vec![0xa1, 0xb2, 0xc0], len_bits: 18 }),
+            call_gssi: None,
         }
     }
 
@@ -1320,6 +1349,7 @@ password = "x"
                 status: BREW_HO_STATUS_OK,
                 reason: None,
                 sdu: Some(BrewHoSdu { bytes: vec![0x0f, 0x80], len_bits: 9 }),
+                channel: None,
             })]
         };
         let sent = run_commands(MockTransport::new().with_brew_extensions(&HANDOVER), result());
@@ -1332,5 +1362,41 @@ password = "x"
 
         let plain = run_commands(MockTransport::new(), result());
         assert!(plain.iter().all(|p| p[0] != BREW_CLASS_SERVICE), "never towards TetraPack / BrandMeister");
+    }
+
+    // ── Handover messages (serving side) ──
+
+    #[test]
+    fn handover_request_is_sent_only_where_offered_else_answered_not_capable() {
+        let sent = run_commands(
+            MockTransport::new().with_brew_extensions(&HANDOVER),
+            vec![BrewCommand::SendHandoverRequest(forward_reg())],
+        );
+        assert!(sent.contains(&build_service_ho_request(&forward_reg())), "HO_FORWARD_REG sent");
+
+        let (event_tx, event_rx) = bounded(16);
+        let (command_tx, command_rx) = bounded(16);
+        let mut plain = BrewWorker::new(config(""), event_tx, command_rx, MockTransport::new());
+        plain.transport.connect().unwrap();
+        command_tx.send(BrewCommand::SendHandoverRequest(forward_reg())).unwrap();
+        command_tx.send(BrewCommand::Disconnect).unwrap();
+        plain.message_loop().unwrap();
+        assert!(plain.transport.sent_payloads().iter().all(|p| p[0] != BREW_CLASS_SERVICE), "never towards TetraPack / BrandMeister");
+        let answer = std::iter::from_fn(|| event_rx.try_recv().ok()).find_map(|e| match e {
+            BrewEvent::HandoverResult(r) => Some(r),
+            _ => None,
+        });
+        assert_eq!(
+            answer,
+            Some(BrewHoResult {
+                transaction_id: 77,
+                issi: 2320001,
+                status: BREW_HO_STATUS_NO_TARGET,
+                reason: Some("not_capable".into()),
+                sdu: None,
+                channel: None,
+            }),
+            "answered locally, so MLE does not wait for its fallback"
+        );
     }
 }

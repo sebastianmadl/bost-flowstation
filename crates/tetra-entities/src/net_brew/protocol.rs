@@ -915,6 +915,21 @@ pub struct BrewHoRequest {
     pub target_location_area: Option<u16>,
     /// The MM PDU from U-PREPARE: present for `SERVICE_HO_FORWARD_REG`
     pub sdu: Option<BrewHoSdu>,
+    /// `call.gssi`: the group call the MS is in on the serving cell, when the serving station
+    /// can use a channel on the target for it (announced type 1 cell reselection)
+    pub call_gssi: Option<u32>,
+}
+
+/// `channel` in `SERVICE_HO_RESULT`: where the target runs the MS's call (type 1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrewHoChannel {
+    /// The target cell's call identifier (14 bits)
+    pub call_id: u16,
+    pub carrier: u16,
+    /// Timeslot 1 to 4
+    pub timeslot: u8,
+    /// Traffic usage marker (4 to 63)
+    pub usage: u8,
 }
 
 /// `SERVICE_HO_RESULT`
@@ -927,6 +942,8 @@ pub struct BrewHoResult {
     pub reason: Option<String>,
     /// The target's MM answer for D-NEW-CELL
     pub sdu: Option<BrewHoSdu>,
+    /// The target's traffic channel for the call named in the request
+    pub channel: Option<BrewHoChannel>,
 }
 
 fn json_uint(json: &serde_json::Value, key: &str, max: u64) -> Result<u64, String> {
@@ -962,7 +979,28 @@ pub fn parse_ho_request(service_type: u8, json_data: &str) -> Result<BrewHoReque
         target_mnc: json_opt_uint(&json, "target_mnc", 16383)?.map(|v| v as u16),
         target_location_area: json_opt_uint(&json, "target_location_area", 16383)?.map(|v| v as u16),
         sdu,
+        call_gssi: json.get("call").and_then(|c| json_uint(c, "gssi", 0xff_ffff).ok()).map(|g| g as u32),
     })
+}
+
+/// `channel` of a result; a malformed one counts as none (the serving station then uses type 2).
+fn parse_ho_channel(json: &serde_json::Value) -> Option<BrewHoChannel> {
+    let c = json.get("channel").filter(|c| !c.is_null())?;
+    let channel = (|| {
+        Ok::<_, String>(BrewHoChannel {
+            call_id: json_uint(c, "call_id", 16383)? as u16,
+            carrier: json_uint(c, "carrier", 4095)? as u16,
+            timeslot: json_uint(c, "timeslot", 4)? as u8,
+            usage: json_uint(c, "usage", 63)? as u8,
+        })
+    })();
+    match channel {
+        Ok(ch) if ch.timeslot >= 1 && ch.usage >= 4 => Some(ch),
+        other => {
+            tracing::warn!("malformed handover channel {}: {:?}", c, other);
+            None
+        }
+    }
 }
 
 /// Parse a `SERVICE_HO_RESULT` payload (unknown fields ignored).
@@ -974,6 +1012,7 @@ pub fn parse_ho_result(json_data: &str) -> Result<BrewHoResult, String> {
         status: json_uint(&json, "status", u8::MAX as u64)? as u8,
         reason: json.get("reason").and_then(|r| r.as_str()).map(str::to_string),
         sdu: BrewHoSdu::parse(&json)?,
+        channel: parse_ho_channel(&json),
     })
 }
 
@@ -1016,6 +1055,9 @@ pub fn build_service_ho_request(req: &BrewHoRequest) -> Vec<u8> {
         }
         None => BREW_SERVICE_HO_PREPARE,
     };
+    if let Some(gssi) = req.call_gssi {
+        json["call"] = serde_json::json!({ "gssi": gssi });
+    }
     service_json(service_type, json)
 }
 
@@ -1028,6 +1070,11 @@ pub fn build_service_ho_result(res: &BrewHoResult) -> Vec<u8> {
     if let Some(sdu) = &res.sdu {
         json["sdu"] = sdu.hex().into();
         json["sdu_len_bits"] = sdu.len_bits.into();
+    }
+    if let Some(c) = &res.channel {
+        json["channel"] = serde_json::json!({
+            "call_id": c.call_id, "carrier": c.carrier, "timeslot": c.timeslot, "usage": c.usage
+        });
     }
     service_json(BREW_SERVICE_HO_RESULT, json)
 }
@@ -1068,6 +1115,7 @@ mod tests {
             target_mnc: None,
             target_location_area: Some(1),
             sdu: Some(BrewHoSdu { bytes: vec![0xa1, 0xb2, 0xc0], len_bits: 18 }),
+            call_gssi: None,
         };
         let msg = build_service_ho_request(&req);
         assert_eq!(&msg[..2], &[BREW_CLASS_SERVICE, BREW_SERVICE_HO_FORWARD_REG]);
@@ -1123,6 +1171,7 @@ mod tests {
             status: BREW_HO_STATUS_REJECTED,
             reason: None,
             sdu: Some(BrewHoSdu { bytes: vec![0x0f, 0x80], len_bits: 9 }),
+            channel: None,
         };
         let msg = build_service_ho_result(&res);
         assert_eq!(&msg[..2], &[BREW_CLASS_SERVICE, BREW_SERVICE_HO_RESULT]);

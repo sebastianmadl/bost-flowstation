@@ -17,6 +17,7 @@ impl CcBsSubentity {
             telemetry: None,
             ambience_armed: HashMap::new(),
             deferred_restores: Vec::new(),
+            handover_reservations: Vec::new(),
             restore_listeners: HashSet::new(),
         }
     }
@@ -160,6 +161,7 @@ impl CcBsSubentity {
             carrier: Some(carrier_num),
             timeslots,
             ul_dl_assigned: ul_dl,
+            cell_change: false,
         };
         (sdu, chan_alloc)
     }
@@ -258,6 +260,7 @@ impl CcBsSubentity {
             timeslots,
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned,
+            cell_change: false,
         };
 
         SapMsg {

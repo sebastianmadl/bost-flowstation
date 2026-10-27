@@ -3,11 +3,12 @@ mod common;
 use tetra_config::bluestation::StackMode;
 use tetra_core::Direction;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, Layer2Service, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, debug};
+use tetra_core::{BitBuffer, Layer2Service, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, TxReporter, debug};
 use tetra_entities::umac::umac_bs::UmacBs;
 use tetra_pdus::umac::enums::basic_slotgrant_granting_delay::BasicSlotgrantGrantingDelay;
 use tetra_pdus::umac::enums::reservation_requirement::ReservationRequirement;
 use tetra_pdus::umac::pdus::mac_access::MacAccess;
+use tetra_pdus::umac::pdus::mac_end_dl::MacEndDl;
 use tetra_pdus::umac::pdus::mac_resource::MacResource;
 use tetra_pdus::umac::pdus::mac_u_signal::MacUSignal;
 use tetra_saps::control::call_control::{CallControl, Circuit, CircuitDlMediaSource};
@@ -208,7 +209,9 @@ fn test_secondary_carrier_normal_signalling_falls_back_to_primary_mcch() {
             timeslots: [false, true, false, false],
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         }),
+        stealing_slot: None,
         tx_reporter: None,
     };
 
@@ -285,7 +288,9 @@ fn test_secondary_ts1_channel_allocation_encodes_secondary_carrier_without_css()
             timeslots: [true, false, false, false],
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         }),
+        stealing_slot: None,
         tx_reporter: None,
     };
 
@@ -356,7 +361,9 @@ fn test_main_ts1_ordinary_traffic_allocation_is_rejected() {
             timeslots: [true, false, false, false],
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         }),
+        stealing_slot: None,
         tx_reporter: None,
     };
 
@@ -738,7 +745,9 @@ fn test_facch_stealing_does_not_set_random_access_flag_without_pending_ra() {
             timeslots: [false, true, false, false],
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         }),
+        stealing_slot: None,
         tx_reporter: None,
     };
 
@@ -859,7 +868,9 @@ fn test_traffic_mac_access_does_not_mark_next_facch_as_random_access() {
             timeslots: [false, true, false, false],
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         }),
+        stealing_slot: None,
         tx_reporter: None,
     };
 
@@ -912,10 +923,11 @@ fn test_traffic_mac_access_does_not_mark_next_facch_as_random_access() {
 }
 
 /// FH-BUG-034 follow-up regression: a stealing TmaUnitdataReq whose MAC-RESOURCE + SDU does
-/// not fit in one 124-bit STCH half-slot must be fragmented across consecutive stolen
-/// half-slots — NOT written into a fixed 124-bit buffer, which panicked the whole stack
-/// ("write would exceed buffer end") and was a remotely-triggerable crash: sending an SDS or
-/// status longer than one half-slot to an MS engaged in a call took down the BS.
+/// not fit in one 124-bit STCH half-slot must NOT be written into a fixed 124-bit buffer, which
+/// panicked the whole stack ("write would exceed buffer end") and was a remotely-triggerable
+/// crash: sending an SDS or status longer than one half-slot to an MS engaged in a call took
+/// down the BS. A PDU that does not fit one stolen slot (both halves) goes to the MCCH, since
+/// fragmentation on the STCH is only permitted within one slot (TS 100 392-2 clause 23.4.2.1.7).
 ///
 /// This test drives the exact UMAC path (rx_ul_tma_unitdata_req) with a large stealing SDU on
 /// an open traffic circuit and asserts the run completes without panicking.
@@ -976,7 +988,9 @@ fn test_stealing_large_sdu_fragments_without_panic() {
             timeslots: [false, true, false, false], // ts 2
             alloc_type: ChanAllocType::Replace,
             ul_dl_assigned: UlDlAssignment::Dl,
+            cell_change: false,
         }),
+        stealing_slot: None,
         tx_reporter: None,
     };
 
@@ -989,8 +1003,198 @@ fn test_stealing_large_sdu_fragments_without_panic() {
         msg: SapMsgInner::TmaUnitdataReq(tma),
     });
     test.run_stack(Some(8));
+    assert!(
+        stch_slots(test.dump_sinks(), ts).is_empty(),
+        "a PDU longer than one stolen slot must not be spread over stolen half slots of several frames"
+    );
+}
 
-    tracing::info!("stealing large SDU fragmented across STCH half-slots without panic");
+fn stch_slots(sink_msgs: Vec<SapMsg>, ts: u8) -> Vec<tetra_saps::tmv::TmvUnitdataReqSlot> {
+    let mut found = Vec::new();
+    for msg in sink_msgs {
+        let slots = match msg.msg {
+            SapMsgInner::TmvUnitdataReq(slot) => vec![slot],
+            SapMsgInner::TmvUnitdataReqSlots(slots) => slots.slots,
+            _ => continue,
+        };
+        found.extend(slots.into_iter().filter(|slot| {
+            slot.ts.t == ts && slot.blk1.as_ref().is_some_and(|b| b.logical_channel == LogicalChannel::Stch)
+        }));
+    }
+    found
+}
+
+fn stealing_req(dest: TetraAddress, sdu: &str, stealing_slot: Option<(u16, u8)>, chan_alloc: Option<CmceChanAllocReq>, tx_reporter: Option<TxReporter>) -> SapMsg {
+    SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+            req_handle: 0,
+            pdu: BitBuffer::from_bitstr(sdu),
+            main_address: dest,
+            link_id: 0,
+            endpoint_id: 0,
+            stealing_permission: true,
+            subscriber_class: 0,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_category: None,
+            carrier_num: Some(MAIN_CARRIER),
+            chan_alloc,
+            stealing_slot,
+            tx_reporter,
+        }),
+    }
+}
+
+/// Channel allocation for a channel on another cell (announced cell reselection type 1).
+fn other_cell_alloc() -> CmceChanAllocReq {
+    CmceChanAllocReq {
+        usage: Some(9),
+        carrier: Some(1530),
+        timeslots: [false, false, true, false],
+        alloc_type: ChanAllocType::Replace,
+        ul_dl_assigned: UlDlAssignment::Both,
+        cell_change: true,
+    }
+}
+
+fn sdu_bits(len: usize) -> String {
+    (0..len).map(|i| if (i * 7) % 5 < 2 { '1' } else { '0' }).collect()
+}
+
+fn read_bits(buf: &mut BitBuffer, len: usize) -> String {
+    (0..len).map(|_| if buf.read_bits(1).unwrap() == 1 { '1' } else { '0' }).collect()
+}
+
+/// A PDU too long for the first half slot is fragmented over both halves of one stolen slot:
+/// MAC-RESOURCE with "Length indication" 111111 in the first half and the final fragment in a
+/// MAC-END in the second half (TS 100 392-2 clause 23.8.4.2.1 iv).
+#[test]
+fn test_stealing_fragments_within_one_slot_using_both_half_slots() {
+    debug::setup_logging_verbose();
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
+    let ts = 3u8;
+    let dest = TetraAddress { ssi: 2260577, ssi_type: SsiType::Issi };
+    test.submit_message(open_shared_voice_circuit(ts));
+    test.run_stack(Some(1));
+    test.dump_sinks();
+
+    let sdu = sdu_bits(150);
+    let reporter = TxReporter::new_unacked();
+    test.submit_message(stealing_req(dest, &sdu, Some((MAIN_CARRIER, ts)), None, Some(reporter.clone())));
+    test.run_stack(Some(8));
+
+    let slots = stch_slots(test.dump_sinks(), ts);
+    assert_eq!(slots.len(), 1, "one stolen slot carries the whole PDU");
+    let slot = &slots[0];
+    let mut first = slot.blk1.as_ref().unwrap().mac_block.clone();
+    let second = slot.blk2.as_ref().expect("second half slot");
+    assert_eq!(second.logical_channel, LogicalChannel::Stch, "second half slot is stolen too");
+    first.seek(0);
+    let res = MacResource::from_bitbuf(&mut first).unwrap();
+    assert_eq!(res.length_ind, 0b111111, "start of fragmentation, second half slot stolen");
+    assert!(res.chan_alloc_element.is_none());
+    let first_bits = 124 - res.compute_header_len();
+    let mut got = read_bits(&mut first, first_bits);
+
+    let mut second = second.mac_block.clone();
+    second.seek(0);
+    let end = MacEndDl::from_bitbuf(&mut second).unwrap();
+    assert!(end.chan_alloc_element.is_none());
+    got.push_str(&read_bits(&mut second, 150 - first_bits));
+    assert_eq!(got, sdu, "both fragments together are the TM-SDU");
+    assert!(reporter.is_transmitted());
+}
+
+/// A type 1 channel allocation is sent on the STCH of the traffic channel the MS is on, with the
+/// "cell change flag" set and the channel of the other cell (clause 23.5.4.1).
+#[test]
+fn test_cell_change_allocation_goes_on_the_traffic_channel_stch() {
+    debug::setup_logging_verbose();
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
+    let ts = 2u8;
+    let dest = TetraAddress { ssi: 2260578, ssi_type: SsiType::Issi };
+    test.submit_message(open_shared_voice_circuit(ts));
+    test.run_stack(Some(1));
+    test.dump_sinks();
+
+    let sdu = sdu_bits(24);
+    test.submit_message(stealing_req(dest, &sdu, Some((MAIN_CARRIER, ts)), Some(other_cell_alloc()), None));
+    test.run_stack(Some(8));
+
+    let slots = stch_slots(test.dump_sinks(), ts);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].blk2.as_ref().unwrap().logical_channel, LogicalChannel::TchS, "fits the first half slot");
+    let mut block = slots[0].blk1.as_ref().unwrap().mac_block.clone();
+    block.seek(0);
+    let res = MacResource::from_bitbuf(&mut block).unwrap();
+    let alloc = res.chan_alloc_element.expect("channel allocation");
+    assert!(alloc.cell_change_flag);
+    assert_eq!(alloc.carrier_num, 1530);
+    assert_eq!(alloc.ts_assigned, [false, false, true, false], "timeslot numbering of the new cell");
+    assert_eq!(res.usage_marker, Some(9));
+    assert_eq!(read_bits(&mut block, 24), sdu);
+}
+
+/// With a fragmented message the channel allocation goes in the MAC-END, not in the
+/// MAC-RESOURCE (clause 23.5.4.1).
+#[test]
+fn test_cell_change_allocation_of_a_fragmented_message_goes_in_the_mac_end() {
+    debug::setup_logging_verbose();
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
+    let ts = 2u8;
+    let dest = TetraAddress { ssi: 2260579, ssi_type: SsiType::Issi };
+    test.submit_message(open_shared_voice_circuit(ts));
+    test.run_stack(Some(1));
+    test.dump_sinks();
+
+    let sdu = sdu_bits(100);
+    test.submit_message(stealing_req(dest, &sdu, Some((MAIN_CARRIER, ts)), Some(other_cell_alloc()), None));
+    test.run_stack(Some(8));
+
+    let slots = stch_slots(test.dump_sinks(), ts);
+    assert_eq!(slots.len(), 1);
+    let mut first = slots[0].blk1.as_ref().unwrap().mac_block.clone();
+    first.seek(0);
+    let res = MacResource::from_bitbuf(&mut first).unwrap();
+    assert_eq!(res.length_ind, 0b111111);
+    assert!(res.chan_alloc_element.is_none(), "no channel allocation in the MAC-RESOURCE of a fragmented message");
+    let mut second = slots[0].blk2.as_ref().unwrap().mac_block.clone();
+    second.seek(0);
+    let end = MacEndDl::from_bitbuf(&mut second).unwrap();
+    let alloc = end.chan_alloc_element.expect("channel allocation in the MAC-END");
+    assert!(alloc.cell_change_flag);
+    assert_eq!(alloc.carrier_num, 1530);
+}
+
+/// Without a traffic channel to steal from, a type 1 allocation is not sent at all: it would
+/// otherwise go out on the MCCH as an allocation for this cell's numbering.
+#[test]
+fn test_cell_change_allocation_without_traffic_channel_is_discarded() {
+    debug::setup_logging_verbose();
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
+    let dest = TetraAddress { ssi: 2260580, ssi_type: SsiType::Issi };
+    let reporter = TxReporter::new_unacked();
+    test.submit_message(stealing_req(dest, &sdu_bits(24), Some((MAIN_CARRIER, 2)), Some(other_cell_alloc()), Some(reporter.clone())));
+    test.run_stack(Some(8));
+    let sinks = test.dump_sinks();
+    assert!(reporter.is_discarded());
+    for msg in sinks {
+        let slots = match msg.msg {
+            SapMsgInner::TmvUnitdataReq(slot) => vec![slot],
+            SapMsgInner::TmvUnitdataReqSlots(slots) => slots.slots,
+            _ => continue,
+        };
+        for slot in slots {
+            assert!(block_mac_resource_for(&slot.blk1, dest).is_none(), "nothing goes out for {}", dest);
+        }
+    }
 }
 
 /// Number of reassembly contexts currently held by the BS defragmenter, across all timeslots.
@@ -1436,6 +1640,7 @@ fn test_downlink_to_encrypted_radio_is_encrypted() {
                 data_category: None,
                 carrier_num: None,
                 chan_alloc: None,
+                stealing_slot: None,
                 tx_reporter: None,
             }),
         });

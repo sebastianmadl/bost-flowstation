@@ -5,15 +5,20 @@ use crate::mle::components::broadcast::MleBroadcast;
 use crate::{MessageQueue, TetraEntityTrait};
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, EndpointId, Layer2Service, LinkId, Sap, TdmaTime, TetraAddress, unimplemented_log};
+use tetra_core::{BitBuffer, EndpointId, Layer2Service, LinkId, Sap, TdmaTime, TetraAddress, TxReporter, unimplemented_log};
 use tetra_pdus::cmce::enums::cmce_pdu_type_dl::CmcePduTypeDl;
+use tetra_pdus::cmce::pdus::d_info::DInfo;
 use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
 use tetra_pdus::mle::enums::mle_pdu_type_ul::MlePduTypeUl;
 use tetra_pdus::mle::pdus::{
     d_new_cell::DNewCell, d_prepare_fail::DPrepareFail, d_restore_ack::DRestoreAck, d_restore_fail::DRestoreFail,
     u_prepare::UPrepare, u_restore::URestore,
 };
-use tetra_saps::control::call_control::CallControl;
+use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
+use tetra_pdus::mm::pdus::d_location_update_reject::DLocationUpdateReject;
+use tetra_saps::control::call_control::{CallControl, HandoverChannel, HandoverOutcome};
+use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
+use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
 use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
 use tetra_saps::lcmc::LcmcMleUnitdataInd;
 use tetra_saps::lmm::LmmMleUnitdataInd;
@@ -35,12 +40,33 @@ pub struct MleBs {
     /// Target cell: MSs whose forwarded registration we handed to MM; MM's answer goes back to the
     /// serving cell instead of on air here.
     pending_forwards: HashMap<u32, Instant>,
+    /// Serving cell: type 1 D-NEW-CELLs waiting on the traffic channel's STCH.
+    pending_type1: HashMap<u32, PendingType1>,
+}
+
+/// A type 1 grant (D-NEW-CELL "follow MAC channel change" with a channel allocation for the
+/// other cell) handed to layer 2. If it cannot go out on the MS's traffic channel, type 2 is
+/// granted instead with the same registration accept.
+struct PendingType1 {
+    stch: (u16, u8),
+    accept: BitBuffer,
+    reporter: TxReporter,
+    since: Instant,
 }
 
 struct PendingPrepare {
     link_id: LinkId,
     endpoint_id: EndpointId,
     since: Instant,
+    /// "Location update type" of the forward registration the U-PREPARE carried, if any: a
+    /// D-LOCATION UPDATE REJECT built here for it repeats the type.
+    forwarded: Option<u8>,
+    /// The target is a cell of another station, asked through Brew (not a sibling cell).
+    cross_station: bool,
+    /// Traffic channel (carrier, timeslot) the U-PREPARE came in on, if the MS sent it on an
+    /// assigned channel rather than on the MCCH: the answer is stolen there, since an MS on an
+    /// assigned channel receives its signalling on that channel (clause 23.8.4.2).
+    stch: Option<(u16, u8)>,
 }
 
 /// How long the serving cell waits for the target cell's answer to a forwarded registration
@@ -51,8 +77,21 @@ const FORWARD_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(3);
 const RESTORE_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 /// D-NEW-CELL "channel command valid": change channel immediately (TS 100 392-2 clause 18.5.6).
 const CHANNEL_COMMAND_CHANGE_IMMEDIATELY: u8 = 1;
+/// D-NEW-CELL "channel command valid": follow MAC channel change, i.e. the channel allocation in
+/// the MAC header (type 1, table 18.43).
+const CHANNEL_COMMAND_FOLLOW_MAC: u8 = 0;
+/// On the STCH layer 2 sends the D-INFO with the new call identifier unacknowledged, so it goes
+/// out several times before the type 1 D-NEW-CELL (clause 18.3.4.7.5 note 7).
+const TYPE1_D_INFO_REPEATS: usize = 3;
+/// How long a type 1 D-NEW-CELL may wait for its stolen slot before type 2 is granted instead.
+const TYPE1_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 /// D-PREPARE-FAIL "fail cause" 0: temporary break in service (clause 18.5.7).
 const FAIL_CAUSE_TEMPORARY_BREAK: u8 = 0;
+/// D-PREPARE-FAIL "fail cause" 2: MS not allowed on cell (clause 18.5.7).
+const FAIL_CAUSE_MS_NOT_ALLOWED: u8 = 2;
+/// D-LOCATION UPDATE REJECT "reject cause" 7: forward registration failure (clause 16.10.42,
+/// table 16.81).
+const REJECT_CAUSE_FORWARD_REGISTRATION_FAILURE: u8 = 7;
 /// D-RESTORE-FAIL "fail cause" 3: restoration cannot be done on cell, the value clause
 /// 18.3.4.7 requires for a failed restore (clause 18.5.7).
 const FAIL_CAUSE_RESTORATION_NOT_POSSIBLE: u8 = 3;
@@ -74,6 +113,7 @@ impl MleBs {
             pending_restores: HashMap::new(),
             pending_prepares: HashMap::new(),
             pending_forwards: HashMap::new(),
+            pending_type1: HashMap::new(),
         }
     }
 
@@ -104,10 +144,11 @@ impl MleBs {
         }
     }
 
-    /// Announced cell reselection (EN 300 392-2 clause 18.3.4.7): the MS asks to move to the
-    /// neighbour `cell_identifier_ca`. Accept with D-NEW-CELL if that is one of the neighbours we
-    /// advertise, else D-PREPARE-FAIL. In a linked multi-cell station the site switch is told, so
-    /// the target cell can join the MS's group calls before it arrives.
+    /// Announced type 1/2 cell reselection (TS 100 392-2 clause 18.3.4.7.5): the MS asks to move
+    /// to the neighbour `cell_identifier_ca`. A neighbour we do not advertise gets D-PREPARE-FAIL.
+    /// Otherwise the target is prepared before D-NEW-CELL goes out: a sibling cell of a linked
+    /// multi-cell station through the site switch, a cell of another station through Brew
+    /// (`handover-v1`). Only a station with neither answers D-NEW-CELL at once.
     fn rx_u_prepare(&mut self, queue: &mut MessageQueue, addr: TetraAddress, link_id: LinkId, endpoint_id: EndpointId, pdu: UPrepare) {
         let cfg = self.config.config();
         let target = pdu
@@ -121,32 +162,36 @@ impl MleBs {
             );
             let fail = DPrepareFail {
                 fail_cause: FAIL_CAUSE_TEMPORARY_BREAK,
-                sdu: None,
+                sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))),
             };
-            self.send_mle_pdu(queue, addr, link_id, endpoint_id, |b| fail.to_bitbuf(b));
+            let stch = Self::stch_of_link(cfg.cell.main_carrier, link_id);
+            self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| fail.to_bitbuf(b));
             return;
         };
 
-        tracing::info!(
-            "MLE: U-PREPARE from {} → D-NEW-CELL (neighbour ci={} carrier={})",
-            addr.ssi,
-            target.cell_identifier_ca,
-            target.main_carrier_number
-        );
+        let target_carrier = target.main_carrier_number;
+        let stch = Self::stch_of_link(cfg.cell.main_carrier, link_id);
+        let pending = |forwarded: Option<u8>, cross_station: bool| PendingPrepare {
+            link_id,
+            endpoint_id,
+            since: Instant::now(),
+            forwarded,
+            cross_station,
+            stch,
+        };
         if crate::net_brew::is_site_linked(&self.config) {
-            let target_carrier = target.main_carrier_number;
+            tracing::info!(
+                "MLE: U-PREPARE from {} → sibling cell ci={} carrier={}",
+                addr.ssi,
+                target.cell_identifier_ca,
+                target_carrier
+            );
             Self::push_site(queue, CallControl::SiteHandoverPrepare { issi: addr.ssi, target_carrier });
             if let Some(sdu) = pdu.sdu {
-                // Type 1: register on the target cell now; D-NEW-CELL carries its MM's answer.
+                // Forward registration: register on the target cell now; D-NEW-CELL carries its
+                // MM's answer.
                 tracing::info!("MLE: forwarding {}'s registration to the cell on carrier {}", addr.ssi, target_carrier);
-                self.pending_prepares.insert(
-                    addr.ssi,
-                    PendingPrepare {
-                        link_id,
-                        endpoint_id,
-                        since: Instant::now(),
-                    },
-                );
+                self.pending_prepares.insert(addr.ssi, pending(Some(location_update_type(&sdu)), false));
                 Self::push_site(
                     queue,
                     CallControl::SiteForwardRegistration {
@@ -157,14 +202,58 @@ impl MleBs {
                 );
                 return;
             }
-        } else if pdu.sdu.is_some() {
-            tracing::debug!("MLE: ignoring forwarded registration from {} (target not a linked cell)", addr.ssi);
+        } else if crate::net_brew::is_active(&self.config) {
+            // The other station may serve a different band plan only if the entry says so.
+            let target_carrier_ext = target
+                .main_carrier_number_extension
+                .or_else(|| tetra_config::bluestation::carrier_band_plan(&cfg.cell));
+            if let Some(target_carrier_ext) = target_carrier_ext {
+                tracing::info!(
+                    "MLE: U-PREPARE from {} → asking the station of neighbour ci={} carrier={}{}",
+                    addr.ssi,
+                    target.cell_identifier_ca,
+                    target_carrier,
+                    if pdu.sdu.is_some() { " (forward registration)" } else { "" }
+                );
+                self.pending_prepares
+                    .insert(addr.ssi, pending(pdu.sdu.as_ref().map(location_update_type), true));
+                Self::push_site(
+                    queue,
+                    CallControl::HandoverRequest {
+                        issi: addr.ssi,
+                        target_carrier,
+                        target_carrier_ext,
+                        target_mcc: target.mcc,
+                        target_mnc: target.mnc,
+                        target_location_area: target.location_area,
+                        sdu: pdu.sdu,
+                    },
+                );
+                return;
+            }
         }
+        tracing::info!(
+            "MLE: U-PREPARE from {} → D-NEW-CELL (neighbour ci={} carrier={}, not prepared)",
+            addr.ssi,
+            target.cell_identifier_ca,
+            target_carrier
+        );
         let new_cell = DNewCell {
             channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
-            sdu: None,
+            sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))),
         };
-        self.send_mle_pdu(queue, addr, link_id, endpoint_id, |b| new_cell.to_bitbuf(b));
+        self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| {
+            new_cell.to_bitbuf(b)
+        });
+    }
+
+    /// The traffic channel an uplink PDU on `link_id` came from: timeslots 2 to 4 of the main
+    /// carrier are assigned channels; timeslot 1 is the MCCH.
+    fn stch_of_link(main_carrier: u16, link_id: LinkId) -> Option<(u16, u8)> {
+        match link_id {
+            2..=4 => Some((main_carrier, link_id as u8)),
+            _ => None,
+        }
     }
 
     fn push_site(queue: &mut MessageQueue, cc: CallControl) {
@@ -176,9 +265,26 @@ impl MleBs {
         });
     }
 
-    /// Serving cell: the target cell answered the forwarded registration (or couldn't). Send the
-    /// withheld D-NEW-CELL with MM's answer, or D-PREPARE-FAIL if it rejected the registration.
-    fn finish_prepare(&mut self, queue: &mut MessageQueue, issi: u32, answer: Option<BitBuffer>) {
+    /// Serving cell: the target answered (or could not be prepared). Send the withheld answer to
+    /// the U-PREPARE, using only the combinations clause 18.3.4.7.5 / 18.3.4.7.6 allow:
+    ///
+    /// - accepted: D-NEW-CELL "change channel immediately" (type 2) with the target's
+    ///   D-LOCATION UPDATE ACCEPT, if a registration was forwarded;
+    /// - rejected by the target's MM: D-PREPARE-FAIL with its D-LOCATION UPDATE REJECT, fail cause
+    ///   "MS not allowed on cell" unless the reject cause is "forward registration failure";
+    /// - target station gone: D-PREPARE-FAIL "temporary break in service";
+    /// - not prepared (unknown, no answer in time): type 2 anyway, the MS registers on arrival
+    ///   (figure 18.12): D-NEW-CELL with a D-LOCATION UPDATE REJECT "forward registration
+    ///   failure" if a registration was forwarded, since a successful D-NEW-CELL after a forward
+    ///   registration request "shall contain a MM SDU".
+    fn finish_prepare(
+        &mut self,
+        queue: &mut MessageQueue,
+        issi: u32,
+        outcome: HandoverOutcome,
+        answer: Option<BitBuffer>,
+        channel: Option<HandoverChannel>,
+    ) {
         let Some(p) = self.pending_prepares.remove(&issi) else {
             return;
         };
@@ -186,29 +292,178 @@ impl MleBs {
             ssi_type: tetra_core::SsiType::Issi,
             ssi: issi,
         };
-        let rejected = answer
-            .as_ref()
-            .and_then(|a| a.peek_bits_startoffset(0, 4))
-            .is_some_and(|t| t == MmPduTypeDl::DLocationUpdateReject.into_raw());
-        if rejected {
-            tracing::info!("MLE: forwarded registration of {} rejected → D-PREPARE-FAIL", issi);
-            let fail = DPrepareFail {
-                fail_cause: FAIL_CAUSE_TEMPORARY_BREAK,
-                sdu: answer,
-            };
-            self.send_mle_pdu(queue, addr, p.link_id, p.endpoint_id, |b| fail.to_bitbuf(b));
-            return;
-        }
-        tracing::info!(
-            "MLE: D-NEW-CELL to {}{}",
-            issi,
-            if answer.is_some() { " with the target cell's registration answer" } else { "" }
-        );
-        let new_cell = DNewCell {
-            channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
-            sdu: answer,
+        let is_reject = |a: &BitBuffer| {
+            a.peek_bits_startoffset(0, 4)
+                .is_some_and(|t| t == MmPduTypeDl::DLocationUpdateReject.into_raw())
         };
-        self.send_mle_pdu(queue, addr, p.link_id, p.endpoint_id, |b| new_cell.to_bitbuf(b));
+        // An accept without a forwarded registration, or no answer to one, is not an accept.
+        let outcome = match (outcome, &answer, p.forwarded) {
+            (HandoverOutcome::Accepted, Some(a), _) if is_reject(a) => HandoverOutcome::Rejected,
+            (HandoverOutcome::Accepted, None, Some(_)) => HandoverOutcome::NotPrepared,
+            (HandoverOutcome::Rejected, a, _) if !a.as_ref().is_some_and(is_reject) => HandoverOutcome::NotPrepared,
+            (o, _, _) => o,
+        };
+        let local_reject = || p.forwarded.map(forward_registration_failure);
+        match outcome {
+            HandoverOutcome::Rejected | HandoverOutcome::TargetGone => {
+                let (fail_cause, sdu) = if outcome == HandoverOutcome::Rejected {
+                    let reject = answer.expect("checked above");
+                    let cause = if reject_cause(&reject) == Some(REJECT_CAUSE_FORWARD_REGISTRATION_FAILURE) {
+                        FAIL_CAUSE_TEMPORARY_BREAK
+                    } else {
+                        FAIL_CAUSE_MS_NOT_ALLOWED
+                    };
+                    (cause, Some(reject))
+                } else {
+                    (FAIL_CAUSE_TEMPORARY_BREAK, local_reject())
+                };
+                tracing::info!("MLE: reselection of {} refused ({:?}) → D-PREPARE-FAIL cause {}", issi, outcome, fail_cause);
+                let fail = DPrepareFail { fail_cause, sdu };
+                self.send_l2(queue, addr, p.link_id, p.endpoint_id, MleProtocolDiscriminator::Mle, None, p.stch, None, |b| {
+                    fail.to_bitbuf(b)
+                });
+                if p.cross_station && p.forwarded.is_some() {
+                    Self::push_site(queue, CallControl::HandoverFailed { issi });
+                }
+            }
+            HandoverOutcome::Accepted | HandoverOutcome::NotPrepared => {
+                let accepted = outcome == HandoverOutcome::Accepted && answer.is_some();
+                if let (true, true, Some(channel), Some(accept)) = (accepted, p.cross_station, channel, answer.as_ref()) {
+                    self.grant_type1(queue, addr, &p, channel, accept.clone());
+                    return;
+                }
+                let sdu = if outcome == HandoverOutcome::Accepted { answer } else { local_reject() };
+                tracing::info!(
+                    "MLE: D-NEW-CELL to {}{}",
+                    issi,
+                    match (accepted, sdu.is_some()) {
+                        (true, _) => " with the target cell's registration accept",
+                        (false, true) => " with forward registration failure (registers on arrival)",
+                        (false, false) => "",
+                    }
+                );
+                let new_cell = DNewCell {
+                    channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
+                    sdu,
+                };
+                self.send_l2(queue, addr, p.link_id, p.endpoint_id, MleProtocolDiscriminator::Mle, None, p.stch, None, |b| {
+                    new_cell.to_bitbuf(b)
+                });
+                if p.cross_station && accepted {
+                    Self::push_site(queue, CallControl::HandoverDone { issi });
+                }
+            }
+        }
+    }
+
+    /// Type 1 announced cell reselection (clause 18.3.4.7.5): the other station runs the MS's
+    /// group call and gave its channel. If its call identifier differs, D-INFO carries the new
+    /// one first; then D-NEW-CELL "follow MAC channel change" with the registration accept goes
+    /// out with a channel allocation for the other cell ("cell change flag", clause 23.5.4.1),
+    /// both on the STCH of the traffic channel the MS listens to here. The MS keeps its transmit
+    /// permission and goes straight to the new channel, without U-RESTORE (figure 18.14).
+    fn grant_type1(&mut self, queue: &mut MessageQueue, addr: TetraAddress, p: &PendingPrepare, channel: HandoverChannel, accept: BitBuffer) {
+        let stch = (channel.serving_carrier, channel.serving_timeslot);
+        tracing::info!(
+            "MLE: type 1 reselection for {}: call {} → {} on carrier {} ts {} (STCH carrier {} ts {})",
+            addr.ssi,
+            channel.call_id,
+            channel.new_call_id,
+            channel.carrier,
+            channel.timeslot,
+            stch.0,
+            stch.1
+        );
+        if channel.new_call_id != channel.call_id {
+            let info = DInfo {
+                call_identifier: channel.call_id,
+                reset_call_time_out_timer_t310_: false,
+                poll_request: false,
+                new_call_identifier: Some(channel.new_call_id as u64),
+                call_time_out: None,
+                call_time_out_set_up_phase_t301_t302_: None,
+                call_ownership: None,
+                modify: None,
+                call_status: None,
+                temporary_address: None,
+                notification_indicator: None,
+                poll_response_percentage: None,
+                poll_response_number: None,
+                dtmf: None,
+                facility: None,
+                poll_response_addresses: None,
+                proprietary: None,
+            };
+            for _ in 0..TYPE1_D_INFO_REPEATS {
+                self.send_l2(queue, addr, p.link_id, p.endpoint_id, MleProtocolDiscriminator::Cmce, None, Some(stch), None, |b| {
+                    info.to_bitbuf(b)
+                });
+            }
+        }
+        let mut timeslots = [false; 4];
+        timeslots[(channel.timeslot.clamp(1, 4) - 1) as usize] = true;
+        let chan_alloc = CmceChanAllocReq {
+            usage: Some(channel.usage),
+            carrier: Some(channel.carrier),
+            timeslots,
+            // Replace keeps the traffic authorization (clause 23.8.2.3.1)
+            alloc_type: ChanAllocType::Replace,
+            ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: true,
+        };
+        let new_cell = DNewCell {
+            channel_command_valid: CHANNEL_COMMAND_FOLLOW_MAC,
+            sdu: Some(accept.clone()),
+        };
+        let reporter = TxReporter::new_unacked();
+        self.send_l2(
+            queue,
+            addr,
+            p.link_id,
+            p.endpoint_id,
+            MleProtocolDiscriminator::Mle,
+            Some(chan_alloc),
+            Some(stch),
+            Some(reporter.clone()),
+            |b| new_cell.to_bitbuf(b),
+        );
+        self.pending_type1.insert(
+            addr.ssi,
+            PendingType1 {
+                stch,
+                accept,
+                reporter,
+                since: Instant::now(),
+            },
+        );
+    }
+
+    /// Type 1 grants that went out are done; those layer 2 could not send become type 2.
+    fn drive_type1(&mut self, queue: &mut MessageQueue) {
+        let issis: Vec<u32> = self.pending_type1.keys().copied().collect();
+        for issi in issis {
+            let p = &self.pending_type1[&issi];
+            let sent = p.reporter.is_transmitted();
+            if !sent && !p.reporter.is_discarded() && p.since.elapsed() < TYPE1_SEND_TIMEOUT {
+                continue;
+            }
+            let p = self.pending_type1.remove(&issi).expect("present");
+            if !sent {
+                tracing::info!("MLE: type 1 D-NEW-CELL for {} could not be sent → type 2", issi);
+                let addr = TetraAddress {
+                    ssi_type: tetra_core::SsiType::Issi,
+                    ssi: issi,
+                };
+                let new_cell = DNewCell {
+                    channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
+                    sdu: Some(p.accept),
+                };
+                self.send_l2(queue, addr, 0, 0, MleProtocolDiscriminator::Mle, None, Some(p.stch), None, |b| {
+                    new_cell.to_bitbuf(b)
+                });
+            }
+            Self::push_site(queue, CallControl::HandoverDone { issi });
+        }
     }
 
     /// Target cell: an MS on a sibling cell forwarded its registration to us. Hand it to MM as if
@@ -237,7 +492,12 @@ impl MleBs {
                 self.rx_forward_registration(queue, issi, sdu);
             }
             SapMsgInner::CmceCallControl(CallControl::SiteForwardRegistrationResult { issi, sdu }) => {
-                self.finish_prepare(queue, issi, sdu);
+                // A sibling cell's MM answered (or the switch had no cell to ask).
+                let outcome = if sdu.is_some() { HandoverOutcome::Accepted } else { HandoverOutcome::NotPrepared };
+                self.finish_prepare(queue, issi, outcome, sdu, None);
+            }
+            SapMsgInner::CmceCallControl(CallControl::HandoverResult { issi, outcome, sdu, channel }) => {
+                self.finish_prepare(queue, issi, outcome, sdu, channel);
             }
             _ => tracing::warn!("MLE: unexpected control message, ignoring"),
         }
@@ -295,8 +555,27 @@ impl MleBs {
         chan_alloc: Option<CmceChanAllocReq>,
         write: impl FnOnce(&mut BitBuffer) -> Result<(), tetra_core::PduParseErr>,
     ) {
+        self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, chan_alloc, None, None, write);
+    }
+
+    /// Sends a PDU of protocol `disc` to an MS. With `stch` it is stolen on that traffic channel
+    /// if the MS is on it (layer 2 falls back to the MCCH when the channel no longer carries
+    /// traffic).
+    #[allow(clippy::too_many_arguments)]
+    fn send_l2(
+        &self,
+        queue: &mut MessageQueue,
+        addr: TetraAddress,
+        link_id: LinkId,
+        endpoint_id: EndpointId,
+        disc: MleProtocolDiscriminator,
+        chan_alloc: Option<CmceChanAllocReq>,
+        stch: Option<(u16, u8)>,
+        tx_reporter: Option<TxReporter>,
+        write: impl FnOnce(&mut BitBuffer) -> Result<(), tetra_core::PduParseErr>,
+    ) {
         let mut body = BitBuffer::new_autoexpand(32);
-        body.write_bits(MleProtocolDiscriminator::Mle.into_raw(), 3);
+        body.write_bits(disc.into_raw(), 3);
         if let Err(e) = write(&mut body) {
             tracing::error!("MLE: failed to encode PDU for {}: {:?}", addr.ssi, e);
             return;
@@ -315,7 +594,7 @@ impl MleBs {
                 link_id,
                 endpoint_id,
                 tl_sdu: pdu,
-                stealing_permission: false,
+                stealing_permission: stch.is_some(),
                 subscriber_class: 0,
                 fcs_flag: false,
                 air_interface_encryption: None,
@@ -324,7 +603,8 @@ impl MleBs {
                 req_handle: 0,
                 graceful_degradation: None,
                 chan_alloc,
-                tx_reporter: None,
+                stealing_slot: stch,
+                tx_reporter,
             }),
         });
     }
@@ -495,6 +775,7 @@ impl MleBs {
                 req_handle: 0, // TODO FIXME; should we pass the same handle here?
                 graceful_degradation: None,
                 chan_alloc: None,
+                stealing_slot: None,
                 tx_reporter: prim.tx_reporter.take(),
             }),
         };
@@ -597,6 +878,7 @@ impl MleBs {
                     req_handle: 0,
 
                     chan_alloc,
+                    stealing_slot: None,
                     tx_reporter: prim.tx_reporter.take(),
                 }),
             }
@@ -620,6 +902,7 @@ impl MleBs {
                     req_handle: 0, // TODO FIXME
                     graceful_degradation: None,
                     chan_alloc,
+                    stealing_slot: None,
                     tx_reporter: prim.tx_reporter.take(),
                 }),
             }
@@ -654,9 +937,10 @@ impl TetraEntityTrait for MleBs {
             .map(|(issi, _)| *issi)
             .collect();
         for issi in late {
-            tracing::info!("MLE: no answer to {}'s forwarded registration, D-NEW-CELL without it", issi);
-            self.finish_prepare(queue, issi, None);
+            tracing::info!("MLE: target cell did not answer {}'s U-PREPARE in time", issi);
+            self.finish_prepare(queue, issi, HandoverOutcome::NotPrepared, None, None);
         }
+        self.drive_type1(queue);
 
         // Broadcast D-NWRK-BROADCAST twice per hyperframe (~30.6s interval) if timezone is configured.
         // Two evenly-spaced slots [20, 50] avoid congestion with other hyperframe-triggered events
@@ -701,6 +985,38 @@ impl TetraEntityTrait for MleBs {
     }
 }
 
+/// "Location update type" of a U-LOCATION UPDATE DEMAND (after its 4 bit PDU type, table 16.12).
+fn location_update_type(demand: &BitBuffer) -> u8 {
+    demand.peek_bits_startoffset(4, 3).unwrap_or(0) as u8
+}
+
+/// "Reject cause" of a D-LOCATION UPDATE REJECT (after PDU type and location update type, table 16.13).
+fn reject_cause(reject: &BitBuffer) -> Option<u8> {
+    reject.peek_bits_startoffset(7, 5).map(|c| c as u8)
+}
+
+/// D-LOCATION UPDATE REJECT "forward registration failure" for a forward registration the target
+/// did not accept (clause 18.3.4.7.6; reject cause clause 16.10.42).
+fn forward_registration_failure(location_update_type: u8) -> BitBuffer {
+    let reject = DLocationUpdateReject {
+        location_update_type: LocationUpdateType::try_from(location_update_type as u64).unwrap_or(LocationUpdateType::RoamingLocationUpdating),
+        reject_cause: REJECT_CAUSE_FORWARD_REGISTRATION_FAILURE,
+        cipher_control: false,
+        ciphering_parameters: None,
+        address_extension: None,
+        cell_type_control: None,
+        proprietary: None,
+    };
+    let mut body = BitBuffer::new_autoexpand(16);
+    reject.to_bitbuf(&mut body).expect("D-LOCATION UPDATE REJECT without optional elements");
+    let len = body.get_pos();
+    body.seek(0);
+    let mut sdu = BitBuffer::new(len);
+    sdu.copy_bits(&mut body, len);
+    sdu.seek(0);
+    sdu
+}
+
 #[cfg(test)]
 mod tests {
     use tetra_core::SsiType;
@@ -713,6 +1029,25 @@ mod tests {
     const MS: u32 = 2_260_001;
 
     fn config(site_linked: bool) -> SharedConfig {
+        config_with(site_linked, "")
+    }
+
+    /// A single-cell station connected to Brew: its neighbour belongs to another station.
+    fn brew_config() -> SharedConfig {
+        config_with(
+            false,
+            r#"
+[brew]
+host = "brew.example"
+port = 3000
+tls = false
+username = 1
+password = "x"
+"#,
+        )
+    }
+
+    fn config_with(site_linked: bool, extra: &str) -> SharedConfig {
         let toml = r#"
 config_version = "0.6"
 stack_mode = "Bs"
@@ -738,8 +1073,9 @@ cell_reselection_types_supported = 1
 neighbor_cell_synchronized = false
 cell_load_ca = 0
 main_carrier_number = 1525
+location_area = 7
 "#;
-        let mut cfg = tetra_config::bluestation::parsing::from_toml_str(toml).unwrap();
+        let mut cfg = tetra_config::bluestation::parsing::from_toml_str(&format!("{toml}{extra}")).unwrap();
         cfg.site_linked = site_linked;
         SharedConfig::from_parts(cfg, None)
     }
@@ -920,6 +1256,7 @@ main_carrier_number = 1525
                 carrier: Some(1530),
                 timeslots: [false, true, false, false],
                 ul_dl_assigned: UlDlAssignment::Both,
+                cell_change: false,
             });
         }
         mle.rx_prim(&mut q, answer);
@@ -1011,11 +1348,15 @@ main_carrier_number = 1525
                 sdu: Some(BitBuffer::from_bitstr(MM_REJECT)),
             }),
         );
-        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec![format!("001000{}", MM_REJECT)], "O-bit 0, table E.22");
+        assert_eq!(
+            sent_mle_pdus(&drain(&mut q)),
+            vec![format!("001100{}", MM_REJECT)],
+            "fail cause 2 'MS not allowed on cell' for a reject cause other than forward registration failure (18.3.4.7.6), O-bit 0 (table E.22)"
+        );
     }
 
     #[test]
-    fn unanswered_forwarded_registration_times_out_to_plain_d_new_cell() {
+    fn unanswered_forwarded_registration_times_out_to_d_new_cell_with_forward_registration_failure() {
         let mut mle = MleBs::new(config(true));
         let mut q = MessageQueue::new();
         prepare_with_registration(&mut mle, &mut q);
@@ -1023,7 +1364,151 @@ main_carrier_number = 1525
             p.since = Instant::now() - FORWARD_REGISTRATION_TIMEOUT;
         }
         mle.tick_start(&mut q, TdmaTime::default());
+        assert_eq!(
+            sent_mle_pdus(&drain(&mut q)),
+            vec![format!("000010{}", FRF_REJECT)],
+            "type 2 with failed forward registration (figure 18.12): D-NEW-CELL carries a reject"
+        );
+    }
+
+    /// D-LOCATION UPDATE REJECT (0111), roaming location updating (000, as in MM_DEMAND),
+    /// forward registration failure (00111), cipher control 0, no optional elements (O-bit 0).
+    const FRF_REJECT: &str = "01110000011100";
+
+    #[test]
+    fn forward_registration_failure_reject_has_the_table_16_13_layout() {
+        assert_eq!(forward_registration_failure(0).to_bitstr(), FRF_REJECT);
+        assert_eq!(&forward_registration_failure(6).to_bitstr()[4..7], "110", "repeats the demand's type");
+        assert_eq!(reject_cause(&BitBuffer::from_bitstr(FRF_REJECT)), Some(REJECT_CAUSE_FORWARD_REGISTRATION_FAILURE));
+        assert_eq!(location_update_type(&BitBuffer::from_bitstr("0010110000000011")), 6);
+    }
+
+    #[test]
+    fn unknown_neighbour_with_forward_registration_gets_a_reject_in_d_prepare_fail() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        let prepare = UPrepare {
+            cell_identifier_ca: Some(9),
+            sdu: Some(BitBuffer::from_bitstr(MM_DEMAND)),
+        };
+        mle.rx_prim(&mut q, uplink_mle(|b| prepare.to_bitbuf(b).unwrap()));
+        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec![format!("001000{}", FRF_REJECT)]);
+    }
+
+    // ── Neighbour on another station, prepared through Brew ─────────────────────────────────
+
+    fn cross_station_prepare(mle: &mut MleBs, q: &mut MessageQueue, sdu: Option<&str>) -> Vec<SapMsg> {
+        let prepare = UPrepare {
+            cell_identifier_ca: Some(1),
+            sdu: sdu.map(BitBuffer::from_bitstr),
+        };
+        mle.rx_prim(q, uplink_mle(|b| prepare.to_bitbuf(b).unwrap()));
+        drain(q)
+    }
+
+    fn result(outcome: HandoverOutcome, sdu: Option<&str>) -> SapMsg {
+        control(CallControl::HandoverResult {
+            issi: MS,
+            outcome,
+            sdu: sdu.map(BitBuffer::from_bitstr),
+            channel: None,
+        })
+    }
+
+    fn told_brew(msgs: &[SapMsg], f: impl Fn(&CallControl) -> bool) -> bool {
+        msgs.iter()
+            .any(|m| m.dest == TetraEntity::Brew && matches!(&m.msg, SapMsgInner::CmceCallControl(cc) if f(cc)))
+    }
+
+    #[test]
+    fn u_prepare_to_another_station_asks_brew_and_holds_d_new_cell() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        let msgs = cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        assert!(sent_mle_pdus(&msgs).is_empty(), "D-NEW-CELL waits for the other station");
+        let own_plan = tetra_config::bluestation::carrier_band_plan(&mle.config.config().cell).unwrap();
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest {
+            issi: MS, target_carrier: 1525, target_carrier_ext, target_mcc: None, target_mnc: None,
+            target_location_area: Some(7), sdu: Some(sdu) } if *target_carrier_ext == own_plan && sdu.to_bitstr() == MM_DEMAND)));
+        assert!(!told_brew(&msgs, |cc| matches!(cc, CallControl::SiteHandoverPrepare { .. } | CallControl::SiteForwardRegistration { .. })));
+
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, Some(MM_ACCEPT)));
+        let msgs = drain(&mut q);
+        assert_eq!(sent_mle_pdus(&msgs), vec![format!("000010{}", MM_ACCEPT)]);
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverDone { issi: MS })));
+    }
+
+    #[test]
+    fn u_prepare_without_registration_to_another_station_is_prepared_too() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        let msgs = cross_station_prepare(&mut mle, &mut q, None);
+        assert!(sent_mle_pdus(&msgs).is_empty());
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest { sdu: None, .. })));
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, None));
+        let msgs = drain(&mut q);
+        assert_eq!(sent_mle_pdus(&msgs), vec!["000010".to_string()]);
+        assert!(!told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverDone { .. })), "nothing moved: no registration");
+    }
+
+    #[test]
+    fn rejected_by_the_other_station_maps_the_reject_cause_to_the_fail_cause() {
+        // Reject cause "forward registration failure" → fail cause 0, any other → 2 (18.3.4.7.6).
+        for (reject, fail_cause) in [(FRF_REJECT, "00"), (MM_REJECT, "10")] {
+            let mut mle = MleBs::new(brew_config());
+            let mut q = MessageQueue::new();
+            cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+            mle.rx_prim(&mut q, result(HandoverOutcome::Rejected, Some(reject)));
+            let msgs = drain(&mut q);
+            assert_eq!(sent_mle_pdus(&msgs), vec![format!("001{fail_cause}0{reject}")]);
+            assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverFailed { issi: MS })));
+        }
+    }
+
+    #[test]
+    fn other_station_gone_becomes_d_prepare_fail_temporary_break() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        mle.rx_prim(&mut q, result(HandoverOutcome::TargetGone, None));
+        let msgs = drain(&mut q);
+        assert_eq!(sent_mle_pdus(&msgs), vec![format!("001000{}", FRF_REJECT)]);
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverFailed { issi: MS })));
+    }
+
+    #[test]
+    fn other_station_not_prepared_sends_the_ms_anyway_with_forward_registration_failure() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        mle.rx_prim(&mut q, result(HandoverOutcome::NotPrepared, None));
+        let msgs = drain(&mut q);
+        assert_eq!(sent_mle_pdus(&msgs), vec![format!("000010{}", FRF_REJECT)]);
+        assert!(!told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverDone { .. } | CallControl::HandoverFailed { .. })));
+
+        // Without a forwarded registration a plain D-NEW-CELL, as before.
+        cross_station_prepare(&mut mle, &mut q, None);
+        mle.rx_prim(&mut q, result(HandoverOutcome::NotPrepared, None));
         assert_eq!(sent_mle_pdus(&drain(&mut q)), vec!["000010".to_string()]);
+    }
+
+    #[test]
+    fn an_accept_without_the_target_mms_answer_is_not_an_accept() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, None));
+        let msgs = drain(&mut q);
+        assert_eq!(sent_mle_pdus(&msgs), vec![format!("000010{}", FRF_REJECT)]);
+        assert!(!told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverDone { .. })));
+    }
+
+    #[test]
+    fn a_result_nobody_waits_for_sends_nothing() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, Some(MM_ACCEPT)));
+        assert!(drain(&mut q).is_empty());
     }
 
     #[test]

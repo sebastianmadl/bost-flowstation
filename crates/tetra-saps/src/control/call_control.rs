@@ -215,4 +215,74 @@ pub enum CallControl {
     /// Multi-cell only: that MM's answer (None: the target isn't one of our cells, or no answer),
     /// for the serving cell to return inside D-NEW-CELL / D-PREPARE-FAIL.
     SiteForwardRegistrationResult { issi: u32, sdu: Option<BitBuffer> },
+    /// Single-cell station with Brew (MLE → Brew): the MS asked in U-PREPARE to move to a
+    /// neighbour cell that is not one of ours (announced type 1/2 cell reselection, TS 100 392-2
+    /// clause 18.3.4.7.5). Brew asks the station serving that cell through the server; `sdu` is
+    /// the forward registration (MM PDU) the U-PREPARE carried.
+    HandoverRequest {
+        issi: u32,
+        target_carrier: u16,
+        /// Absolute band plan of the target cell (main carrier number extension layout)
+        target_carrier_ext: u16,
+        target_mcc: Option<u16>,
+        target_mnc: Option<u16>,
+        target_location_area: Option<u16>,
+        sdu: Option<BitBuffer>,
+    },
+    /// Brew → MLE: how the target station answered a `HandoverRequest`. `sdu` is the target MM's
+    /// answer to the forward registration (D-LOCATION UPDATE ACCEPT or REJECT), if any.
+    HandoverResult {
+        issi: u32,
+        outcome: HandoverOutcome,
+        sdu: Option<BitBuffer>,
+        /// The target's traffic channel for the MS's group call, when it offers one (type 1).
+        channel: Option<HandoverChannel>,
+    },
+    /// Target station (Brew → CMCE): an MS of a running call to `gssi` is about to arrive here by
+    /// announced type 1 cell reselection. Bring the call up here if it is only held as pending,
+    /// count the MS as a listener, and answer with `HandoverGroupCallReady`.
+    HandoverPrepareGroupCall { issi: u32, gssi: u32 },
+    /// CMCE → Brew: the call to `gssi` runs here on this channel (call identifier, carrier,
+    /// timeslot, usage marker), or `None` when it did not come up in time.
+    HandoverGroupCallReady { issi: u32, gssi: u32, call: Option<(u16, u16, u8, u8)> },
+    /// MLE → Brew: the MS was sent to the other station with that station's registration accept
+    /// in D-NEW-CELL; it no longer belongs to this station.
+    HandoverDone { issi: u32 },
+    /// MLE → Brew: the reselection after a forwarded registration was refused with D-PREPARE-FAIL,
+    /// so the MS stays registered here (clause 18.3.4.7.6) even if the target registered it.
+    HandoverFailed { issi: u32 },
+}
+
+/// A traffic channel on the target cell for announced type 1 cell reselection (TS 100 392-2
+/// clause 18.3.4.7.5): the serving cell sends the MS the target's call identifier (D-INFO) and
+/// then a channel allocation for another cell (clause 21.5.2, "cell change flag").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandoverChannel {
+    /// The serving cell's call identifier for the call, as the MS knows it
+    pub call_id: u16,
+    /// The target cell's call identifier for the same call
+    pub new_call_id: u16,
+    /// Carrier on the target cell (same band plan as the serving cell)
+    pub carrier: u16,
+    /// Timeslot 1 to 4 on the target cell
+    pub timeslot: u8,
+    /// Traffic usage marker on the target cell
+    pub usage: u8,
+    /// Carrier and timeslot of the call's traffic channel on the serving cell, where the MS
+    /// listens and where D-INFO and D-NEW-CELL are stolen in
+    pub serving_carrier: u16,
+    pub serving_timeslot: u8,
+}
+
+/// Answer of the target station to a cross-station `HandoverRequest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoverOutcome {
+    /// The target accepted the forward registration, or there was nothing to register.
+    Accepted,
+    /// The target's MM rejected the forward registration (its D-LOCATION UPDATE REJECT is in the SDU).
+    Rejected,
+    /// The target station went away while the request waited.
+    TargetGone,
+    /// Nobody prepared the target cell: unknown, not capable, no answer in time, or no server.
+    NotPrepared,
 }

@@ -13,6 +13,7 @@ use tetra_pdus::umac::fields::channel_allocation::ChanAllocElement;
 use tetra_pdus::umac::fields::sysinfo_default_def_for_access_code_a::SysinfoDefaultDefForAccessCodeA;
 use tetra_pdus::umac::pdus::mac_access::MacAccess;
 use tetra_pdus::umac::pdus::mac_data::MacData;
+use tetra_pdus::umac::pdus::mac_end_dl::MacEndDl;
 use tetra_pdus::umac::pdus::mac_end_hu::MacEndHu;
 use tetra_pdus::umac::pdus::mac_end_ul::MacEndUl;
 use tetra_pdus::umac::pdus::mac_frag_ul::MacFragUl;
@@ -411,6 +412,102 @@ impl UmacBs {
             mon_pattern: 1,
             frame18_mon_pattern: None,
         })
+    }
+
+    /// MAC channel allocation for a channel on another cell, for announced cell reselection type 1
+    /// (TS 100 392-2 clause 23.5.4.1): "cell change flag" set and the timeslot bit map in the
+    /// numbering of the new cell. The carrier is given without extended carrier numbering, so the
+    /// MS reads it in the band plan of the current cell (clause 21.5.2); the caller only asks for
+    /// a cell that uses the same band plan.
+    fn cell_change_chanalloc(chan_alloc: &CmceChanAllocReq) -> Option<ChanAllocElement> {
+        let Some(carrier_num) = chan_alloc.carrier.filter(|c| *c < 4096) else {
+            tracing::warn!("cell_change_chanalloc: no carrier for the other cell in {:?}", chan_alloc);
+            return None;
+        };
+        if !chan_alloc.timeslots.iter().any(|&set| set) {
+            tracing::warn!("cell_change_chanalloc: no timeslot in {:?}", chan_alloc);
+            return None;
+        }
+        let clch_permission = (chan_alloc.alloc_type == ChanAllocType::Replace || chan_alloc.alloc_type == ChanAllocType::Additional)
+            && (chan_alloc.ul_dl_assigned == UlDlAssignment::Ul || chan_alloc.ul_dl_assigned == UlDlAssignment::Both);
+        Some(ChanAllocElement {
+            alloc_type: chan_alloc.alloc_type,
+            ts_assigned: chan_alloc.timeslots,
+            ul_dl_assigned: chan_alloc.ul_dl_assigned,
+            clch_permission,
+            cell_change_flag: true,
+            carrier_num,
+            ext: None,
+            mon_pattern: 1,
+            frame18_mon_pattern: None,
+        })
+    }
+
+    /// Builds the downlink STCH block(s) for one stolen slot (TS 100 392-2 clause 23.8.4.2.1):
+    /// a MAC-RESOURCE in the first half slot, or, when the PDU does not fit there, a MAC-RESOURCE
+    /// with "Length indication" 111111 (second half slot stolen, start of fragmentation) and the
+    /// final fragment in a MAC-END in the second half slot. A channel allocation goes in the
+    /// MAC-END when the message is fragmented (clause 23.5.4.1). Returns None when the PDU does
+    /// not fit one slot, since fragmentation on the STCH is only permitted within one slot
+    /// (clause 23.4.2.1.7).
+    fn build_stch(
+        mac_pdu: MacResource,
+        sdu: &mut BitBuffer,
+        chan_alloc: Option<ChanAllocElement>,
+    ) -> Option<(BitBuffer, Option<BitBuffer>)> {
+        const STCH_CAP: usize = 124;
+        let sdu_len = sdu.get_len();
+
+        let mut single = mac_pdu.clone();
+        single.chan_alloc_element = chan_alloc.clone();
+        let single_len = single.compute_header_len() + sdu_len;
+        if single_len.div_ceil(8) * 8 <= STCH_CAP {
+            let num_fill_bits = single.update_len_and_fill_ind(sdu_len);
+            let mut block = BitBuffer::new(STCH_CAP);
+            single.to_bitbuf(&mut block);
+            sdu.seek(0);
+            block.copy_bits(sdu, sdu_len);
+            fillbits::addition::write(&mut block, Some(num_fill_bits));
+            return Some((block, None));
+        }
+
+        let mut first = mac_pdu;
+        first.chan_alloc_element = None;
+        first.length_ind = 0b111111;
+        let first_hdr = first.compute_header_len();
+        if first_hdr >= STCH_CAP || sdu_len < 2 {
+            return None;
+        }
+        // Keep at least one bit for the final fragment
+        let first_bits = (STCH_CAP - first_hdr).min(sdu_len - 1);
+        let rest = sdu_len - first_bits;
+        let end_hdr = 2 + 1 + 1 + 1 + 6 + 1 + 1 + chan_alloc.as_ref().map_or(0, |ca| ca.compute_len());
+        let end_len = end_hdr + rest;
+        let end_len_bytes = end_len.div_ceil(8);
+        if end_len_bytes * 8 > STCH_CAP {
+            return None;
+        }
+
+        first.fill_bits = first_hdr + first_bits < STCH_CAP;
+        let mut block1 = BitBuffer::new(STCH_CAP);
+        first.to_bitbuf(&mut block1);
+        sdu.seek(0);
+        block1.copy_bits(sdu, first_bits);
+        fillbits::addition::write(&mut block1, None);
+
+        let num_fill_bits = end_len_bytes * 8 - end_len;
+        let end = MacEndDl {
+            fill_bits: num_fill_bits > 0,
+            pos_of_grant: 0,
+            length_ind: end_len_bytes as u8,
+            slot_granting_element: None,
+            chan_alloc_element: chan_alloc,
+        };
+        let mut block2 = BitBuffer::new(STCH_CAP);
+        end.to_bitbuf(&mut block2);
+        block2.copy_bits(sdu, rest);
+        fillbits::addition::write(&mut block2, Some(num_fill_bits));
+        Some((block1, Some(block2)))
     }
 
     /// Convenience function to send a TMA-REPORT.ind
@@ -1649,12 +1746,20 @@ impl UmacBs {
         let preferred_carrier = prim.carrier_num.unwrap_or_else(|| self.main_carrier());
         let mut sdu = prim.pdu;
 
+        // A channel allocation for another cell (announced cell reselection type 1) names a
+        // channel of that cell. It is never a hint for our own stealing timeslot.
+        let cell_change = prim.chan_alloc.as_ref().is_some_and(|ca| ca.cell_change);
+
         if prim.stealing_permission {
-            let requested_ts = prim
-                .chan_alloc
-                .as_ref()
-                .and_then(|ca| ca.timeslots.iter().enumerate().find(|&(_, &set)| set).map(|(i, _)| (i + 1) as u8));
-            let requested_carrier = prim.chan_alloc.as_ref().and_then(|ca| ca.carrier).unwrap_or(preferred_carrier);
+            let own_alloc = prim.chan_alloc.as_ref().filter(|_| !cell_change);
+            let requested_ts = prim.stealing_slot.map(|(_, ts)| ts).or_else(|| {
+                own_alloc.and_then(|ca| ca.timeslots.iter().enumerate().find(|&(_, &set)| set).map(|(i, _)| (i + 1) as u8))
+            });
+            let requested_carrier = prim
+                .stealing_slot
+                .map(|(carrier, _)| carrier)
+                .or_else(|| own_alloc.and_then(|ca| ca.carrier))
+                .unwrap_or(preferred_carrier);
             let traffic_ts = match requested_ts {
                 Some(ts) if self.scheduler_for(requested_carrier).can_deliver_stealing(ts) => Some(ts),
                 Some(ts) => {
@@ -1670,10 +1775,23 @@ impl UmacBs {
 
             if let Some(ts) = traffic_ts {
                 if self.scheduler_for(requested_carrier).circuit_is_active(Direction::Dl, ts) {
-                    const STCH_CAP: usize = 124;
                     let has_pending_ra = self
                         .scheduler_for_mut(requested_carrier)
                         .take_pending_ra_ack(ts, prim.main_address.ssi);
+                    // Only a channel allocation for another cell is sent on the STCH. Any other
+                    // chan_alloc on this path is an internal hint for the stealing timeslot.
+                    let (usage_marker, chan_alloc_element) = match prim.chan_alloc.as_ref().filter(|_| cell_change) {
+                        Some(chan_alloc) => match Self::cell_change_chanalloc(chan_alloc) {
+                            Some(element) => (chan_alloc.usage, Some(element)),
+                            None => {
+                                if let Some(tx_reporter) = prim.tx_reporter {
+                                    tx_reporter.mark_discarded();
+                                }
+                                return;
+                            }
+                        },
+                        None => (None, None),
+                    };
                     let mac_pdu = MacResource {
                         fill_bits: false,
                         pos_of_grant: 0,
@@ -1682,42 +1800,60 @@ impl UmacBs {
                         length_ind: 0,
                         addr: Some(prim.main_address),
                         event_label: None,
-                        usage_marker: None,
+                        usage_marker,
                         power_control_element: None,
                         slot_granting_element: None,
                         chan_alloc_element: None,
                     };
 
                     sdu.seek(0);
-                    let sdu_len = sdu.get_len();
-                    let hdr_len = mac_pdu.compute_header_len();
-
-                    if hdr_len + sdu_len <= STCH_CAP {
-                        let mut mac_pdu = mac_pdu;
-                        let num_fill_bits = mac_pdu.update_len_and_fill_ind(sdu_len);
-                        let mut stch_block = BitBuffer::new(STCH_CAP);
-                        mac_pdu.to_bitbuf(&mut stch_block);
-                        sdu.seek(0);
-                        stch_block.copy_bits(&mut sdu, sdu_len);
-                        fillbits::addition::write(&mut stch_block, Some(num_fill_bits));
-                        self.scheduler_for_mut(requested_carrier)
-                            .dl_enqueue_stealing(ts, stch_block, prim.tx_reporter);
-                    } else {
-                        let mut fragger = BsFragger::new(mac_pdu, sdu, prim.tx_reporter);
-                        let mut produced = 0usize;
-                        loop {
-                            let mut stch_block = BitBuffer::new(STCH_CAP);
-                            let done = fragger.get_next_chunk(&mut stch_block);
-                            self.scheduler_for_mut(requested_carrier).dl_enqueue_stealing(ts, stch_block, None);
-                            produced += 1;
-                            if done || produced >= 32 {
-                                break;
+                    match Self::build_stch(mac_pdu, &mut sdu, chan_alloc_element) {
+                        Some((first, None)) => {
+                            self.scheduler_for_mut(requested_carrier)
+                                .dl_enqueue_stealing(ts, first, prim.tx_reporter);
+                            return;
+                        }
+                        Some((first, Some(second))) => {
+                            self.scheduler_for_mut(requested_carrier)
+                                .dl_enqueue_stealing_full_slot(ts, first, second, prim.tx_reporter);
+                            return;
+                        }
+                        None if cell_change => {
+                            tracing::warn!(
+                                "rx_ul_tma_unitdata_req: cell change allocation for {} does not fit one stolen slot, discarding",
+                                prim.main_address
+                            );
+                            if let Some(tx_reporter) = prim.tx_reporter {
+                                tx_reporter.mark_discarded();
                             }
+                            return;
+                        }
+                        None => {
+                            // Fragmentation on the STCH is only permitted within one slot
+                            // (clause 23.4.2.1.7), so a longer PDU goes on the control channel.
+                            tracing::warn!(
+                                "rx_ul_tma_unitdata_req: {} SDU bits for {} do not fit one stolen slot, falling back to MCCH",
+                                sdu.get_len(),
+                                prim.main_address
+                            );
+                            sdu.seek(0);
                         }
                     }
-                    return;
                 }
             }
+        }
+
+        if cell_change {
+            // A type 1 cell change is only granted to an MS on our traffic channel (clause
+            // 18.3.4.7.5); without one the MLE falls back to type 2.
+            tracing::warn!(
+                "rx_ul_tma_unitdata_req: cell change allocation for {} without a traffic channel to steal from, discarding",
+                prim.main_address
+            );
+            if let Some(tx_reporter) = prim.tx_reporter {
+                tx_reporter.mark_discarded();
+            }
+            return;
         }
 
         let encryption_mode = self.dl_encryption_mode(prim.main_address);
@@ -2409,7 +2545,13 @@ impl UmacBs {
             | CallControl::SiteCallPriority { .. }
             | CallControl::SiteHandoverPrepare { .. }
             | CallControl::SiteForwardRegistration { .. }
-            | CallControl::SiteForwardRegistrationResult { .. } => {
+            | CallControl::SiteForwardRegistrationResult { .. }
+            | CallControl::HandoverRequest { .. }
+            | CallControl::HandoverResult { .. }
+            | CallControl::HandoverDone { .. }
+            | CallControl::HandoverFailed { .. }
+            | CallControl::HandoverPrepareGroupCall { .. }
+            | CallControl::HandoverGroupCallReady { .. } => {
                 tracing::trace!("rx_control: ignoring CMCE-Brew notification (not for UMAC)");
             }
         }

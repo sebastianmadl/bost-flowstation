@@ -340,6 +340,7 @@ impl CcBsSubentity {
             carrier: Some(call.calling_carrier_num),
             timeslots: calling_timeslots,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         };
 
         let d_connect = DConnect {
@@ -561,6 +562,7 @@ impl CcBsSubentity {
             carrier: Some(call.called_carrier_num),
             timeslots: called_timeslots,
             ul_dl_assigned,
+            cell_change: false,
         };
 
         let d_connect_ack = DConnectAcknowledge {

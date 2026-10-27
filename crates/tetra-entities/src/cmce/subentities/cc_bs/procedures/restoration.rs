@@ -21,6 +21,20 @@ pub(in crate::cmce::subentities::cc_bs) struct DeferredRestore {
     pub since: TdmaTime,
 }
 
+/// How long the target station waits for a Brew group call to come up for an MS arriving by
+/// announced type 1 cell reselection. Project value: brew-server gives the target 2 s for its
+/// whole answer (`[handover] timeout_ms`), the forward registration included. (1 s × 72 timeslots/s.)
+pub(in crate::cmce::subentities::cc_bs) const HANDOVER_CALL_TIMEOUT_TS: i32 = 18 * 4;
+
+/// An MS of a group call that runs on the Brew network but not yet on this cell, announced by
+/// the serving station for type 1 cell reselection.
+#[derive(Debug, Clone)]
+pub(in crate::cmce::subentities::cc_bs) struct HandoverReservation {
+    pub issi: u32,
+    pub gssi: u32,
+    pub since: TdmaTime,
+}
+
 impl CcBsSubentity {
     /// A cell linked to other cells (site switch, or any Brew network) restores a group call by
     /// its GSSI when the MS brings another cell's call identifier: TS 100 392-2 clause 14.7.1.3
@@ -188,6 +202,7 @@ impl CcBsSubentity {
             carrier: Some(call.carrier_num),
             timeslots,
             ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
         };
 
         call.complete_restore();
@@ -282,12 +297,96 @@ impl CcBsSubentity {
             self.deferred_restores.push(restore);
         }
 
+        self.add_restore_listener(queue, issi, gssi);
+    }
+
+    /// Count `issi` as a listener of `gssi` until MM affiliates it, the call ends or it leaves
+    /// (see `defer_call_restore`). A cell that gains its first listener this way asks Brew for the
+    /// call it holds as pending inbound.
+    fn add_restore_listener(&mut self, queue: &mut MessageQueue, issi: u32, gssi: u32) {
         let affiliated = self.subscriber_groups.get(&issi).is_some_and(|groups| groups.contains(&gssi));
         if !affiliated && self.restore_listeners.insert((issi, gssi)) {
             let first_listener = !self.has_listener(gssi);
             self.inc_group_listener(gssi);
             if first_listener {
                 Self::push_control(queue, TetraEntity::Brew, CallControl::GroupListenersAvailable { gssi });
+            }
+        }
+    }
+
+    /// Target station of an announced type 1 cell reselection (TS 100 392-2 clause 18.3.4.7.5):
+    /// the serving station asks for the traffic channel of `gssi`'s call, so the MS can be sent
+    /// straight there and continue the call without restoring it. The MS counts as a listener as
+    /// for a restore, which brings a call Brew only holds as pending inbound up here. Answered
+    /// with `HandoverGroupCallReady` when the call runs, or without a channel after
+    /// `HANDOVER_CALL_TIMEOUT_TS` (the serving station then uses type 2).
+    pub(in crate::cmce::subentities::cc_bs) fn prepare_handover_group_call(&mut self, queue: &mut MessageQueue, issi: u32, gssi: u32) {
+        if !self.restores_group_by_gssi(gssi) || brew::is_site_linked(&self.config) {
+            Self::push_control(queue, TetraEntity::Brew, CallControl::HandoverGroupCallReady { issi, gssi, call: None });
+            return;
+        }
+        self.add_restore_listener(queue, issi, gssi);
+        self.handover_reservations.retain(|r| r.issi != issi);
+        if !self.answer_handover_reservation(queue, issi, gssi) {
+            tracing::info!("CMCE: ISSI {} arrives for gssi={} by type 1 reselection — waiting for the network call", issi, gssi);
+            self.handover_reservations.push(HandoverReservation {
+                issi,
+                gssi,
+                since: self.dltime,
+            });
+        }
+    }
+
+    /// Answer a type 1 reservation if `gssi`'s call runs here. True if answered.
+    fn answer_handover_reservation(&self, queue: &mut MessageQueue, issi: u32, gssi: u32) -> bool {
+        let Some((&call_id, call)) = self.active_calls.iter().find(|(_, c)| c.dest_gssi == gssi) else {
+            return false;
+        };
+        tracing::info!(
+            "CMCE: channel for ISSI {}'s type 1 reselection: call_id={} gssi={} carrier={} ts={} usage={}",
+            issi,
+            call_id,
+            gssi,
+            call.carrier_num,
+            call.ts,
+            call.usage
+        );
+        Self::push_control(
+            queue,
+            TetraEntity::Brew,
+            CallControl::HandoverGroupCallReady {
+                issi,
+                gssi,
+                call: Some((call_id, call.carrier_num, call.ts, call.usage)),
+            },
+        );
+        true
+    }
+
+    /// Per tick: answer type 1 reservations whose call is up, give up on the others in time.
+    fn drive_handover_reservations(&mut self, queue: &mut MessageQueue) {
+        if self.handover_reservations.is_empty() {
+            return;
+        }
+        let parked = std::mem::take(&mut self.handover_reservations);
+        for r in parked {
+            if self.answer_handover_reservation(queue, r.issi, r.gssi) {
+                continue;
+            }
+            if r.since.age(self.dltime) >= HANDOVER_CALL_TIMEOUT_TS {
+                tracing::info!("CMCE: no network call for gssi={} came up for ISSI {}'s type 1 reselection", r.gssi, r.issi);
+                Self::push_control(
+                    queue,
+                    TetraEntity::Brew,
+                    CallControl::HandoverGroupCallReady {
+                        issi: r.issi,
+                        gssi: r.gssi,
+                        call: None,
+                    },
+                );
+                self.drop_restore_listener(queue, r.issi, r.gssi);
+            } else {
+                self.handover_reservations.push(r);
             }
         }
     }
@@ -318,6 +417,7 @@ impl CcBsSubentity {
     /// Per tick: answer parked restores whose group call is now up, reject the ones that waited
     /// too long (D-RELEASE, which MLE turns into D-RESTORE-FAIL).
     pub(in crate::cmce::subentities::cc_bs) fn drive_deferred_restores(&mut self, queue: &mut MessageQueue) {
+        self.drive_handover_reservations(queue);
         if self.deferred_restores.is_empty() {
             return;
         }

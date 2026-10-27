@@ -55,7 +55,7 @@ use lifecycle::{
     PREEMPT_MIN_HOLD_TS, PREEMPT_POST_CEASE_TS, PREEMPT_READY_DEADLINE_TS,
 };
 use pdu::is_emergency_priority;
-use procedures::{DeferredRestore, GroupTransitionError, IndividualTransitionError};
+use procedures::{DeferredRestore, GroupTransitionError, HandoverReservation, IndividualTransitionError};
 use state::{
     ActiveCall, CachedSetup, CallOrigin, CcFormalEvent, CcFormalState, GroupCallState, IndividualCall, IndividualCallState,
     TxDemandQueueResult,
@@ -91,4 +91,6 @@ pub struct CcBsSubentity {
     deferred_restores: Vec<DeferredRestore>,
     /// (ISSI, GSSI) listener counts added by a restore rather than an MM affiliation
     restore_listeners: HashSet<(u32, u32)>,
+    /// MSs arriving by announced type 1 cell reselection whose group call is not up here yet
+    handover_reservations: Vec<HandoverReservation>,
 }

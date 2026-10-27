@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tetra_config::bluestation::{CfgBrew, StackConfig, StackMode, WhitelistMode};
+use tetra_config::bluestation::{CfgBrew, CfgNeighborCellCa, StackConfig, StackMode, WhitelistMode};
 use tetra_core::ranges::SortedDisjointSsiRanges;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress};
@@ -27,10 +27,11 @@ use tetra_entities::network::transports::{NetworkAddress, NetworkError, NetworkM
 use tetra_pdus::cmce::enums::{cmce_pdu_type_dl::CmcePduTypeDl, party_type_identifier::PartyTypeIdentifier};
 use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation;
 use tetra_pdus::cmce::pdus::{
-    d_call_restore::DCallRestore, d_setup::DSetup, u_call_restore::UCallRestore, u_setup::USetup, u_tx_ceased::UTxCeased,
+    d_call_restore::DCallRestore, d_info::DInfo, d_setup::DSetup, u_call_restore::UCallRestore, u_setup::USetup,
+    u_tx_ceased::UTxCeased,
 };
 use tetra_pdus::mle::enums::mle_protocol_discriminator::MleProtocolDiscriminator;
-use tetra_pdus::mle::pdus::u_restore::URestore;
+use tetra_pdus::mle::pdus::{u_prepare::UPrepare, u_restore::URestore};
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
 use tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocationDemand;
@@ -39,7 +40,7 @@ use tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIden
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
 use tetra_saps::control::enums::{circuit_mode_type::CircuitModeType, communication_type::CommunicationType};
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
-use tetra_saps::tla::TlaTlDataIndBl;
+use tetra_saps::tla::{TlaTlDataIndBl, TlaTlDataReqBl};
 use uuid::Uuid;
 
 use crate::common::ComponentTest;
@@ -130,6 +131,14 @@ struct Relay {
     ho_results: Vec<(usize, BrewHoResult)>,
     /// Every registration move: (issi, from, to)
     moves: Vec<(u32, Option<usize>, usize)>,
+    /// Requests the relay forwarded for a serving station: relay id -> (serving station, its id)
+    ho_open: HashMap<u32, (usize, u32)>,
+    ho_last: u32,
+    /// Every DEREGISTER a station sent: (issi, station)
+    deregistrations: Vec<(u32, usize)>,
+    /// Carriers whose station "goes away" after answering: the serving station gets status 2
+    /// `gone` instead of the answer (the target may already have registered the radio).
+    gone_carriers: HashSet<u16>,
 }
 
 impl Relay {
@@ -146,6 +155,7 @@ impl Relay {
                     self.late_entry(sub.number, from, &send);
                 }
                 BREW_SUBSCRIBER_DEREGISTER => {
+                    self.deregistrations.push((sub.number, from));
                     if self.location.get(&sub.number) == Some(&from) {
                         self.location.remove(&sub.number);
                     }
@@ -207,7 +217,54 @@ impl Relay {
                     let caps = json["capabilities"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
                     self.cells.insert(from, (carriers, caps));
                 }
-                BREW_SERVICE_HO_RESULT => self.ho_results.push((from, parse_ho_result(&svc.json_data).unwrap())),
+                BREW_SERVICE_HO_RESULT => {
+                    let result = parse_ho_result(&svc.json_data).unwrap();
+                    self.ho_results.push((from, result.clone()));
+                    // brew-server: relay the target's answer to the serving station under its id.
+                    if let Some((serving, id)) = self.ho_open.remove(&result.transaction_id) {
+                        let gone = self.cells.get(&from).is_some_and(|(c, _)| c.iter().any(|c| self.gone_carriers.contains(c)));
+                        let result = if gone {
+                            BrewHoResult {
+                                status: BREW_HO_STATUS_NO_TARGET,
+                                reason: Some("gone".into()),
+                                sdu: None,
+                                channel: None,
+                                ..result
+                            }
+                        } else {
+                            result
+                        };
+                        send(serving, &build_service_ho_result(&BrewHoResult { transaction_id: id, ..result }));
+                    }
+                }
+                BREW_SERVICE_HO_PREPARE | BREW_SERVICE_HO_FORWARD_REG => {
+                    // brew-server's relay: the capable station serving the carrier gets the request
+                    // under the relay's own id; nobody → "no target" at once.
+                    let mut req = parse_ho_request(svc.service_type, &svc.json_data).unwrap();
+                    let target = self.cells.iter().find(|(st, (carriers, caps))| {
+                        **st != from && carriers.contains(&req.target_carrier) && caps.iter().any(|c| c == BREW_EXT_HANDOVER)
+                    });
+                    match target {
+                        Some((&target, _)) => {
+                            self.ho_last += 1;
+                            let id = 1_000_000 + self.ho_last;
+                            self.ho_open.insert(id, (from, req.transaction_id));
+                            req.transaction_id = id;
+                            send(target, &build_service_ho_request(&req));
+                        }
+                        None => send(
+                            from,
+                            &build_service_ho_result(&BrewHoResult {
+                                transaction_id: req.transaction_id,
+                                issi: req.issi,
+                                status: BREW_HO_STATUS_NO_TARGET,
+                                reason: Some("unknown".into()),
+                                sdu: None,
+                                channel: None,
+                            }),
+                        ),
+                    }
+                }
                 _ => {}
             },
             _ => {}
@@ -765,6 +822,7 @@ fn sim_forwarded_registrations_are_answered_with_the_mm_accept() {
             target_mnc: Some(1337),
             target_location_area: Some(las[to]),
             sdu: Some(BrewHoSdu::from_bitbuffer(&exact)),
+            call_gssi: None,
         };
         let target = sim.relay.forward_registration(sim.stations[to].carrier, &req, &sim.wires.clone());
         assert_eq!(target, to);
@@ -814,6 +872,7 @@ fn sim_without_the_extension_nothing_new_is_sent_and_restore_still_works() {
         target_mnc: None,
         target_location_area: None,
         sdu: Some(BrewHoSdu { bytes: vec![0x20, 0x03], len_bits: 16 }),
+        call_gssi: None,
     };
     sim.wires[3].lock().unwrap().to_station.push_back(build_service_ho_request(&req));
     sim.steps(50);
@@ -867,6 +926,7 @@ fn sim_forwarded_registration_rejected_by_the_target_mm() {
             target_mnc: None,
             target_location_area: Some(10),
             sdu: Some(BrewHoSdu::from_bitbuffer(&exact)),
+            call_gssi: None,
         };
         sim.relay.forward_registration(sim.stations[9].carrier, &req, &sim.wires.clone());
         sim.run_until("station 9 answers", |s| s.relay.ho_results.iter().any(|(_, r)| r.transaction_id == 5000 + n as u32));
@@ -1042,4 +1102,292 @@ fn sim_three_stations_five_radios_accept_types_and_restore_grants() {
     for &(issi, _) in &radios {
         assert!(sim.relay.location.contains_key(&issi), "ISSI {issi} still registered");
     }
+}
+
+// ─── Announced reselection between stations (milestone 5, serving side) ────────────────────────
+
+fn neighbour(cell_identifier_ca: u8, carrier: u16, location_area: u16) -> CfgNeighborCellCa {
+    CfgNeighborCellCa {
+        cell_identifier_ca,
+        // Forward registration supported (table 18.22).
+        cell_reselection_types_supported: 2,
+        neighbor_cell_synchronized: false,
+        cell_load_ca: 0,
+        main_carrier_number: carrier,
+        main_carrier_number_extension: None,
+        mcc: None,
+        mnc: None,
+        location_area: Some(location_area),
+        maximum_ms_transmit_power: None,
+        minimum_rx_access_level: None,
+        subscriber_class: None,
+        bs_service_details: None,
+        timeshare_cell_information_or_security_parameters: None,
+        tdma_frame_offset: None,
+    }
+}
+
+/// Station i lists station i + 1 as neighbour 1 and station i - 1 as neighbour 2 (ring), plus
+/// neighbour 3 on a carrier no station serves.
+fn ring_neighbours(las: &[u16], i: usize, cfg: &mut StackConfig) {
+    let n = las.len();
+    let next = (i + 1) % n;
+    let prev = (i + n - 1) % n;
+    cfg.cell.neighbor_cells_ca = vec![
+        neighbour(1, 1521 + 2 * next as u16, las[next]),
+        neighbour(2, 1521 + 2 * prev as u16, las[prev]),
+        neighbour(3, 1999, 99),
+    ];
+}
+
+/// U-PREPARE naming neighbour `ci`, with a forward registration (roaming location update) when
+/// `forward` (table 18.10; the MS supports forward registration and the LA changes, 18.3.4.7.5).
+fn u_prepare(issi: u32, ci: u64, forward: bool) -> SapMsg {
+    let sdu = forward.then(|| {
+        let lu = location_update_pdu(issi, LocationUpdateType::RoamingLocationUpdating, &[]);
+        let mut b = BitBuffer::new_autoexpand(64);
+        lu.to_bitbuf(&mut b).unwrap();
+        let len = b.get_pos();
+        b.seek(0);
+        let mut exact = BitBuffer::new(len);
+        exact.copy_bits(&mut b, len);
+        exact.seek(0);
+        exact
+    });
+    let pdu = UPrepare {
+        cell_identifier_ca: Some(ci),
+        sdu,
+    };
+    uplink(issi, MleProtocolDiscriminator::Mle, |b| pdu.to_bitbuf(b).unwrap())
+}
+
+/// The serving station's answer to a U-PREPARE from `issi` (after the MLE discriminator):
+/// D-NEW-CELL (type 000) or D-PREPARE-FAIL (type 001), if sent.
+fn prepare_answer(air: &[SapMsg], issi: u32) -> Option<String> {
+    air_to(air, issi).into_iter().find_map(|bits| {
+        let rest = bits.strip_prefix(PD_MLE)?;
+        (rest.starts_with("000") || rest.starts_with("001")).then(|| rest.to_string())
+    })
+}
+
+const D_NEW_CELL_CHANGE_NOW: &str = "000010";
+/// D-NEW-CELL "follow MAC channel change" (type 1, table 18.43) with an MM SDU.
+const D_NEW_CELL_FOLLOW_MAC: &str = "000000";
+
+/// The D-NEW-CELL `issi` got, as handed to layer 2 (with its channel allocation and STCH).
+fn d_new_cells(air: &[SapMsg], issi: u32) -> Vec<&TlaTlDataReqBl> {
+    air.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::TlaTlDataReqBl(r) if r.main_address.ssi == issi && r.tl_sdu.to_bitstr().starts_with(&format!("{PD_MLE}000")) => Some(r),
+            _ => None,
+        })
+        .collect()
+}
+
+/// New call identifiers sent to `issi` in D-INFO.
+fn d_info_new_call_ids(air: &[SapMsg], issi: u32) -> Vec<u16> {
+    air_to(air, issi)
+        .iter()
+        .filter_map(|bits| {
+            let rest = bits.strip_prefix(PD_CMCE)?;
+            let mut b = BitBuffer::from_bitstr(rest);
+            (b.peek_bits(5) == Some(CmcePduTypeDl::DInfo.into_raw())).then_some(())?;
+            DInfo::from_bitbuf(&mut b).ok()?.new_call_identifier.map(|id| id as u16)
+        })
+        .collect()
+}
+
+/// Carrier and timeslot of the station's channel for its latest call to `gssi`.
+fn group_setup_channel(air: &[SapMsg], gssi: u32) -> Option<(u16, u8)> {
+    air.iter().rev().find_map(|m| match &m.msg {
+        SapMsgInner::TlaTlDataReqBl(r) if r.main_address.ssi == gssi && r.tl_sdu.to_bitstr().starts_with(PD_CMCE) => {
+            let ca = r.chan_alloc.as_ref()?;
+            let ts = ca.timeslots.iter().position(|&t| t)? as u8 + 1;
+            Some((ca.carrier?, ts))
+        }
+        SapMsgInner::TlaTlUnitdataReqBl(r) if r.main_address.ssi == gssi && r.tl_sdu.to_bitstr().starts_with(PD_CMCE) => {
+            let ca = r.chan_alloc.as_ref()?;
+            let ts = ca.timeslots.iter().position(|&t| t)? as u8 + 1;
+            Some((ca.carrier?, ts))
+        }
+        _ => None,
+    })
+}
+/// D-LOCATION UPDATE REJECT, roaming, forward registration failure (table 16.81), O-bit 0.
+const FRF_REJECT: &str = "01110000011100";
+
+/// Ten stations in their own location areas, thirty radios. During a group call every listener
+/// announces a reselection to the next station (U-PREPARE with forward registration): the serving
+/// station asks the target through the network, holds D-NEW-CELL until the target's MM accepted
+/// and the target runs the call, then grants type 1 (clause 18.3.4.7.5): the target's call
+/// identifier in D-INFO if it differs, then D-NEW-CELL "follow MAC channel change" with the
+/// accept and a channel allocation for the target's traffic channel ("cell change flag", clause
+/// 23.5.4.1), stolen on the serving call's traffic channel. The radio goes straight to the new
+/// channel without U-RESTORE (figure 18.14). Every fourth grant cannot go out on the traffic
+/// channel: the serving station grants type 2 instead and the radio restores the call. The ISSI is
+/// on the target before the radio leaves, and the station it left drops it without deregistering
+/// it on the network.
+#[test]
+fn sim_announced_reselection_prepares_the_other_station() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let mut sim = Sim::with_config(&las, &EXTENSIONS, &|i, cfg| ring_neighbours(&las, i, cfg));
+
+    let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
+    for &(issi, st, gssi) in &radios {
+        sim.register(st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    }
+
+    let accept = format!("{:04b}", MmPduTypeDl::DLocationUpdateAccept.into_raw());
+    let mut moved = Vec::new();
+    let (mut type1, mut type2, mut d_infos) = (0, 0, 0);
+    for gssi in GROUPS {
+        sim.clear_air();
+        let &(talker, _, _) = radios.iter().find(|(_, _, g)| *g == gssi).unwrap();
+        let st = sim.relay.location[&talker];
+        let session = sim.start_call(st, talker, gssi);
+        sim.steps(20);
+
+        for &(issi, _, g) in &radios {
+            if g != gssi || issi == talker {
+                continue;
+            }
+            let from = sim.relay.location[&issi];
+            let to = (from + 1) % STATIONS;
+            let old_call_id = sim.local_call_id(from, gssi).unwrap_or(1);
+            let serving_channel = group_setup_channel(&sim.stations[from].air, gssi);
+            sim.submit(from, u_prepare(issi, 1, true));
+            sim.run_until(&format!("station {from} answers ISSI {issi}'s U-PREPARE"), |s| {
+                prepare_answer(&s.stations[from].air, issi).is_some()
+            });
+            let answer = prepare_answer(&sim.stations[from].air, issi).unwrap();
+            assert!(
+                answer.starts_with(&format!("{D_NEW_CELL_FOLLOW_MAC}{accept}")),
+                "ISSI {issi}: type 1 D-NEW-CELL with the target's accept, got {answer}"
+            );
+            assert_eq!(sim.relay.location.get(&issi), Some(&to), "registered on the target before leaving");
+            let new_call_id = sim.local_call_id(to, gssi).expect("the target runs the call");
+            let (carrier, ts) = group_setup_channel(&sim.stations[to].air, gssi).expect("the target's channel");
+
+            let grant = d_new_cells(&sim.stations[from].air, issi)[0].clone();
+            let alloc = grant.chan_alloc.as_ref().expect("channel allocation with the type 1 D-NEW-CELL");
+            assert!(alloc.cell_change, "allocation for another cell");
+            assert_eq!(alloc.carrier, Some(carrier), "the target's carrier");
+            assert_eq!(alloc.carrier, Some(sim.stations[to].carrier));
+            assert_eq!(alloc.timeslots.iter().position(|&t| t), Some(ts as usize - 1), "the target's timeslot");
+            assert!(grant.stealing_permission);
+            assert_eq!(grant.stealing_slot, serving_channel, "stolen on the call's traffic channel here");
+
+            let infos = d_info_new_call_ids(&sim.stations[from].air, issi);
+            if new_call_id != old_call_id {
+                assert!(infos.len() >= 2 && infos.iter().all(|&id| id == new_call_id), "ISSI {issi}: D-INFO {infos:?}, want {new_call_id}");
+                d_infos += 1;
+            } else {
+                assert!(infos.is_empty(), "no D-INFO when the call identifier stays");
+            }
+
+            let reporter = grant.tx_reporter.clone().expect("type 1 grant is tracked");
+            if moved.len() % 4 == 3 {
+                // Layer 2 could not steal the slot: type 2 with the same accept.
+                reporter.mark_discarded();
+                sim.run_until(&format!("station {from} falls back to type 2 for ISSI {issi}"), |s| d_new_cells(&s.stations[from].air, issi).len() == 2);
+                let fallback = d_new_cells(&sim.stations[from].air, issi)[1].tl_sdu.to_bitstr();
+                assert!(
+                    fallback.strip_prefix(PD_MLE).unwrap().starts_with(&format!("{D_NEW_CELL_CHANGE_NOW}{accept}")),
+                    "type 2 with the accept, got {fallback}"
+                );
+                // The radio arrives and restores its call (old LA given, table 18.13 note 1).
+                sim.submit(to, u_restore(issi, new_call_id, gssi, Some(las[from] as u64)));
+                sim.run_until(&format!("ISSI {issi} gets an answer to its U-RESTORE on station {to}"), |s| {
+                    restore_ack(&s.stations[to].air, issi).is_some() || restore_fail(&s.stations[to].air, issi)
+                });
+                let ack = restore_ack(&sim.stations[to].air, issi).unwrap_or_else(|| panic!("ISSI {issi} was refused on station {to}"));
+                assert_eq!(ack, new_call_id, "restored into station {to}'s call");
+                type2 += 1;
+            } else {
+                reporter.mark_transmitted();
+                sim.steps(5);
+                assert_eq!(d_new_cells(&sim.stations[from].air, issi).len(), 1, "no second D-NEW-CELL after type 1 went out");
+                type1 += 1;
+            }
+            moved.push((issi, from, to));
+        }
+        sim.end_call(st, talker, gssi, session);
+    }
+    assert!(moved.len() >= 25, "only {} announced reselections", moved.len());
+    assert!(type1 >= 18 && type2 >= 6, "type 1 {type1}, type 2 {type2}");
+    assert!(d_infos > 0, "no reselection changed the call identifier");
+
+    // The stations they left drop them (after the departure delay) without deregistering them.
+    sim.run_until("the serving stations dropped the radios that left", |s| {
+        moved
+            .iter()
+            .all(|(issi, from, _)| !s.stations[*from].test.get_shared_config().state_read().subscribers.is_registered(*issi))
+    });
+    sim.steps(50);
+    for (issi, from, to) in &moved {
+        assert!(!sim.relay.deregistrations.contains(&(*issi, *from)), "station {from} deregistered ISSI {issi} on the network");
+        assert_eq!(sim.relay.location.get(issi), Some(to));
+    }
+}
+
+/// What the serving station answers when the target does not take the radio, per clause
+/// 18.3.4.7.6: target MM rejects (station 9's access list) → D-PREPARE-FAIL "MS not allowed on
+/// cell" with the reject; target registered the radio but went away (station 7) → D-PREPARE-FAIL
+/// "temporary break in service" and the serving station claims the ISSI back; no station serves
+/// the carrier → D-NEW-CELL type 2 with "forward registration failure" (figure 18.12), the radio
+/// registers on arrival; without forward registration → plain D-NEW-CELL.
+#[test]
+fn sim_announced_reselection_that_the_target_does_not_take() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let allowed: Vec<u32> = (0..RADIOS / 2).map(|r| FIRST_ISSI + r).collect();
+    let mut sim = Sim::with_config(&las, &EXTENSIONS, &|i, cfg| {
+        ring_neighbours(&las, i, cfg);
+        if i == 9 {
+            cfg.security.whitelist_mode = WhitelistMode::Enforce;
+            cfg.security.issi_whitelist = allowed.clone();
+        }
+    });
+    sim.relay.gone_carriers.insert(sim.stations[7].carrier);
+    // Everyone on station 8, whose neighbour 1 is station 9 and neighbour 2 station 7.
+    let radios: Vec<u32> = (0..RADIOS).map(|r| FIRST_ISSI + r).collect();
+    for &issi in &radios {
+        sim.register(8, issi, LocationUpdateType::RoamingLocationUpdating, &[GROUPS[0]]);
+    }
+
+    let mut checked = 0;
+    for (n, &issi) in radios.iter().enumerate() {
+        sim.clear_air();
+        let (ci, forward) = match n % 4 {
+            0 => (1, true),
+            1 => (3, true),
+            2 => (3, false),
+            _ => (2, true),
+        };
+        sim.submit(8, u_prepare(issi, ci, forward));
+        sim.run_until(&format!("station 8 answers ISSI {issi}"), |s| prepare_answer(&s.stations[8].air, issi).is_some());
+        let answer = prepare_answer(&sim.stations[8].air, issi).unwrap();
+        match (ci, forward) {
+            (1, _) if allowed.contains(&issi) => {
+                assert!(answer.starts_with(D_NEW_CELL_CHANGE_NOW), "ISSI {issi}: {answer}");
+                assert_eq!(sim.relay.location[&issi], 9);
+            }
+            (1, _) => {
+                let reject = format!("{:04b}", MmPduTypeDl::DLocationUpdateReject.into_raw());
+                assert!(answer.starts_with(&format!("001100{reject}")), "ISSI {issi}: fail cause 2 with the reject, got {answer}");
+                sim.run_until("the ISSI is claimed back", |s| s.relay.location[&issi] == 8);
+            }
+            (2, _) => {
+                assert_eq!(answer, format!("001000{FRF_REJECT}"), "ISSI {issi}: fail cause 0 with forward registration failure");
+                sim.run_until("the ISSI is claimed back from the station that went away", |s| s.relay.location[&issi] == 8);
+                assert!(sim.relay.moves.contains(&(issi, Some(7), 8)), "it had moved to station 7 first");
+            }
+            (_, true) => {
+                assert_eq!(answer, format!("{D_NEW_CELL_CHANGE_NOW}{FRF_REJECT}"), "ISSI {issi}");
+                assert_eq!(sim.relay.location[&issi], 8, "nothing moved");
+            }
+            (_, false) => assert_eq!(answer, D_NEW_CELL_CHANGE_NOW, "ISSI {issi}"),
+        }
+        checked += 1;
+    }
+    assert!(checked >= 25);
 }
