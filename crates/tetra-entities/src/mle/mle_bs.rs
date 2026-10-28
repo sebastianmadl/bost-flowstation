@@ -151,6 +151,21 @@ impl MleBs {
     /// (`handover-v1`). Only a station with neither answers D-NEW-CELL at once.
     fn rx_u_prepare(&mut self, queue: &mut MessageQueue, addr: TetraAddress, link_id: LinkId, endpoint_id: EndpointId, pdu: UPrepare) {
         let cfg = self.config.config();
+        if pdu.cell_identifier_ca.is_none() {
+            // Announced type 3 (clause 18.3.4.7.4): no preferred cell yet, so nothing to prepare.
+            // D-PREPARE-FAIL "shall not be a valid response" here; answer D-NEW-CELL "change
+            // channel immediately". The radio then restores its calls on the new cell.
+            tracing::info!("MLE: U-PREPARE from {} without a cell (type 3) → D-NEW-CELL", addr.ssi);
+            let new_cell = DNewCell {
+                channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
+                sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))),
+            };
+            let stch = Self::stch_of_link(cfg.cell.main_carrier, link_id);
+            self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| {
+                new_cell.to_bitbuf(b)
+            });
+            return;
+        }
         let target = pdu
             .cell_identifier_ca
             .and_then(|ci| cfg.cell.neighbor_cells_ca.iter().find(|n| n.cell_identifier_ca as u64 == ci));
@@ -1170,6 +1185,24 @@ location_area = 7
         let msgs = drain(&mut q);
         assert_eq!(sent_mle_pdus(&msgs), vec!["001000".to_string()], "D-PREPARE-FAIL");
         assert!(!msgs.iter().any(|m| m.dest == TetraEntity::Brew));
+    }
+
+    #[test]
+    fn type_3_u_prepare_gets_d_new_cell_not_d_prepare_fail() {
+        // No cell identifier = announced type 3; D-PREPARE-FAIL is not a valid answer
+        // (clause 18.3.4.7.4). Same on a multi-cell station and on a Brew-linked one.
+        for cfg in [config(true), brew_config()] {
+            let mut mle = MleBs::new(cfg);
+            let mut q = MessageQueue::new();
+            let prepare = UPrepare {
+                cell_identifier_ca: None,
+                sdu: None,
+            };
+            mle.rx_prim(&mut q, uplink_mle(|b| prepare.to_bitbuf(b).unwrap()));
+            let msgs = drain(&mut q);
+            assert_eq!(sent_mle_pdus(&msgs), vec!["000010".to_string()], "D-NEW-CELL, change channel immediately");
+            assert!(!msgs.iter().any(|m| m.dest == TetraEntity::Brew), "nothing to prepare");
+        }
     }
 
     fn cmce_answer(sdu_bits: &str) -> SapMsg {

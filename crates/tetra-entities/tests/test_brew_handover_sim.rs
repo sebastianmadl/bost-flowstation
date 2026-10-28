@@ -1529,6 +1529,67 @@ fn sim_talker_that_moves_unannounced_keeps_talking() {
     }
 }
 
+/// Announced type 3 (clause 18.3.4.7.4): a talker without a scanned or synchronized neighbour
+/// announces the change with a U-PREPARE that names no cell (the MTP6650 does this while
+/// transmitting when the cells are not synchronized). The serving station answers D-NEW-CELL
+/// "change channel immediately", never D-PREPARE-FAIL, prepares nothing, and the radio then
+/// goes on as after an unannounced change: it keeps the floor on the new station and the old
+/// one is told.
+#[test]
+fn sim_type_3_announcement_by_a_talker_gets_d_new_cell_and_keeps_the_floor() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED];
+    let mut sim = Sim::with_config(&las, &extensions, &|i, cfg| ring_neighbours(&las, i, cfg));
+
+    let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
+    for &(issi, st, gssi) in &radios {
+        sim.register(st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    }
+
+    let mut moved = 0;
+    for &(talker, _, gssi) in &radios {
+        sim.clear_air();
+        let from = sim.relay.location[&talker];
+        let old_session = sim.start_call(from, talker, gssi);
+        sim.steps(20);
+
+        let prepare = UPrepare {
+            cell_identifier_ca: None,
+            sdu: None,
+        };
+        sim.submit(from, uplink(talker, MleProtocolDiscriminator::Mle, |b| prepare.to_bitbuf(b).unwrap()));
+        sim.run_until(&format!("station {from} answers ISSI {talker}'s type 3 U-PREPARE"), |s| {
+            prepare_answer(&s.stations[from].air, talker).is_some()
+        });
+        assert_eq!(
+            prepare_answer(&sim.stations[from].air, talker).as_deref(),
+            Some(D_NEW_CELL_CHANGE_NOW),
+            "ISSI {talker}: D-NEW-CELL change channel immediately"
+        );
+        assert!(!sim.relay.prepared.contains(&talker), "nothing is prepared for type 3");
+
+        let to = (from + 1 + talker as usize % 3) % STATIONS;
+        sim.register(to, talker, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+        sim.submit(to, u_setup(talker, gssi));
+        sim.run_until(&format!("ISSI {talker} talks from station {to}"), |s| {
+            s.relay.calls.values().any(|c| c.gssi == gssi && c.owner == to && c.talker == talker)
+        });
+        assert_eq!(d_connect_grant(&sim.stations[to].air, talker), Some(TransmissionGrant::Granted));
+        assert!(!sim.relay.calls.contains_key(&old_session), "the over on station {from} ended");
+        assert!(sim.relay.ms_moved.contains(&(talker, from)), "station {from} was told");
+        let session = *sim
+            .relay
+            .calls
+            .iter()
+            .find(|(_, c)| c.gssi == gssi && c.owner == to && c.talker == talker)
+            .expect("the new over runs")
+            .0;
+        sim.end_call(to, talker, gssi, session);
+        moved += 1;
+    }
+    assert!(moved >= 25);
+}
+
 /// The Brew side of case C on the new station: once CMCE gives the moved talker the floor of the
 /// over it was heard on, that network session is over here. The old station's GROUP_IDLE that
 /// follows must not start a pending tail on the slot the talker now sends on (its playout and
