@@ -275,7 +275,9 @@ voice_service = true
 #
 # [[cell_info.neighbor_cells_ca]]
 # cell_identifier_ca = 1                # 0-31, unique within CA cluster
-# cell_reselection_types_supported = 1  # 0=none, 1=announced, 2=unannounced, 3=both
+# cell_reselection_types_supported = 1  # table 18.22: 0=no forward registration, 1=no forward registration +
+#                                       # expedited reselection recommended, 2=forward registration supported,
+#                                       # 3=forward registration + expedited (see Docs/cell-reselection.md)
 # neighbor_cell_synchronized = false    # true if time-sync'd with us
 # cell_load_ca = 0                      # 0=low, 1=medium-low, 2=medium-high, 3=high
 # main_carrier_number = 1525            # 0-4095, must differ from our main_carrier

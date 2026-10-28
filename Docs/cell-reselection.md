@@ -74,6 +74,38 @@ Whether the radio announces the change (U-PREPARE, D-NEW-CELL) or changes unanno
 the radio's choice within what the neighbour advertises (clause 18.3.4.7). A radio that only
 listens to a group call has no need to announce (clause 18.3.4.7.0).
 
+## `cell_reselection_types_supported` (neighbour entries)
+
+Per neighbour in `[[cell_info.neighbor_cells_ca]]`, 2 bits, table 18.22. It does **not** choose
+announced or unannounced reselection; that is always the radio's choice.
+
+| Value | Forward registration | Expedited cell reselection |
+| --- | --- | --- |
+| 0 | not supported | not recommended |
+| 1 | not supported | recommended |
+| 2 | supported | not recommended |
+| 3 | supported | recommended |
+
+- **Forward registration** (18.3.4.7.1): the radio may send its registration for the new cell
+  in U-PREPARE on the old cell, so it arrives registered. Only useful when the old station can
+  pass it on (multi-cell siblings, or the cross-station handover through Brew).
+- **Expedited reselection** (18.3.4.5.6b): the neighbour becomes a candidate when it is better
+  by FAST_RESELECT_HYSTERESIS for 2 s (instead of 5 s), and the radio should monitor it at the
+  fastest rate and with less filtering (18.3.4.5.1 and note 1 of 18.3.4.5.6b). Two side effects:
+  - The radio does not hold back the change during a call (see below).
+  - The radio **shall not** attempt announced type 1/2 reselection to a cell that recommends
+    expedited reselection (18.3.4.7.5). So 1 and 3 mean unannounced changes only.
+
+Multi-cell sibling neighbours are advertised with 3.
+
+## Changing cell during a call
+
+If the neighbour does not recommend expedited reselection and the radio is in a circuit mode
+call or in ongoing signalling, the change "should be postponed ... until the serving cell becomes
+radio relinquishable, even if there are neighbour cells which meet the radio improvable or radio
+usable criteria" (18.3.4.5.7). In a call only the fast threshold counts: with the defaults and
+−110 dBm, a radio listening to a group call stays until about −100 dBm.
+
 ## In dBm
 
 With the radio's term at 0, each threshold is a received level at the radio:

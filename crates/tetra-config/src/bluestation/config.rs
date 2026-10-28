@@ -137,9 +137,9 @@ pub struct StackConfig {
     pub emergency: CfgEmergency,
 }
 
-/// "Cell re-selection types supported" advertised for sibling cells: both announced (U-PREPARE /
-/// D-NEW-CELL, with forward registration) and unannounced reselection are handled between the
-/// station's cells (0 = none, 1 = announced, 2 = unannounced, 3 = both).
+/// "Cell re-selection types supported" advertised for sibling cells, table 18.22: forward
+/// registration supported, expedited cell reselection recommended (0 = no forward registration,
+/// 1 = none + expedited, 2 = forward registration, 3 = forward registration + expedited).
 const SIBLING_CELL_RESELECTION_TYPES: u8 = 3;
 
 const RXLEV_ACCESS_MIN_RANGE: &str = "rxlev_access_min_dbm must be -125 to -50 in 5 dB steps (table 21.65)";
