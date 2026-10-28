@@ -84,8 +84,8 @@ pub struct CfgCellReselect {
 }
 
 impl Default for CfgCellReselect {
-    /// Conservative values: a radio looks around once its serving cell is 20 dB (slow) / 10 dB
-    /// (fast) above the access minimum, and only moves to a clearly better neighbour, avoiding
+    /// Conservative values: a radio looks around once its serving cell is 30 dB (slow, 20 dB
+    /// above fast, clause 18.5.4) / 10 dB (fast) above the access minimum, and only moves to a clearly better neighbour, avoiding
     /// ping-pong between the station's own cells.
     fn default() -> Self {
         Self {

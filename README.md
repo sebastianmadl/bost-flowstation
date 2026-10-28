@@ -247,7 +247,7 @@ Cells are **linked** when Brew or LST Dispatch is enabled; without either, each 
 - Every cell automatically advertises the others as neighbours (no need to list them in `neighbor_cells_ca`), with what radios need to find and rank them, and supporting both unannounced and announced reselection.
 - **Unannounced:** a radio that registers on another cell is dropped silently on the old one, and restores its group call on the new one.
 - **Announced (D-NEW-CELL):** the new cell joins the radio's group calls before it arrives; a registration the radio forwards in U-PREPARE is processed by the new cell and answered in D-NEW-CELL.
-- Reselection thresholds and hysteresis are configurable in `[cell_info.cell_reselect]` (defaults 20/10/10/6 dB).
+- Reselection thresholds and hysteresis are configurable in `[cell_info.cell_reselect]` (defaults 20/10/10/6 dB), the minimum access level in `[cell_info] rxlev_access_min_dbm` (default −110 dBm). How they work together: [`Docs/cell-reselection.md`](Docs/cell-reselection.md).
 
 ### Dashboard and telemetry
 

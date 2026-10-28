@@ -257,6 +257,7 @@ voice_service = true
 # rxlev_access_min_dbm    = -110    # RXLEV_ACCESS_MIN in SYSINFO (table 21.65; -125..-50 dBm in 5 dB steps;
 #                                   # default -110). A higher value lowers C1, so radios reselect a better
 #                                   # neighbour earlier, but radios below it cannot access this cell.
+#                                   # See Docs/cell-reselection.md.
 # subscriber_class        = 0xFFFF  # 16-bit mask of subscriber classes allowed on this cell (default all)
 
 ###############################################################################
@@ -328,6 +329,9 @@ voice_service = true
 # configured, or with multi-cell [[cells]]). A radio starts looking for a better
 # cell when its serving cell drops below the threshold, and moves only to a
 # neighbour better by the hysteresis. dB, 0-30 in 2 dB steps. Defaults shown.
+# slow_threshold_db is added to fast_threshold_db (clause 18.5.4), so the
+# default slow threshold is 30 dB. Thresholds count from rxlev_access_min_dbm.
+# See Docs/cell-reselection.md.
 #
 # [cell_info.cell_reselect]
 # slow_threshold_db = 20
