@@ -40,6 +40,8 @@ Based on FlowStation by **Razvan Zeces / YO6RZV** (itself built on [tetra-bluest
 
 ---
 
+For current RF registration and silent-radio reachability checks, see [Radio presence](Docs/radio-presence.md).
+
 ## Installation
 
 On **Raspberry Pi OS / Debian arm64** (always installs from branch **`main`** / channel Estable unless you override `BOST_BRANCH`):
@@ -62,6 +64,8 @@ When it finishes you should see something like:
 | Sources | `/opt/bost-flowstation` (branch `main`) |
 
 More detail (env vars, force-clean, helper script): [`Docs/install-and-setup.md`](Docs/install-and-setup.md).
+
+For an HTTP management client over a trusted LAN or encrypted private VPN, see the optional [authenticated HTTP access](Docs/private-http-access.md) configuration. HTTPS remains enabled; fresh installations keep the default HTTPS setup.
 
 ### µCell BB
 
