@@ -2550,6 +2550,7 @@ impl UmacBs {
             | CallControl::HandoverResult { .. }
             | CallControl::HandoverDone { .. }
             | CallControl::HandoverFailed { .. }
+            | CallControl::ReselectionAnnounced { .. }
             | CallControl::HandoverPrepareGroupCall { .. }
             | CallControl::HandoverGroupCallReady { .. } => {
                 tracing::trace!("rx_control: ignoring CMCE-Brew notification (not for UMAC)");

@@ -150,6 +150,8 @@ struct Relay {
     ms_moved: Vec<(u32, usize)>,
     /// GROUP_TX refused because another station's over held the group's floor: (station, gssi)
     floor_refused: Vec<(usize, u32)>,
+    /// Every MS_RESELECTION report: (issi, station that reported, type)
+    reselections: Vec<(u32, usize, String)>,
 }
 
 impl Relay {
@@ -237,6 +239,11 @@ impl Relay {
                     let carriers = json["cells"].as_array().unwrap().iter().map(|c| c["carrier"].as_u64().unwrap() as u16).collect();
                     let caps = json["capabilities"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
                     self.cells.insert(from, (carriers, caps));
+                }
+                BREW_SERVICE_MS_RESELECTION => {
+                    let json: serde_json::Value = serde_json::from_str(&svc.json_data).unwrap();
+                    let issi = json["issi"].as_u64().unwrap() as u32;
+                    self.reselections.push((issi, from, json["type"].as_str().unwrap().to_string()));
                 }
                 BREW_SERVICE_HO_RESULT => {
                     let result = parse_ho_result(&svc.json_data).unwrap();
@@ -1285,7 +1292,8 @@ const FRF_REJECT: &str = "01110000011100";
 #[test]
 fn sim_announced_reselection_prepares_the_other_station() {
     let las: Vec<u16> = (1..=STATIONS as u16).collect();
-    let mut sim = Sim::with_config(&las, &EXTENSIONS, &|i, cfg| ring_neighbours(&las, i, cfg));
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_RESELECTION];
+    let mut sim = Sim::with_config(&las, &extensions, &|i, cfg| ring_neighbours(&las, i, cfg));
 
     let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
     for &(issi, st, gssi) in &radios {
@@ -1371,6 +1379,14 @@ fn sim_announced_reselection_prepares_the_other_station() {
     assert!(moved.len() >= 25, "only {} announced reselections", moved.len());
     assert!(type1 >= 18 && type2 >= 6, "type 1 {type1}, type 2 {type2}");
     assert!(d_infos > 0, "no reselection changed the call identifier");
+    // The network hears which type each radio got: the one that went out on the air.
+    sim.steps(5);
+    let reported = |t: &str| sim.relay.reselections.iter().filter(|(_, _, k)| k == t).count();
+    assert_eq!((reported("announced_type_1"), reported("announced_type_2")), (type1, type2));
+    assert_eq!(sim.relay.reselections.len(), moved.len(), "one report per radio");
+    for (issi, from, _) in &moved {
+        assert!(sim.relay.reselections.iter().any(|(i, st, _)| i == issi && st == from), "station {from} reported ISSI {issi}");
+    }
 
     // The stations they left drop them (after the departure delay) without deregistering them.
     sim.run_until("the serving stations dropped the radios that left", |s| {
@@ -1719,4 +1735,74 @@ fn sim_station_left_by_all_listeners_releases_the_call() {
         }
         sim.end_call(i, talker, gssi, session);
     }
+}
+
+/// Ten stations, thirty radios, each leaving its station once, in turn: idle (undeclared), while
+/// listening to a group call (unannounced), with a type 3 U-PREPARE (no cell), and with a U-PREPARE
+/// naming the neighbour (type 2, prepared through the network). The station each radio left tells
+/// the network once which category of cell reselection that was (clause 18.3.4.7.0): from
+/// D-NEW-CELL for the announced ones, from its own calls when told the radio moved unprepared.
+#[test]
+fn sim_the_station_left_reports_how_the_radio_went() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED, BREW_EXT_MS_RESELECTION];
+    let mut sim = Sim::with_config(&las, &extensions, &|i, cfg| ring_neighbours(&las, i, cfg));
+
+    let radios: Vec<(u32, usize, u32)> = (0..RADIOS).map(|r| (FIRST_ISSI + r, r as usize % STATIONS, GROUPS[r as usize % 5])).collect();
+    for &(issi, st, gssi) in &radios {
+        sim.register(st, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+    }
+
+    let mut expected = Vec::new();
+    for (n, &(issi, _, gssi)) in radios.iter().enumerate() {
+        sim.clear_air();
+        let from = sim.relay.location[&issi];
+        let to = (from + 1) % STATIONS;
+        let kind = match n % 4 {
+            0 => {
+                sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+                "undeclared"
+            }
+            1 => {
+                // Another member of the group talks from elsewhere; the call reaches `from`.
+                let &(talker, _, _) = radios.iter().find(|(t, _, g)| *g == gssi && sim.relay.location[t] != from).unwrap();
+                let st = sim.relay.location[&talker];
+                let session = sim.start_call(st, talker, gssi);
+                sim.run_until(&format!("station {from} runs the call on {gssi}"), |s| s.local_call_id(from, gssi).is_some());
+                sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+                sim.run_until(&format!("station {from} reports ISSI {issi}"), |s| s.relay.reselections.iter().any(|(i, _, _)| *i == issi));
+                sim.end_call(st, talker, gssi, session);
+                "unannounced"
+            }
+            2 => {
+                let prepare = UPrepare {
+                    cell_identifier_ca: None,
+                    sdu: None,
+                };
+                sim.submit(from, uplink(issi, MleProtocolDiscriminator::Mle, |b| prepare.to_bitbuf(b).unwrap()));
+                sim.run_until(&format!("station {from} answers ISSI {issi}'s type 3 U-PREPARE"), |s| {
+                    prepare_answer(&s.stations[from].air, issi).is_some()
+                });
+                sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+                assert!(sim.relay.ms_moved.contains(&(issi, from)), "unprepared for the network");
+                "announced_type_3"
+            }
+            _ => {
+                sim.submit(from, u_prepare(issi, 1, false));
+                sim.run_until(&format!("station {from} answers ISSI {issi}'s U-PREPARE"), |s| {
+                    prepare_answer(&s.stations[from].air, issi).is_some()
+                });
+                assert_eq!(prepare_answer(&sim.stations[from].air, issi).as_deref(), Some(D_NEW_CELL_CHANGE_NOW));
+                sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+                "announced_type_2"
+            }
+        };
+        sim.run_until(&format!("station {from} reports how ISSI {issi} left"), |s| {
+            s.relay.reselections.iter().any(|(i, st, _)| *i == issi && *st == from)
+        });
+        sim.steps(20);
+        expected.push((issi, from, kind.to_string()));
+    }
+    assert!(expected.len() >= 25);
+    assert_eq!(sim.relay.reselections, expected, "exactly one report per move, from the station left");
 }

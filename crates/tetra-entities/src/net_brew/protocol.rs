@@ -1,5 +1,6 @@
 //! Brew protocol binary message parsing and serialization (2-byte [kind, type] prefix, little-endian)
 
+use tetra_saps::control::call_control::CellReselection;
 use uuid::Uuid;
 
 // ─── Message classes ───────────────────────────────────────────────
@@ -839,6 +840,38 @@ pub const BREW_EXT_MS_MOVED: &str = "ms-moved";
 pub fn parse_ms_moved(json_data: &str) -> Result<u32, String> {
     let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
     Ok(json_uint(&json, "issi", 0xff_ffff)? as u32)
+}
+
+/// Service type a station sends when a radio left it, naming the category of cell reselection:
+/// `{"issi":2320001,"type":"announced_type_3"}` (brew-server)
+pub const BREW_SERVICE_MS_RESELECTION: u8 = 0x1A;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it accepts
+/// [`BREW_SERVICE_MS_RESELECTION`]
+pub const BREW_EXT_MS_RESELECTION: &str = "ms-reselection";
+
+/// The `type` of a [`BREW_SERVICE_MS_RESELECTION`].
+pub fn reselection_name(reselection: CellReselection) -> &'static str {
+    match reselection {
+        CellReselection::Undeclared => "undeclared",
+        CellReselection::Unannounced => "unannounced",
+        CellReselection::AnnouncedType1 => "announced_type_1",
+        CellReselection::AnnouncedType2 => "announced_type_2",
+        CellReselection::AnnouncedType3 => "announced_type_3",
+    }
+}
+
+/// Build a Service (0xf4) MS reselection message, NULL-terminated JSON. Not part of Brew as
+/// TetraPack / BrandMeister speak it: only send it to a server that offered
+/// [`BREW_EXT_MS_RESELECTION`].
+pub fn build_service_ms_reselection(issi: u32, reselection: CellReselection) -> Vec<u8> {
+    let json = serde_json::json!({ "issi": issi, "type": reselection_name(reselection) }).to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(BREW_SERVICE_MS_RESELECTION);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
 }
 
 /// Service type: serving station asks the target to prepare an announced cell reselection

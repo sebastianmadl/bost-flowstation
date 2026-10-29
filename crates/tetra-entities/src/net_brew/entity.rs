@@ -22,7 +22,7 @@ use tetra_core::{CellId, Sap, TdmaTime, tetra_entities::TetraEntity};
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
 use tetra_saps::{
     SapMsg, SapMsgInner,
-    control::call_control::{CallControl, NetworkCircuitCall},
+    control::call_control::{CallControl, CellReselection, NetworkCircuitCall},
     tmd::TmdCircuitDataReq,
 };
 
@@ -272,6 +272,9 @@ pub struct BrewEntity {
     /// Radios dropped because another station registered them: MM's deregistration that follows
     /// is not sent to the server (the ISSI is no longer ours there). ISSI -> when dropped.
     moved_away: HashMap<u32, Instant>,
+    /// Radios answered with D-NEW-CELL whose reselection was reported to the server: a later
+    /// `SERVICE_MS_MOVED` for them is not reported again as unannounced. ISSI -> when answered.
+    announced_away: HashMap<u32, Instant>,
 
     /// Rate limiting for RSSI export: tracks last sent time per ISSI.
     /// Only used when feature_rssi_export is enabled in config.
@@ -334,6 +337,7 @@ impl BrewEntity {
             ho_last_transaction: 0,
             ho_departing: HashMap::new(),
             moved_away: HashMap::new(),
+            announced_away: HashMap::new(),
             rssi_last_sent: HashMap::new(),
             worker_handle: Some(handle),
         }
@@ -2104,6 +2108,11 @@ impl TetraEntityTrait for BrewEntity {
             SapMsgInner::CmceCallControl(CallControl::HandoverDone { issi }) => {
                 self.ho_departing.insert(issi, Instant::now() + HO_DEPARTURE_DELAY);
             }
+            SapMsgInner::CmceCallControl(CallControl::ReselectionAnnounced { issi, reselection }) => {
+                self.announced_away.retain(|_, at| at.elapsed() < ANNOUNCED_AWAY_LIFETIME);
+                self.announced_away.insert(issi, Instant::now());
+                self.report_reselection(issi, reselection);
+            }
             SapMsgInner::CmceCallControl(CallControl::HandoverFailed { issi }) => {
                 // The MS stays here (D-PREPARE-FAIL), but the target may have registered it
                 // already: claim it back so calls and SDS keep reaching this station.
@@ -2132,6 +2141,10 @@ const HO_FORWARD_ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a request this station sent may wait for its result (MLE answers the MS after 3 s
 /// anyway; T370 is 5 s, TS 100 392-2 clause 18.6.2).
 const HO_REQUEST_LIFETIME: Duration = Duration::from_secs(5);
+
+/// How long after D-NEW-CELL the radio's registration elsewhere still belongs to that announced
+/// reselection (type 3 may scan for a while first). Matches brew-server's report window.
+const ANNOUNCED_AWAY_LIFETIME: Duration = Duration::from_secs(10);
 /// Time between D-NEW-CELL and dropping the departing MS here, so that nothing CMCE sends when
 /// the MS's groups lose their last listener (D-RELEASE) reaches the MS before it has left.
 const HO_DEPARTURE_DELAY: Duration = Duration::from_secs(2);
@@ -2415,6 +2428,17 @@ impl BrewEntity {
             tracing::debug!("BrewEntity: ISSI {} reported on another station, already leaving", issi);
             return;
         }
+        let announced = self.announced_away.get(&issi).is_some_and(|at| at.elapsed() < ANNOUNCED_AWAY_LIFETIME);
+        if !announced {
+            // It left without U-PREPARE (or this station did not answer one). In a circuit mode
+            // call that is unannounced reselection, otherwise undeclared (clause 18.3.4.7.0).
+            let reselection = if self.in_circuit_call(issi) {
+                CellReselection::Unannounced
+            } else {
+                CellReselection::Undeclared
+            };
+            self.report_reselection(issi, reselection);
+        }
         let talking: Vec<(u16, u8)> = self
             .ul_forwarded
             .iter()
@@ -2437,6 +2461,25 @@ impl BrewEntity {
         }
         self.ho_departing.insert(issi, Instant::now());
         self.drop_departed(queue);
+    }
+
+    /// Whether `issi` takes part in a circuit mode call here: a party of a connected individual
+    /// call, the talker of a group call, or affiliated to a group with a call on a traffic
+    /// channel here (hang time included), from CMCE's published call table. An individual call
+    /// still being set up does not count.
+    fn in_circuit_call(&self, issi: u32) -> bool {
+        let state = self.config.state_read();
+        state.active_call_ts.contains_key(&issi)
+            || state
+                .subscribers
+                .attached_groups_of(issi)
+                .into_iter()
+                .any(|gssi| state.active_call_ts.contains_key(&gssi))
+    }
+
+    fn report_reselection(&self, issi: u32, reselection: CellReselection) {
+        tracing::info!("BrewEntity: {} left by {:?} cell reselection", issi, reselection);
+        let _ = self.command_sender.send(BrewCommand::ReportReselection { issi, reselection });
     }
 
     /// Serving side: radios sent to another station with its registration accept are dropped

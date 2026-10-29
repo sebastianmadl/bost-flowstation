@@ -16,7 +16,7 @@ use tetra_pdus::mle::pdus::{
 };
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::pdus::d_location_update_reject::DLocationUpdateReject;
-use tetra_saps::control::call_control::{CallControl, HandoverChannel, HandoverOutcome};
+use tetra_saps::control::call_control::{CallControl, CellReselection, HandoverChannel, HandoverOutcome};
 use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
 use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
 use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
@@ -164,6 +164,7 @@ impl MleBs {
             self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| {
                 new_cell.to_bitbuf(b)
             });
+            self.report_reselection(queue, addr.ssi, CellReselection::AnnouncedType3);
             return;
         }
         let target = pdu
@@ -260,6 +261,15 @@ impl MleBs {
         self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| {
             new_cell.to_bitbuf(b)
         });
+        self.report_reselection(queue, addr.ssi, CellReselection::AnnouncedType2);
+    }
+
+    /// The MS leaves by announced reselection of this type (D-NEW-CELL sent): Brew tells the
+    /// server, for its cell change log.
+    fn report_reselection(&self, queue: &mut MessageQueue, issi: u32, reselection: CellReselection) {
+        if crate::net_brew::is_active(&self.config) {
+            Self::push_site(queue, CallControl::ReselectionAnnounced { issi, reselection });
+        }
     }
 
     /// The traffic channel an uplink PDU on `link_id` came from: timeslots 2 to 4 of the main
@@ -364,6 +374,7 @@ impl MleBs {
                 self.send_l2(queue, addr, p.link_id, p.endpoint_id, MleProtocolDiscriminator::Mle, None, p.stch, None, |b| {
                     new_cell.to_bitbuf(b)
                 });
+                self.report_reselection(queue, issi, CellReselection::AnnouncedType2);
                 if p.cross_station && accepted {
                     Self::push_site(queue, CallControl::HandoverDone { issi });
                 }
@@ -477,6 +488,8 @@ impl MleBs {
                     new_cell.to_bitbuf(b)
                 });
             }
+            let reselection = if sent { CellReselection::AnnouncedType1 } else { CellReselection::AnnouncedType2 };
+            self.report_reselection(queue, issi, reselection);
             Self::push_site(queue, CallControl::HandoverDone { issi });
         }
     }
@@ -1201,7 +1214,52 @@ location_area = 7
             mle.rx_prim(&mut q, uplink_mle(|b| prepare.to_bitbuf(b).unwrap()));
             let msgs = drain(&mut q);
             assert_eq!(sent_mle_pdus(&msgs), vec!["000010".to_string()], "D-NEW-CELL, change channel immediately");
-            assert!(!msgs.iter().any(|m| m.dest == TetraEntity::Brew), "nothing to prepare");
+            assert!(
+                !told_brew(&msgs, |cc| !matches!(cc, CallControl::ReselectionAnnounced { .. })),
+                "nothing to prepare"
+            );
+        }
+    }
+
+    #[test]
+    fn every_d_new_cell_is_reported_to_brew_with_its_type() {
+        let reported = |msgs: &[SapMsg]| {
+            msgs.iter()
+                .filter_map(|m| match &m.msg {
+                    SapMsgInner::CmceCallControl(CallControl::ReselectionAnnounced { issi: MS, reselection }) if m.dest == TetraEntity::Brew => {
+                        Some(*reselection)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let type3 = UPrepare {
+            cell_identifier_ca: None,
+            sdu: None,
+        };
+        // Type 3: D-NEW-CELL at once.
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        mle.rx_prim(&mut q, uplink_mle(|b| type3.to_bitbuf(b).unwrap()));
+        assert_eq!(reported(&drain(&mut q)), vec![CellReselection::AnnouncedType3]);
+        // Type 2 once the other station answered (accepted or not prepared), not before.
+        for outcome in [HandoverOutcome::Accepted, HandoverOutcome::NotPrepared] {
+            let msgs = cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+            assert!(reported(&msgs).is_empty());
+            mle.rx_prim(&mut q, result(outcome, if outcome == HandoverOutcome::Accepted { Some(MM_ACCEPT) } else { None }));
+            assert_eq!(reported(&drain(&mut q)), vec![CellReselection::AnnouncedType2]);
+        }
+        // D-PREPARE-FAIL is no reselection.
+        for outcome in [HandoverOutcome::Rejected, HandoverOutcome::TargetGone] {
+            cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+            mle.rx_prim(&mut q, result(outcome, (outcome == HandoverOutcome::Rejected).then_some(MM_REJECT)));
+            assert!(reported(&drain(&mut q)).is_empty());
+        }
+        // A station without Brew has nobody to tell.
+        for cfg in [config(false), config(true)] {
+            let mut mle = MleBs::new(cfg);
+            mle.rx_prim(&mut q, uplink_mle(|b| type3.to_bitbuf(b).unwrap()));
+            assert!(reported(&drain(&mut q)).is_empty());
         }
     }
 

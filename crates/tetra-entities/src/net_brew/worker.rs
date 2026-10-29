@@ -142,6 +142,13 @@ pub enum BrewCommand {
     /// server that offered `ms-cell`)
     ReportMsCell { issi: u32, cell: CellId },
 
+    /// Tell the server how a radio left this station (only to a server that offered
+    /// `ms-reselection`)
+    ReportReselection {
+        issi: u32,
+        reselection: tetra_saps::control::call_control::CellReselection,
+    },
+
     /// Deregister a subscriber (ISSI)
     DeregisterSubscriber { issi: u32 },
 
@@ -709,6 +716,17 @@ impl<T: NetworkTransport> BrewWorker<T> {
                             tracing::debug!("BrewWorker: sent MS cell issi={} cell={}", issi, cell.0);
                         }
                     }
+                    BrewCommand::ReportReselection { issi, reselection } => {
+                        if !self.transport.server_brew_extensions().iter().any(|e| e == BREW_EXT_MS_RESELECTION) {
+                            continue;
+                        }
+                        let msg = build_service_ms_reselection(issi, reselection);
+                        if let Err(e) = self.transport.send_reliable(&msg) {
+                            tracing::error!("BrewWorker: failed to send MS reselection for ISSI {}: {}", issi, e);
+                        } else {
+                            tracing::debug!("BrewWorker: sent MS reselection issi={} type={}", issi, reselection_name(reselection));
+                        }
+                    }
                     BrewCommand::SendRssiUpdate { issi, rssi_dbfs } => {
                         let msg = build_service_rssi(issi, rssi_dbfs);
                         if let Err(e) = self.transport.send_reliable(&msg) {
@@ -1262,6 +1280,33 @@ password = "x"
             "nothing new towards a plain Brew server"
         );
         assert_eq!(plain.len(), offered.len() - 1, "otherwise the same messages");
+    }
+
+    #[test]
+    fn reselection_reports_go_only_to_a_server_that_offers_them() {
+        use tetra_saps::control::call_control::CellReselection;
+        let commands = || {
+            vec![
+                BrewCommand::ReportReselection {
+                    issi: 7,
+                    reselection: CellReselection::AnnouncedType3,
+                },
+                BrewCommand::ReportReselection {
+                    issi: 8,
+                    reselection: CellReselection::Undeclared,
+                },
+            ]
+        };
+        let offered = run_commands(MockTransport::new().with_brew_extensions(&["bts-info", BREW_EXT_MS_RESELECTION]), commands());
+        assert_eq!(offered.len(), 2);
+        assert_eq!((offered[0][0], offered[0][1]), (BREW_CLASS_SERVICE, BREW_SERVICE_MS_RESELECTION));
+        let json = |m: &[u8]| serde_json::from_slice::<serde_json::Value>(&m[2..m.len() - 1]).unwrap();
+        assert_eq!(json(&offered[0]), serde_json::json!({ "issi": 7, "type": "announced_type_3" }));
+        assert_eq!(json(&offered[1]), serde_json::json!({ "issi": 8, "type": "undeclared" }));
+
+        assert!(run_commands(MockTransport::new(), commands()).is_empty(), "nothing towards a plain Brew server");
+        let older = run_commands(MockTransport::new().with_brew_extensions(&["bts-info", "handover-v1", "ms-cell", "ms-moved"]), commands());
+        assert!(older.is_empty(), "nor towards a server without the extension");
     }
 
     #[test]

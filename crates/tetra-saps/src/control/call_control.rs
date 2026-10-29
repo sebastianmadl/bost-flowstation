@@ -251,6 +251,26 @@ pub enum CallControl {
     /// MLE → Brew: the reselection after a forwarded registration was refused with D-PREPARE-FAIL,
     /// so the MS stays registered here (clause 18.3.4.7.6) even if the target registered it.
     HandoverFailed { issi: u32 },
+    /// MLE → Brew: the MS was answered with D-NEW-CELL and leaves by this announced cell
+    /// reselection (for the server's cell change log).
+    ReselectionAnnounced { issi: u32, reselection: CellReselection },
+}
+
+/// The category of cell reselection an MS used to leave a cell (TS 100 392-2 clause 18.3.4.7.0),
+/// as far as the cell it left can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellReselection {
+    /// No circuit mode call here (clause 18.3.4.7.2).
+    Undeclared,
+    /// Left a circuit mode call here without announcing it (clause 18.3.4.7.3).
+    Unannounced,
+    /// D-NEW-CELL "follow MAC channel change" (clause 18.3.4.7.5: the "channel command valid" of
+    /// D-NEW-CELL "defines the type of cell reselection that the SwMI is applying").
+    AnnouncedType1,
+    /// D-NEW-CELL "change channel immediately" after a U-PREPARE naming the cell (18.3.4.7.5).
+    AnnouncedType2,
+    /// D-NEW-CELL after a U-PREPARE without a cell (clause 18.3.4.7.4).
+    AnnouncedType3,
 }
 
 /// A traffic channel on the target cell for announced type 1 cell reselection (TS 100 392-2
