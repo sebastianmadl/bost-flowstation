@@ -80,6 +80,15 @@ impl CcBsSubentity {
             CallControl::HandoverPrepareGroupCall { issi, gssi } => {
                 self.prepare_handover_group_call(queue, issi, gssi);
             }
+            CallControl::SiteHandoverIndividualCall {
+                brew_uuid,
+                issi,
+                peer_issi,
+                simplex_duplex,
+                priority,
+            } => {
+                self.fsm_on_site_handover_individual_call(queue, brew_uuid, issi, peer_issi, simplex_duplex, priority);
+            }
             // Brew/LST-bound late-entry signals — never ingress to CMCE.
             CallControl::NetworkCallHold { .. }
             | CallControl::GroupListenersAvailable { .. }

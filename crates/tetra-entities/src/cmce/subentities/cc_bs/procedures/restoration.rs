@@ -113,6 +113,31 @@ impl CcBsSubentity {
             }
         }
 
+        // Multi-cell individual (private/duplex) call: an MS that reselected mid-call restores with
+        // the OLD cell's call identifier, which does not exist here. Match the same private call by
+        // the (this MS, peer) ISSI pair; the leg was pre-provisioned on this cell by the site
+        // switch's individual-call handover (see net_site prepare_handover). D-CALL RESTORE then
+        // carries our local id as the new call identifier (clause 14.5.1.2.4).
+        if !self.individual_calls.contains_key(&call_id)
+            && !self.active_calls.contains_key(&call_id)
+            && brew::is_site_linked(&self.config)
+            && let Some(peer) = pdu.other_party_ssi
+            && let Some((&id, _)) = self.individual_calls.iter().find(|(_, c)| {
+                c.is_active()
+                    && ((c.calling_addr.ssi == sender.ssi && c.called_addr.ssi as u64 == peer)
+                        || (c.called_addr.ssi == sender.ssi && c.calling_addr.ssi as u64 == peer))
+            })
+        {
+            tracing::info!(
+                "CMCE: U-CALL RESTORE from ISSI {} for call_id={} (sibling cell, individual) → local call_id={} peer={}",
+                sender.ssi,
+                call_id,
+                id,
+                peer
+            );
+            call_id = id;
+        }
+
         if let Some(call) = self.individual_calls.get_mut(&call_id) {
             if !call.is_active() || (sender.ssi != call.calling_addr.ssi && sender.ssi != call.called_addr.ssi) {
                 self.reject_call_restore(queue, sender, handle, link_id, endpoint_id, call_id);
@@ -138,8 +163,31 @@ impl CcBsSubentity {
             } else {
                 TransmissionGrant::GrantedToOtherUser
             };
+            // A leg pre-provisioned for cross-cell handover has the MS arriving from another cell,
+            // so it is not yet on this cell's traffic channel: the restore reply must carry a
+            // channel allocation to move it there. An ordinary same-cell restore needs none (the
+            // MS never left the channel). `restoring_cross_cell` is cleared by complete_restore, so
+            // capture the channel first.
+            let cross_cell_chan = call
+                .restoring_cross_cell
+                .then_some((call.calling_carrier_num, call.calling_ts, call.calling_usage));
             call.complete_restore();
-            self.send_d_call_restore(queue, sender, handle, link_id, endpoint_id, call_id, call_id, grant, None);
+            // Clause 14.5.1.2.4: a layer 2 channel allocation shall accompany D-CALL RESTORE when
+            // the U-plane is switched on; the MS still has the old cell's identifier, so this
+            // cell's goes in "new call identifier".
+            let chan_alloc = cross_cell_chan.map(|(carrier_num, ts, usage)| {
+                let mut timeslots = [false; 4];
+                timeslots[ts as usize - 1] = true;
+                CmceChanAllocReq {
+                    usage: Some(usage),
+                    alloc_type: ChanAllocType::Replace,
+                    carrier: Some(carrier_num),
+                    timeslots,
+                    ul_dl_assigned: UlDlAssignment::Both,
+                    cell_change: false,
+                }
+            });
+            self.send_d_call_restore(queue, sender, handle, link_id, endpoint_id, restored_call_id, call_id, grant, chan_alloc);
             return;
         }
 

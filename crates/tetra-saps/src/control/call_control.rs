@@ -254,6 +254,18 @@ pub enum CallControl {
     /// MLE → Brew: the MS was answered with D-NEW-CELL and leaves by this announced cell
     /// reselection (for the server's cell change log).
     ReselectionAnnounced { issi: u32, reselection: CellReselection },
+    /// Multi-cell only (site switch → target cell's CMCE): `issi` is reselecting into this cell
+    /// while in an active individual (private/duplex) call with `peer_issi` (reachable via the
+    /// switch). Pre-provision a restoring leg so the MS's U-CALL RESTORE on arrival is answered
+    /// with D-CALL RESTORE (seamless), instead of being rejected. `brew_uuid` is the switch's
+    /// site-wide id for the call; `simplex_duplex` and `priority` carry the call's parameters.
+    SiteHandoverIndividualCall {
+        brew_uuid: uuid::Uuid,
+        issi: u32,
+        peer_issi: u32,
+        simplex_duplex: bool,
+        priority: u8,
+    },
 }
 
 /// The category of cell reselection an MS used to leave a cell (TS 100 392-2 clause 18.3.4.7.0),
