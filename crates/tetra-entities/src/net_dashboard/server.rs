@@ -2329,6 +2329,11 @@ impl DashboardServer {
                     let level = if status == "accepted" || status == "sent" { "INFO" } else { "WARN" };
                     s.push_log(level, format!("OTAR SCK {} v{} to ISSI {}: {}", sckn, sck_vn, issi, status));
                 }
+                TelemetryEvent::MsMovedAway { issi } => {
+                    // Still registered on the network: on a sibling cell the radio stays listed
+                    // (its MsCell updates the cell), so only the log notes it.
+                    s.push_log("INFO", format!("MS {} moved to another cell or station", issi));
+                }
                 TelemetryEvent::MsDeregistration { issi } => {
                     s.ms_map.remove(issi);
                     s.ms_security.remove(issi);
@@ -2910,6 +2915,7 @@ fn event_to_ws_msg(event: &TelemetryEvent) -> Option<String> {
         TelemetryEvent::OtarSck { issi, sckn, sck_vn, status } => {
             serde_json::json!({"type":"otar_sck","issi":issi,"sckn":sckn,"sck_vn":sck_vn,"status":status})
         }
+        TelemetryEvent::MsMovedAway { .. } => return None,
         TelemetryEvent::GroupCallStarted {
             call_id,
             gssi,

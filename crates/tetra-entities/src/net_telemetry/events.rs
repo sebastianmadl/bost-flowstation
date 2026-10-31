@@ -272,6 +272,10 @@ pub enum TelemetryEvent {
     /// Progress of an over-the-air SCK delivery to a radio: "sent", "accepted", a failure
     /// text, or "timeout". Appended last for bitcode wire-stability.
     OtarSck { issi: u32, sckn: u8, sck_vn: u16, status: String },
+    /// A radio left this cell for another cell or station without deregistering: it stays
+    /// registered on the network, so this is not an `MsDeregistration`. Appended last for bitcode
+    /// wire-stability.
+    MsMovedAway { issi: u32 },
 }
 
 impl TelemetryEvent {

@@ -826,8 +826,7 @@ fn main() {
                     use tetra_entities::net_telemetry::TelemetryEvent;
                     use tetra_entities::radio_directory;
                     // Approximate attached-radio count, maintained from registration telemetry, fed to
-                    // the health registry (Radios domain). Re-registrations of an already-known radio
-                    // don't emit MsRegistration, so increment/decrement stays balanced.
+                    // the health registry (Radios domain); see `attached_radios_after`.
                     let mut radio_count: usize = 0;
                     loop {
                         match telemetry_source.recv() {
@@ -836,15 +835,21 @@ fn main() {
                                 match &event {
                                     TelemetryEvent::BrewConnected { connected, .. } => health_registry().set_brew_up(*connected),
                                     TelemetryEvent::MsRegistration { issi } => {
-                                        radio_count += 1;
+                                        radio_count = health_registry::attached_radios_after(radio_count, &event);
                                         health_registry().set_registered_radios(radio_count);
                                         health_registry().note_radio_activity();
                                         radio_directory::on_register(*issi);
                                     }
                                     TelemetryEvent::MsDeregistration { issi } | TelemetryEvent::MsTimeoutDrop { issi } => {
-                                        radio_count = radio_count.saturating_sub(1);
+                                        radio_count = health_registry::attached_radios_after(radio_count, &event);
                                         health_registry().set_registered_radios(radio_count);
                                         radio_directory::on_deregister(*issi);
+                                    }
+                                    // Left for another cell or station: no longer attached here, but
+                                    // still registered on the network (the directory keeps it).
+                                    TelemetryEvent::MsMovedAway { .. } => {
+                                        radio_count = health_registry::attached_radios_after(radio_count, &event);
+                                        health_registry().set_registered_radios(radio_count);
                                     }
                                     TelemetryEvent::MsRssi { issi, rssi_dbfs } => {
                                         health_registry().note_radio_activity();
