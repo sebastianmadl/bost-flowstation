@@ -26,7 +26,7 @@ use tetra_saps::{
     SapMsg, SapMsgInner,
     control::{
         brew::{BrewSubscriberAction, MmSubscriberUpdate},
-        call_control::{CallControl, Circuit, CircuitDlMediaSource, NetworkCircuitCall},
+        call_control::{CallControl, Circuit, CircuitDlMediaSource, NetworkCircuitCall, NetworkRestoredCall},
         enums::{circuit_mode_type::CircuitModeType, communication_type::CommunicationType},
     },
     lcmc::{
@@ -55,7 +55,7 @@ use lifecycle::{
     PREEMPT_MIN_HOLD_TS, PREEMPT_POST_CEASE_TS, PREEMPT_READY_DEADLINE_TS,
 };
 use pdu::is_emergency_priority;
-use procedures::{DeferredRestore, GroupTransitionError, HandoverReservation, IndividualTransitionError};
+use procedures::{DeferredIndividualRestore, DeferredRestore, GroupTransitionError, HandoverReservation, IndividualTransitionError};
 use state::{
     ActiveCall, CachedSetup, CallOrigin, CcFormalEvent, CcFormalState, GroupCallState, IndividualCall, IndividualCallState,
     TxDemandQueueResult,
@@ -89,6 +89,8 @@ pub struct CcBsSubentity {
     ambience_armed: HashMap<u32, TdmaTime>,
     /// U-CALL RESTOREs waiting for a Brew group call to come up on this cell
     deferred_restores: Vec<DeferredRestore>,
+    /// U-CALL RESTOREs of individual calls waiting for the network's answer (separate station)
+    deferred_individual_restores: Vec<DeferredIndividualRestore>,
     /// (ISSI, GSSI) listener counts added by a restore rather than an MM affiliation
     restore_listeners: HashSet<(u32, u32)>,
     /// MSs arriving by announced type 1 cell reselection whose group call is not up here yet

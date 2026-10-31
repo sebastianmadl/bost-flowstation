@@ -1,6 +1,6 @@
 //! Brew protocol binary message parsing and serialization (2-byte [kind, type] prefix, little-endian)
 
-use tetra_saps::control::call_control::CellReselection;
+use tetra_saps::control::call_control::{CellReselection, NetworkRestoredCall};
 use uuid::Uuid;
 
 // ─── Message classes ───────────────────────────────────────────────
@@ -872,6 +872,48 @@ pub fn build_service_ms_reselection(issi: u32, reselection: CellReselection) -> 
     buf.extend_from_slice(json.as_bytes());
     buf.push(0); // NULL terminator
     buf
+}
+
+/// Service type for restoring an individual call that ran on the station a radio left: this
+/// station asks `{"issi":2320972,"peer":2320997}` (peer 0 for the dummy address) when the radio
+/// sends U-CALL RESTORE for a call it does not hold, and the server answers with the call
+/// (`uuid`, `duplex`, `priority`, `floor`: ISSI holding a simplex floor or 0) or without `uuid`
+/// (brew-server)
+pub const BREW_SERVICE_CALL_RESTORE: u8 = 0x1B;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it moves individual calls with their
+/// radio ([`BREW_SERVICE_CALL_RESTORE`]); the station then names it in its `SERVICE_BTS_INFO`
+/// capabilities
+pub const BREW_EXT_CALL_RESTORE: &str = "call-restore";
+
+/// Build a Service (0xf4) call restore request, NULL-terminated JSON. Only for a server that
+/// offered [`BREW_EXT_CALL_RESTORE`].
+pub fn build_service_call_restore(issi: u32, peer: u32) -> Vec<u8> {
+    let json = serde_json::json!({ "issi": issi, "peer": peer }).to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(BREW_SERVICE_CALL_RESTORE);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
+}
+
+/// Parse a [`BREW_SERVICE_CALL_RESTORE`] answer: (issi, peer, the call or `None`). Unknown
+/// fields are ignored.
+pub fn parse_call_restore_answer(json_data: &str) -> Result<(u32, u32, Option<NetworkRestoredCall>), String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    let issi = json_uint(&json, "issi", 0xff_ffff)? as u32;
+    let peer = json_opt_uint(&json, "peer", 0xff_ffff)?.unwrap_or(0) as u32;
+    let call = match json.get("uuid").and_then(|v| v.as_str()) {
+        None => None,
+        Some(id) => Some(NetworkRestoredCall {
+            brew_uuid: Uuid::parse_str(id).map_err(|e| format!("uuid: {e}"))?,
+            simplex_duplex: json.get("duplex").and_then(|v| v.as_bool()).ok_or("missing duplex")?,
+            priority: json_opt_uint(&json, "priority", 15)?.unwrap_or(0) as u8,
+            floor_issi: json_opt_uint(&json, "floor", 0xff_ffff)?.filter(|f| *f != 0).map(|f| f as u32),
+        }),
+    };
+    Ok((issi, peer, call))
 }
 
 /// Service type: serving station asks the target to prepare an announced cell reselection

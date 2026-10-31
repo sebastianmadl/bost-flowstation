@@ -17,6 +17,7 @@ impl CcBsSubentity {
             telemetry: None,
             ambience_armed: HashMap::new(),
             deferred_restores: Vec::new(),
+            deferred_individual_restores: Vec::new(),
             handover_reservations: Vec::new(),
             restore_listeners: HashSet::new(),
         }
@@ -529,6 +530,7 @@ impl CcBsSubentity {
             }
             BrewSubscriberAction::Deregister => {
                 self.deferred_restores.retain(|r| r.sender.ssi != issi);
+                self.deferred_individual_restores.retain(|r| r.sender.ssi != issi);
                 let restored: Vec<u32> = self.restore_listeners.iter().filter(|(i, _)| *i == issi).map(|(_, g)| *g).collect();
                 for gssi in restored {
                     self.drop_restore_listener(queue, issi, gssi);

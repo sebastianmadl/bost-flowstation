@@ -2553,7 +2553,9 @@ impl UmacBs {
             | CallControl::ReselectionAnnounced { .. }
             | CallControl::HandoverPrepareGroupCall { .. }
             | CallControl::HandoverGroupCallReady { .. }
-            | CallControl::SiteHandoverIndividualCall { .. } => {
+            | CallControl::SiteHandoverIndividualCall { .. }
+            | CallControl::IndividualCallRestoreRequest { .. }
+            | CallControl::IndividualCallRestoreAnswer { .. } => {
                 tracing::trace!("rx_control: ignoring CMCE-Brew notification (not for UMAC)");
             }
         }

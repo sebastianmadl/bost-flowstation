@@ -21,6 +21,28 @@ pub(in crate::cmce::subentities::cc_bs) struct DeferredRestore {
     pub since: TdmaTime,
 }
 
+/// How long a U-CALL RESTORE of an individual call this station does not hold waits for the
+/// network's answer (separate station on a Brew network). Project value, not an ETSI timer: the
+/// MS waits for D-CALL RESTORE with T306, min 4 s and max 6 s, the value chosen by the MS
+/// (TS 100 392-2 clause 14.6); 2 s leaves room for the answer to reach it. (2 s × 72 timeslots/s.)
+pub(in crate::cmce::subentities::cc_bs) const NETWORK_RESTORE_TIMEOUT_TS: i32 = 2 * 18 * 4;
+
+/// A U-CALL RESTORE of an individual call that ran on the station the MS left, waiting for the
+/// network to move the call here (`CallControl::IndividualCallRestoreRequest`).
+#[derive(Debug, Clone)]
+pub(in crate::cmce::subentities::cc_bs) struct DeferredIndividualRestore {
+    pub sender: TetraAddress,
+    pub handle: u32,
+    pub link_id: u32,
+    pub endpoint_id: u32,
+    /// The call identifier the MS restores with (the old station's)
+    pub call_id: u16,
+    /// The other party's SSI from U-CALL RESTORE (0: dummy address)
+    pub peer: u32,
+    pub request_to_transmit: bool,
+    pub since: TdmaTime,
+}
+
 /// How long the target station waits for a Brew group call to come up for an MS arriving by
 /// announced type 1 cell reselection. Project value: brew-server gives the target 2 s for its
 /// whole answer (`[handover] timeout_ms`), the forward registration included. (1 s × 72 timeslots/s.)
@@ -138,30 +160,121 @@ impl CcBsSubentity {
             call_id = id;
         }
 
+        // Separate station on a Brew network: an individual call (basic service information
+        // point-to-point, mandatory in U-CALL RESTORE, table 14.22 note 3) the MS had on the
+        // station it left is not here. Ask the network to move it here (`call-restore`); the
+        // answer completes or rejects the restore. Call identifiers are per station, so the
+        // other station's identifier may be in use here by a call the MS is not a party to.
+        if !group_restore
+            && !own_individual_call
+            && brew::is_active(&self.config)
+            && !brew::is_site_linked(&self.config)
+        {
+            let peer = pdu.other_party_ssi.unwrap_or(0) as u32;
+            tracing::info!(
+                "CMCE: U-CALL RESTORE from ISSI {} for call_id={} peer={} — not held here, asking the network",
+                sender.ssi,
+                call_id,
+                peer
+            );
+            let restore = DeferredIndividualRestore {
+                sender,
+                handle,
+                link_id,
+                endpoint_id,
+                call_id,
+                peer,
+                request_to_transmit,
+                since: self.dltime,
+            };
+            // A repeated U-CALL RESTORE replaces the parked one (fresh handle, same deadline).
+            if let Some(old) = self.deferred_individual_restores.iter_mut().find(|r| r.sender.ssi == sender.ssi) {
+                let since = old.since;
+                *old = DeferredIndividualRestore { since, ..restore };
+            } else {
+                self.deferred_individual_restores.push(restore);
+                Self::push_control(
+                    queue,
+                    TetraEntity::Brew,
+                    CallControl::IndividualCallRestoreRequest { issi: sender.ssi, peer },
+                );
+            }
+            return;
+        }
+
+        if self.individual_calls.contains_key(&call_id) {
+            self.restore_individual_call(queue, sender, handle, link_id, endpoint_id, restored_call_id, call_id, request_to_transmit);
+            return;
+        }
+
+        if self.active_calls.get(&call_id).is_some_and(is_own_group_call) {
+            self.restore_group_call(
+                queue,
+                sender,
+                handle,
+                link_id,
+                endpoint_id,
+                restored_call_id,
+                call_id,
+                request_to_transmit,
+            );
+            return;
+        }
+
+        self.reject_call_restore(queue, sender, handle, link_id, endpoint_id, call_id);
+    }
+
+    /// Restore an MS into the local individual call `call_id` (D-CALL RESTORE, TS 100 392-2 clause
+    /// 14.5.1.2.4). `restored_call_id` is the identifier the MS sent (another cell's, possibly).
+    /// Returns the transmission grant given, or `None` when the restore was rejected.
+    #[allow(clippy::too_many_arguments)]
+    fn restore_individual_call(
+        &mut self,
+        queue: &mut MessageQueue,
+        sender: TetraAddress,
+        handle: u32,
+        link_id: u32,
+        endpoint_id: u32,
+        restored_call_id: u16,
+        call_id: u16,
+        request_to_transmit: bool,
+    ) -> Option<TransmissionGrant> {
         if let Some(call) = self.individual_calls.get_mut(&call_id) {
             if !call.is_active() || (sender.ssi != call.calling_addr.ssi && sender.ssi != call.called_addr.ssi) {
                 self.reject_call_restore(queue, sender, handle, link_id, endpoint_id, call_id);
-                return;
+                return None;
             }
 
             if call.begin_restore().is_err() {
                 self.reject_call_restore(queue, sender, handle, link_id, endpoint_id, call_id);
-                return;
+                return None;
             }
             call.active_timer_started = Some(self.dltime);
-            // Only grant when the floor is free or the sender already holds it (same decision as
-            // the U-TX DEMAND path). Granting while the peer is talking gives two simultaneous
-            // transmitters and a stale floor_holder the UL-inactivity watchdog never ceases.
-            // Duplex calls keep floor_holder = None, so they still always grant.
-            let grant = if !request_to_transmit {
-                TransmissionGrant::NotGranted
-            } else if call.floor_holder.is_none() || call.is_floor_held_by(sender.ssi) {
-                if call.is_simplex() {
-                    call.grant_floor(sender);
+            // Clause 14.5.1.2.4. Duplex: always granted ("transmission not granted" and "granted
+            // to another user" are only applicable for simplex calls; a duplex MS always requests
+            // to transmit). Simplex: grant only when the floor is free or the sender already holds
+            // it (same decision as the U-TX DEMAND path; granting while the peer is talking gives
+            // two transmitters). With the peer talking the MS is "granted to another user", which
+            // switches its U-plane on to receive, whether it asked to transmit or not. An MS that
+            // does not ask to transmit gave up a floor it held at the break ("the CC shall
+            // assume that the permission is now ended").
+            let peer_holds_floor = call.floor_holder.is_some_and(|holder| holder != sender.ssi);
+            let grant = if !call.is_simplex() {
+                TransmissionGrant::Granted
+            } else if peer_holds_floor {
+                // "If the MS requested transmission in the U-CALL RESTORE PDU, the MS shall
+                // assume that its transmission request is still queued in the SwMI": queue it as
+                // a U-TX DEMAND, granted when the peer's transmission ends.
+                if request_to_transmit {
+                    let _ = call.queue_tx_demand(sender);
                 }
+                TransmissionGrant::GrantedToOtherUser
+            } else if request_to_transmit {
+                call.grant_floor(sender);
                 TransmissionGrant::Granted
             } else {
-                TransmissionGrant::GrantedToOtherUser
+                call.release_floor();
+                TransmissionGrant::NotGranted
             };
             // A leg pre-provisioned for cross-cell handover has the MS arriving from another cell,
             // so it is not yet on this cell's traffic channel: the restore reply must carry a
@@ -188,24 +301,148 @@ impl CcBsSubentity {
                 }
             });
             self.send_d_call_restore(queue, sender, handle, link_id, endpoint_id, restored_call_id, call_id, grant, chan_alloc);
-            return;
+            return Some(grant);
         }
-
-        if self.active_calls.get(&call_id).is_some_and(is_own_group_call) {
-            self.restore_group_call(
-                queue,
-                sender,
-                handle,
-                link_id,
-                endpoint_id,
-                restored_call_id,
-                call_id,
-                request_to_transmit,
-            );
-            return;
-        }
-
         self.reject_call_restore(queue, sender, handle, link_id, endpoint_id, call_id);
+        None
+    }
+
+    /// The network's answer to `IndividualCallRestoreRequest`: restore `issi`'s parked U-CALL
+    /// RESTORE into the call the network moved here, on a traffic channel of this cell, or reject
+    /// it (D-RELEASE, which MLE turns into D-RESTORE-FAIL).
+    pub(in crate::cmce::subentities::cc_bs) fn on_individual_call_restore_answer(
+        &mut self,
+        queue: &mut MessageQueue,
+        issi: u32,
+        peer: u32,
+        call: Option<NetworkRestoredCall>,
+    ) {
+        let Some(pos) = self.deferred_individual_restores.iter().position(|r| r.sender.ssi == issi) else {
+            // Answered too late: the MS was already rejected. The network moved the call here, so
+            // end it there too.
+            if let Some(call) = call {
+                tracing::info!("CMCE: network answer for ISSI {}'s restore came too late, releasing uuid={}", issi, call.brew_uuid);
+                self.notify_network_circuit_release(
+                    queue,
+                    TetraEntity::Brew,
+                    call.brew_uuid,
+                    DisconnectCause::CallRestorationOfTheOtherUserFailed,
+                );
+            }
+            return;
+        };
+        let restore = self.deferred_individual_restores.remove(pos);
+        let Some(call) = call else {
+            tracing::info!("CMCE: the network has no call of ISSI {} with peer={} to restore", issi, peer);
+            self.reject_call_restore(queue, restore.sender, restore.handle, restore.link_id, restore.endpoint_id, restore.call_id);
+            return;
+        };
+        let Some(call_id) = self.provision_restoring_individual_leg(queue, call.brew_uuid, issi, peer, call.simplex_duplex, call.priority) else {
+            self.reject_call_restore(queue, restore.sender, restore.handle, restore.link_id, restore.endpoint_id, restore.call_id);
+            self.notify_network_circuit_release(queue, TetraEntity::Brew, call.brew_uuid, DisconnectCause::CongestionInInfrastructure);
+            return;
+        };
+        let peer_talks = call.floor_issi.is_some_and(|f| f == peer) && !call.simplex_duplex;
+        if peer_talks && let Some(c) = self.individual_calls.get_mut(&call_id) {
+            c.floor_holder = Some(peer);
+        }
+        tracing::info!(
+            "CMCE: network moved ISSI {}'s call here: uuid={} local call_id={} (restored call_id={}) peer={} duplex={}",
+            issi,
+            call.brew_uuid,
+            call_id,
+            restore.call_id,
+            peer,
+            call.simplex_duplex
+        );
+        let Some(grant) = self.restore_individual_call(
+            queue,
+            restore.sender,
+            restore.handle,
+            restore.link_id,
+            restore.endpoint_id,
+            restore.call_id,
+            call_id,
+            restore.request_to_transmit,
+        ) else {
+            return;
+        };
+        let Some(leg) = self.individual_calls.get(&call_id) else { return };
+        let (carrier_num, ts) = (leg.calling_carrier_num, leg.calling_ts);
+        // Voice of this call now runs between this traffic channel and the network.
+        Self::push_control(
+            queue,
+            TetraEntity::Brew,
+            CallControl::NetworkCircuitMediaReady {
+                brew_uuid: call.brew_uuid,
+                call_id,
+                carrier_num,
+                ts,
+            },
+        );
+        let held_floor_on_the_network = call.floor_issi == Some(issi);
+        match grant {
+            // The restored talker: arm UL inactivity as every other individual grant does.
+            TransmissionGrant::Granted if !call.simplex_duplex => {
+                self.notify_floor_granted(
+                    queue,
+                    GroupFloorGrant {
+                        call_id,
+                        source_issi: issi,
+                        dest_gssi: peer,
+                        carrier_num,
+                        ts,
+                        is_group: false,
+                    },
+                    true,
+                    BrewNotification::Never,
+                );
+                // The network had the floor free: the other party learns that this MS talks
+                // now, as after a U-TX DEMAND grant.
+                if !held_floor_on_the_network {
+                    Self::push_control(
+                        queue,
+                        TetraEntity::Brew,
+                        CallControl::NetworkCircuitSimplexGranted {
+                            brew_uuid: call.brew_uuid,
+                            grant: TransmissionGrant::Granted.into_raw() as u8,
+                            permission: 0,
+                        },
+                    );
+                }
+            }
+            // It held the floor at the break and did not ask to go on: its permission ended
+            // (clause 14.5.1.2.4), so the floor is free for the other party.
+            TransmissionGrant::NotGranted if held_floor_on_the_network => Self::push_control(
+                queue,
+                TetraEntity::Brew,
+                CallControl::NetworkCircuitSimplexIdle {
+                    brew_uuid: call.brew_uuid,
+                    grant: TransmissionGrant::NotGranted.into_raw() as u8,
+                    permission: 0,
+                },
+            ),
+            TransmissionGrant::GrantedToOtherUser => {
+                Self::push_control(queue, TetraEntity::Umac, CallControl::RemoteFloorGranted { call_id, carrier_num, ts });
+            }
+            _ => {}
+        }
+    }
+
+    /// Per tick: reject individual restores the network did not answer in time.
+    fn expire_individual_restores(&mut self, queue: &mut MessageQueue) {
+        if self.deferred_individual_restores.is_empty() {
+            return;
+        }
+        let parked = std::mem::take(&mut self.deferred_individual_restores);
+        for restore in parked {
+            if restore.since.age(self.dltime) >= NETWORK_RESTORE_TIMEOUT_TS {
+                tracing::info!("CMCE: no network answer for ISSI {}'s individual call restore", restore.sender.ssi);
+                self.reject_call_restore(queue, restore.sender, restore.handle, restore.link_id, restore.endpoint_id, restore.call_id);
+            } else {
+                self.deferred_individual_restores.push(restore);
+            }
+        }
     }
 
     /// Restore an MS into the local group call `call_id` (D-CALL RESTORE, floor if requested and
@@ -469,6 +706,7 @@ impl CcBsSubentity {
     /// too long (D-RELEASE, which MLE turns into D-RESTORE-FAIL).
     pub(in crate::cmce::subentities::cc_bs) fn drive_deferred_restores(&mut self, queue: &mut MessageQueue) {
         self.drive_handover_reservations(queue);
+        self.expire_individual_restores(queue);
         if self.deferred_restores.is_empty() {
             return;
         }

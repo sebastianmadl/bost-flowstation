@@ -128,6 +128,14 @@ pub enum BrewEvent {
     /// (`SERVICE_MS_MOVED`, only from a server that offered `ms-moved`)
     MsMoved { issi: u32 },
 
+    /// The server's answer to `RequestCallRestore` (`SERVICE_CALL_RESTORE`), or the worker's own
+    /// "no call" when the server cannot move calls
+    CallRestoreAnswer {
+        issi: u32,
+        peer: u32,
+        call: Option<tetra_saps::control::call_control::NetworkRestoredCall>,
+    },
+
     /// Error from server
     ServerError { error_type: u8, data: Vec<u8> },
 }
@@ -148,6 +156,10 @@ pub enum BrewCommand {
         issi: u32,
         reselection: tetra_saps::control::call_control::CellReselection,
     },
+
+    /// Ask the server for the individual call `issi` restores here with `peer` (only a server
+    /// that offered `call-restore`; otherwise answered "no call" at once)
+    RequestCallRestore { issi: u32, peer: u32 },
 
     /// Deregister a subscriber (ISSI)
     DeregisterSubscriber { issi: u32 },
@@ -276,6 +288,9 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
         if server_extensions.iter().any(|e| e == BREW_EXT_MS_MOVED) {
             capabilities.push(BREW_EXT_MS_MOVED);
         }
+        if server_extensions.iter().any(|e| e == BREW_EXT_CALL_RESTORE) {
+            capabilities.push(BREW_EXT_CALL_RESTORE);
+        }
     }
     Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, &capabilities))
 }
@@ -285,6 +300,12 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
 /// over between its own cells through the site switch; between stations it is not a target yet.
 fn handles_handover(config: &StackConfig, server_extensions: &[String]) -> bool {
     !config.is_site_linked() && server_extensions.iter().any(|e| e == BREW_EXT_HANDOVER)
+}
+
+/// This station restores individual calls of radios that come from another station: it takes
+/// part in handover and the server moves calls (`call-restore`).
+fn restores_calls(config: &StackConfig, server_extensions: &[String]) -> bool {
+    handles_handover(config, server_extensions) && server_extensions.iter().any(|e| e == BREW_EXT_CALL_RESTORE)
 }
 
 /// SERVICE_MS_CELL placing `issi` on this station's cell `cell`, or `None` when the server did not
@@ -735,6 +756,19 @@ impl<T: NetworkTransport> BrewWorker<T> {
                             tracing::debug!("BrewWorker: sent RSSI issi={} rssi={:.1}dBFS", issi, rssi_dbfs);
                         }
                     }
+                    BrewCommand::RequestCallRestore { issi, peer } => {
+                        if !restores_calls(&self.config.config(), self.transport.server_brew_extensions()) {
+                            self.send_event(BrewEvent::CallRestoreAnswer { issi, peer, call: None });
+                            continue;
+                        }
+                        let msg = build_service_call_restore(issi, peer);
+                        if let Err(e) = self.transport.send_reliable(&msg) {
+                            tracing::error!("BrewWorker: failed to send call restore request for ISSI {}: {}", issi, e);
+                            self.send_event(BrewEvent::CallRestoreAnswer { issi, peer, call: None });
+                        } else {
+                            tracing::info!("BrewWorker: asked the server for ISSI {}'s call with peer {}", issi, peer);
+                        }
+                    }
                     BrewCommand::SendHandoverResult(result) => {
                         if !handles_handover(&self.config.config(), self.transport.server_brew_extensions()) {
                             continue;
@@ -840,6 +874,15 @@ impl<T: NetworkTransport> BrewWorker<T> {
                 match parsed {
                     Ok(event) => self.send_event(event),
                     Err(e) => tracing::warn!("BrewWorker: malformed handover message type={:#x}: {}", svc.service_type, e),
+                }
+            }
+            BREW_SERVICE_CALL_RESTORE if restores_calls(&self.config.config(), self.transport.server_brew_extensions()) => {
+                match parse_call_restore_answer(&svc.json_data) {
+                    Ok((issi, peer, call)) => {
+                        tracing::info!("BrewWorker: call restore answer issi={} peer={} call={:?}", issi, peer, call);
+                        self.send_event(BrewEvent::CallRestoreAnswer { issi, peer, call });
+                    }
+                    Err(e) => tracing::warn!("BrewWorker: malformed call restore answer: {}", e),
                 }
             }
             BREW_SERVICE_MS_MOVED
@@ -1391,6 +1434,82 @@ password = "x"
         let (mut plain, events) = worker_with_events(MockTransport::new().with_brew_extensions(&HANDOVER));
         plain.transport.connect().unwrap();
         plain.handle_incoming_binary(&ms_moved(r#"{"issi":2320001}"#));
+        assert!(events.try_recv().is_err());
+    }
+
+    // ── Individual call restore (call-restore) ──
+
+    fn call_restore(json: &str) -> Vec<u8> {
+        let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_CALL_RESTORE];
+        msg.extend_from_slice(json.as_bytes());
+        msg.push(0);
+        msg
+    }
+
+    #[test]
+    fn bts_info_asks_for_call_restore_only_where_offered() {
+        let mut offered: Vec<String> = HANDOVER.iter().map(|e| e.to_string()).collect();
+        offered.push(BREW_EXT_MS_MOVED.to_string());
+        offered.push(BREW_EXT_CALL_RESTORE.to_string());
+        let single = bts_info_message(&config("").config(), &offered).unwrap();
+        assert_eq!(json_of(&single)["capabilities"], serde_json::json!(["handover-v1", "ms-moved", "call-restore"]));
+        let multi = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
+        let multi = bts_info_message(&multi.config(), &offered).unwrap();
+        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "only with handover-v1");
+    }
+
+    #[test]
+    fn a_call_restore_request_goes_only_to_a_server_that_moves_calls() {
+        let commands = || vec![BrewCommand::RequestCallRestore { issi: 2320972, peer: 2320997 }];
+        let offered = run_commands(
+            MockTransport::new().with_brew_extensions(&["bts-info", "handover-v1", "ms-moved", BREW_EXT_CALL_RESTORE]),
+            commands(),
+        );
+        assert_eq!(offered.len(), 1);
+        assert_eq!((offered[0][0], offered[0][1]), (BREW_CLASS_SERVICE, BREW_SERVICE_CALL_RESTORE));
+        let json = serde_json::from_slice::<serde_json::Value>(&offered[0][2..offered[0].len() - 1]).unwrap();
+        assert_eq!(json, serde_json::json!({ "issi": 2320972, "peer": 2320997 }));
+        assert!(run_commands(MockTransport::new().with_brew_extensions(&["bts-info", "handover-v1", "ms-moved"]), commands()).is_empty());
+        assert!(run_commands(MockTransport::new(), commands()).is_empty());
+    }
+
+    #[test]
+    fn without_call_restore_the_worker_answers_no_call_itself() {
+        let (event_tx, event_rx) = bounded(16);
+        let (command_tx, command_rx) = bounded(16);
+        let mut worker = BrewWorker::new(config(""), event_tx, command_rx, MockTransport::new().with_brew_extensions(&HANDOVER));
+        worker.transport.connect().unwrap();
+        command_tx.send(BrewCommand::RequestCallRestore { issi: 7, peer: 8 }).unwrap();
+        command_tx.send(BrewCommand::Disconnect).unwrap();
+        worker.message_loop().unwrap();
+        let answer = std::iter::from_fn(|| event_rx.try_recv().ok()).find(|e| matches!(e, BrewEvent::CallRestoreAnswer { .. }));
+        assert!(matches!(answer, Some(BrewEvent::CallRestoreAnswer { issi: 7, peer: 8, call: None })));
+    }
+
+    #[test]
+    fn call_restore_answers_reach_the_entity_only_where_offered() {
+        let mut offered: Vec<&str> = HANDOVER.to_vec();
+        offered.push(BREW_EXT_CALL_RESTORE);
+        let (mut w, events) = worker_with_events(MockTransport::new().with_brew_extensions(&offered));
+        w.transport.connect().unwrap();
+        w.handle_incoming_binary(&call_restore(
+            r#"{"issi":2320972,"peer":2320997,"uuid":"57c22f65-c8cb-4008-ac84-6fb79023888f","duplex":false,"priority":2,"floor":2320997,"later":1}"#,
+        ));
+        let Ok(BrewEvent::CallRestoreAnswer { issi, peer, call: Some(call) }) = events.try_recv() else { panic!("call expected") };
+        assert_eq!((issi, peer), (2320972, 2320997));
+        assert_eq!(call.brew_uuid.to_string(), "57c22f65-c8cb-4008-ac84-6fb79023888f");
+        assert_eq!((call.simplex_duplex, call.priority, call.floor_issi), (false, 2, Some(2320997)));
+        w.handle_incoming_binary(&call_restore(r#"{"issi":2320972,"peer":2320997,"uuid":"57c22f65-c8cb-4008-ac84-6fb79023888f","duplex":true,"priority":0,"floor":0}"#));
+        assert!(matches!(events.try_recv(), Ok(BrewEvent::CallRestoreAnswer { call: Some(c), .. }) if c.floor_issi.is_none() && c.simplex_duplex));
+        w.handle_incoming_binary(&call_restore(r#"{"issi":2320972,"peer":2320997}"#));
+        assert!(matches!(events.try_recv(), Ok(BrewEvent::CallRestoreAnswer { issi: 2320972, peer: 2320997, call: None })));
+        for bad in [r#"{"peer":1}"#, r#"{"issi":1,"uuid":"nope","duplex":true}"#, r#"{"issi":1,"uuid":"57c22f65-c8cb-4008-ac84-6fb79023888f"}"#, "x"] {
+            w.handle_incoming_binary(&call_restore(bad));
+            assert!(events.try_recv().is_err(), "malformed {bad} is dropped");
+        }
+        let (mut plain, events) = worker_with_events(MockTransport::new().with_brew_extensions(&HANDOVER));
+        plain.transport.connect().unwrap();
+        plain.handle_incoming_binary(&call_restore(r#"{"issi":2320972,"peer":2320997}"#));
         assert!(events.try_recv().is_err());
     }
 

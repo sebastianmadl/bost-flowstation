@@ -266,6 +266,30 @@ pub enum CallControl {
         simplex_duplex: bool,
         priority: u8,
     },
+    /// Separate station on a Brew network (CMCE → Brew): `issi` sent U-CALL RESTORE here for an
+    /// individual call this station does not hold (it ran on the station the MS left). Ask the
+    /// server for the call with `peer` (the other party's SSI from U-CALL RESTORE, 0 for the
+    /// dummy address); answered with `IndividualCallRestoreAnswer`.
+    IndividualCallRestoreRequest { issi: u32, peer: u32 },
+    /// Brew → CMCE: the call `issi` restores here, or `None` when the network has none (or the
+    /// server cannot move calls).
+    IndividualCallRestoreAnswer {
+        issi: u32,
+        peer: u32,
+        call: Option<NetworkRestoredCall>,
+    },
+}
+
+/// An individual call the network moved to this station with its MS (see
+/// `CallControl::IndividualCallRestoreAnswer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkRestoredCall {
+    pub brew_uuid: uuid::Uuid,
+    /// Duplex (true) or simplex
+    pub simplex_duplex: bool,
+    pub priority: u8,
+    /// The party a simplex call's floor is with, if any
+    pub floor_issi: Option<u32>,
 }
 
 /// The category of cell reselection an MS used to leave a cell (TS 100 392-2 clause 18.3.4.7.0),

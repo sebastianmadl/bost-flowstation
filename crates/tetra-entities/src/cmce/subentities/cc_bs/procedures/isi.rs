@@ -322,6 +322,22 @@ impl CcBsSubentity {
             return;
         }
 
+        self.provision_restoring_individual_leg(queue, brew_uuid, issi, peer_issi, simplex_duplex, priority);
+    }
+
+    /// Allocate and open a traffic channel for an individual call `issi` restores here with
+    /// `peer_issi` on the network (`brew_uuid`), and insert the call already `Active` with
+    /// `restoring_cross_cell` set, so its U-CALL RESTORE is answered with a channel allocation.
+    /// Returns the local call identifier, or `None` when no channel is free.
+    pub(in crate::cmce::subentities::cc_bs) fn provision_restoring_individual_leg(
+        &mut self,
+        queue: &mut MessageQueue,
+        brew_uuid: uuid::Uuid,
+        issi: u32,
+        peer_issi: u32,
+        simplex_duplex: bool,
+        priority: u8,
+    ) -> Option<u16> {
         let main_carrier = self.config.config().cell.main_carrier;
         let circuit = {
             let mut state = self.config.state_write();
@@ -341,7 +357,7 @@ impl CcBsSubentity {
                         peer_issi,
                         e
                     );
-                    return;
+                    return None;
                 }
             }
         };
@@ -419,6 +435,7 @@ impl CcBsSubentity {
             restoring_cross_cell: true,
         };
         self.individual_calls.insert(call_id, call);
+        Some(call_id)
     }
 
     /// Handle network circuit connect request (Brew -> local called MS).
