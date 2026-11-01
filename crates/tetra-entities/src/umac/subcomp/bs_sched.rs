@@ -440,14 +440,18 @@ impl BsChannelScheduler {
                 grant_timeslots
             );
 
-            if candidate_t.is_mandatory_clch() {
-                // Not an opportunity; skip
-                continue;
-            }
-
             if candidate_t.f == 18 {
-                // Skip frame 18 — ACCESS-ASSIGN marks UL as CommonOnly on this frame,
-                // and timing at the multiframe boundary causes grant delivery to fail.
+                // Skip frame 18 (mandatory CLCH, ACCESS-ASSIGN marks UL as CommonOnly, and timing
+                // at the multiframe boundary causes grant delivery to fail). No grant goes out on
+                // the downlink of frame 18 either, so as the first candidate it is not counted: the
+                // grant then goes out in frame 1 and counts from there. Later, the MS counts it as
+                // a delay opportunity, "including those slots in frame 18 that contain predefined
+                // common linearization opportunities" (TS 100 392-2 clause 23.5.2.2.2), so it counts
+                // as skipped and breaks a run of slots like a taken one.
+                if dist > 0 {
+                    opportunities_skipped += grant_timeslots.len() + 1;
+                    grant_timeslots.clear();
+                }
                 continue;
             }
 
@@ -2428,6 +2432,36 @@ mod tests {
         let mut sched = get_testing_slotter();
         sched.set_dl_time(TdmaTime { t: 1, f: 9, m: 1, h: 0 });
         assert_eq!(booked_ts1_frame(&mut sched, 1001), 10);
+    }
+
+    /// No grant goes out on the downlink of frame 18, so a grant due then goes out in frame 1 for
+    /// the slot of frame 1 (granting delay 0).
+    #[test]
+    fn test_grant_due_in_frame_18_starts_in_frame_1() {
+        let mut sched = get_testing_slotter();
+        sched.set_dl_time(TdmaTime { t: 4, f: 17, m: 1, h: 0 });
+        let addr = TetraAddress { ssi_type: SsiType::Issi, ssi: 1001 };
+        let (grant, _) = sched.ul_process_cap_req(1, addr, &ReservationRequirement::Req1Slot).expect("a free slot");
+        assert_eq!(grant.granting_delay, BasicSlotgrantGrantingDelay::CapAllocAtNextOpportunity);
+        let frame1 = TdmaTime { t: 1, f: 1, m: 2, h: 0 };
+        assert_eq!(sched.ul_get_slot_owner(frame1, PhyBlockNum::Block1), Some(1001));
+    }
+
+    /// The MS counts frame 18 when it counts delay opportunities (clause 23.5.2.2.2). A grant sent
+    /// in frame 17 for the slot in frame 1 needs a granting delay of 2 (frames 18 and 1), not 1
+    /// (that would be frame 18).
+    #[test]
+    fn test_grant_past_frame_18_counts_frame_18_as_an_opportunity() {
+        let mut sched = get_testing_slotter();
+        sched.set_dl_time(TdmaTime { t: 4, f: 16, m: 1, h: 0 });
+        let first = TetraAddress { ssi_type: SsiType::Issi, ssi: 1001 };
+        let second = TetraAddress { ssi_type: SsiType::Issi, ssi: 1002 };
+        let (grant, _) = sched.ul_process_cap_req(1, first, &ReservationRequirement::Req1Slot).expect("frame 17");
+        assert_eq!(grant.granting_delay, BasicSlotgrantGrantingDelay::CapAllocAtNextOpportunity);
+        let (grant, _) = sched.ul_process_cap_req(1, second, &ReservationRequirement::Req1Slot).expect("frame 1");
+        assert_eq!(grant.granting_delay, BasicSlotgrantGrantingDelay::DelayNOpportunities(2));
+        let frame1 = TdmaTime { t: 1, f: 1, m: 2, h: 0 };
+        assert_eq!(sched.ul_get_slot_owner(frame1, PhyBlockNum::Block1), Some(1002));
     }
 
     #[test]
