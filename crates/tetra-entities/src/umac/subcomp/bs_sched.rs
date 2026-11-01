@@ -102,6 +102,9 @@ pub struct TimeslotSchedule {
 // #[derive(Debug)]
 pub struct BsChannelScheduler {
     pub cur_dltime: TdmaTime,
+    /// True once this tick's downlink slot (`cur_dltime` + `MACSCHED_TX_AHEAD`) has been built.
+    /// A grant enqueued after that can only go out in a later downlink slot.
+    dl_built_this_tick: bool,
     carrier_num: u16,
     downlink_mode: CarrierDownlinkMode,
     scrambling_code: u32,
@@ -205,6 +208,7 @@ impl BsChannelScheduler {
         let carrier_num = precomps.mac_sysinfo1.main_carrier;
         BsChannelScheduler {
             cur_dltime: TdmaTime { t: 0, f: 0, m: 0, h: 0 }, // Intentionally invalid, updated in tick function
+            dl_built_this_tick: false,
             carrier_num,
             downlink_mode: CarrierDownlinkMode::PrimaryMcch,
             scrambling_code,
@@ -391,6 +395,7 @@ impl BsChannelScheduler {
     /// Wipes the schedule, as it can no longer be guaranteed to be valid
     pub fn set_dl_time(&mut self, new_ts: TdmaTime) {
         self.cur_dltime = new_ts;
+        self.dl_built_this_tick = false;
         self.purge_schedule();
     }
 
@@ -406,7 +411,12 @@ impl BsChannelScheduler {
     /// Returns (opportunities_to_skip, Vec<timestamps_of_granted_slots>)
     /// Returns None if no suitable opportunity is found in the schedule
     pub fn ul_find_grant_opportunity(&self, t: u8, num_slots: usize, is_halfslot: bool) -> Option<(usize, Vec<TdmaTime>)> {
-        let first_opportunity = self.cur_dltime.forward_to_timeslot(t);
+        // A granting delay of 0 means the uplink slot in the same TDMA frame as the downlink slot
+        // that carries the grant (TS 100 392-2 clause 23.5.2.2.2). The grant goes out in the next
+        // downlink slot of timeslot `t` that is not built yet, so the first opportunity is the
+        // uplink slot of that frame, not of a frame whose downlink slot has already gone out.
+        let ahead = MACSCHED_TX_AHEAD as i32 + if self.dl_built_this_tick { 1 } else { 0 };
+        let first_opportunity = self.cur_dltime.add_timeslots(ahead).forward_to_timeslot(t);
         let mut grant_timeslots = Vec::with_capacity(num_slots);
         let mut opportunities_skipped = 0;
 
@@ -1423,6 +1433,7 @@ impl BsChannelScheduler {
     pub fn tick_start(&mut self, ts: TdmaTime) {
         // Increment current time
         self.cur_dltime = self.cur_dltime.add_timeslots(1);
+        self.dl_built_this_tick = false;
         assert!(
             ts == self.cur_dltime,
             "BsChannelScheduler tick_start: ts mismatch, expected {}, got {}",
@@ -1462,6 +1473,7 @@ impl BsChannelScheduler {
 
         // We finalize a FUTURE slot: cur_ts plus some number of timeslots
         let ts = self.cur_dltime.add_timeslots(MACSCHED_TX_AHEAD as i32);
+        self.dl_built_this_tick = true;
         let carrier_num = self.carrier_num;
         self.precomps.mac_sync.time = ts;
         let (hyperframe, sck_vn) = sysinfo_key_field(self.cipher.as_deref(), ts);
@@ -2380,6 +2392,42 @@ mod tests {
 
         assert_eq!(grant2.capacity_allocation, BasicSlotgrantCapAlloc::Grant3Slots);
         assert_eq!(grant2.granting_delay, BasicSlotgrantGrantingDelay::DelayNOpportunities(1));
+    }
+
+    /// Reserves one subslot on ts1 for `ssi` and returns the uplink frame it was booked in.
+    fn booked_ts1_frame(sched: &mut BsChannelScheduler, ssi: u32) -> u8 {
+        let addr = TetraAddress { ssi_type: SsiType::Issi, ssi };
+        let (grant, _) = sched.ul_process_cap_req(1, addr, &ReservationRequirement::Req1Subslot).expect("a free subslot");
+        assert_eq!(grant.granting_delay, BasicSlotgrantGrantingDelay::CapAllocAtNextOpportunity);
+        (1..=18u8)
+            .find(|&f| {
+                let ts = TdmaTime { t: 1, f, m: sched.cur_dltime.m, h: sched.cur_dltime.h };
+                sched.ul_get_slot_owner(ts, PhyBlockNum::Block1) == Some(ssi)
+            })
+            .expect("the subslot is booked")
+    }
+
+    /// Field case (BS1 debug log 2026-11-01): a grant enqueued after this tick's downlink slot was
+    /// built (LLC sends at the end of the tick in 29/08/4, DL 29/09/1 already built) went out in
+    /// DL 29/10/1 but was booked for UL 29/09/1. Granting delay 0 means the uplink slot in the
+    /// same frame as the downlink slot that carries the grant (TS 100 392-2 clause 23.5.2.2.2).
+    #[test]
+    fn test_grant_after_the_dl_slot_is_built_is_booked_in_the_next_frame() {
+        let mut sched = get_testing_slotter();
+        sched.set_dl_time(TdmaTime { t: 4, f: 8, m: 1, h: 0 });
+        // Before the slot is built, DL 9/1 still carries the grant: UL 9/1.
+        assert_eq!(booked_ts1_frame(&mut sched, 1001), 9);
+        let _ = sched.finalize_ts_for_tick();
+        // DL 9/1 is gone; the grant goes out in DL 10/1: UL 10/1.
+        assert_eq!(booked_ts1_frame(&mut sched, 1002), 10);
+    }
+
+    /// In the tick of ts1 itself, DL ts1 of this frame was built in the tick before.
+    #[test]
+    fn test_grant_in_the_tick_of_its_own_timeslot_is_booked_in_the_next_frame() {
+        let mut sched = get_testing_slotter();
+        sched.set_dl_time(TdmaTime { t: 1, f: 9, m: 1, h: 0 });
+        assert_eq!(booked_ts1_frame(&mut sched, 1001), 10);
     }
 
     #[test]
