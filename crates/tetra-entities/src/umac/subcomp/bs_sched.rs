@@ -855,6 +855,28 @@ impl BsChannelScheduler {
         self.dl_enqueue_tma_on_timeslots(timeslots, pdu, sdu, tx_reporter);
     }
 
+    /// Grants the addressed MS one uplink subslot on the channel the signalling goes out on, to
+    /// carry the layer 2 acknowledgement of an acknowledged PDU whose channel allocation moves it
+    /// away (TS 100 392-2 clause 23.5.4.3.1 b): the MS sends in the granted subslot on the current
+    /// channel, "position of grant" 0 (clause 21.4.3.1), and moves after it. On the assigned
+    /// channel it has no uplink capacity of its own for the acknowledgement. The grant joins the
+    /// MS's MAC-RESOURCE when the slot is built. Returns whether a subslot was found.
+    pub fn ul_grant_ack_before_channel_change(&mut self, addr: TetraAddress, link_id: LinkId) -> bool {
+        // Only signalling on the MCCH: an MS addressed on another timeslot is on that channel
+        // already, and an uplink subslot there would collide with its traffic.
+        let ts = self.identify_timeslots_for_ssi(Some(addr), link_id)[0];
+        if ts != 1 {
+            return false;
+        }
+        match self.ul_process_cap_req(ts, addr, &ReservationRequirement::Req1Subslot) {
+            Some((grant, usage_marker)) => {
+                self.dl_enqueue_grant(ts, addr, grant, usage_marker);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn dl_enqueue_tma_for_link(&mut self, link_id: LinkId, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) {
         let timeslots = self.identify_timeslots_for_ssi(pdu.addr, link_id);
         self.dl_enqueue_tma_on_timeslots(timeslots, pdu, sdu, tx_reporter);

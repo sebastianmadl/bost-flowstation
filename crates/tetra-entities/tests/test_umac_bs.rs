@@ -1706,3 +1706,73 @@ fn sysinfo_carries_the_configured_rxlev_access_min() {
     assert_eq!(precomps.mac_sysinfo1.rxlev_access_min, 10);
     assert_eq!(precomps.mac_sysinfo2.rxlev_access_min, 10);
 }
+
+/// Channel allocation moving the MS to a traffic channel, sent with `sdu` on the MCCH; returns
+/// the MAC-RESOURCE that carried it.
+fn mcch_resource_with_chan_alloc(sdu: &str) -> MacResource {
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
+    let dest = TetraAddress {
+        ssi: 2320972,
+        ssi_type: SsiType::Issi,
+    };
+    test.submit_message(SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+            req_handle: 0,
+            pdu: BitBuffer::from_bitstr(sdu),
+            main_address: dest,
+            link_id: 1,
+            endpoint_id: 0,
+            stealing_permission: false,
+            subscriber_class: 0,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_category: None,
+            carrier_num: Some(MAIN_CARRIER),
+            chan_alloc: Some(CmceChanAllocReq {
+                usage: Some(8),
+                carrier: Some(MAIN_CARRIER),
+                timeslots: [false, true, false, false],
+                alloc_type: ChanAllocType::Replace,
+                ul_dl_assigned: UlDlAssignment::Both,
+                cell_change: false,
+            }),
+            stealing_slot: None,
+            tx_reporter: None,
+        }),
+    });
+    test.run_stack(Some(12));
+    test.dump_sinks()
+        .into_iter()
+        .flat_map(|msg| match msg.msg {
+            SapMsgInner::TmvUnitdataReq(slot) => vec![slot],
+            SapMsgInner::TmvUnitdataReqSlots(slots) => slots.slots,
+            _ => vec![],
+        })
+        .flat_map(|slot| [block_mac_resource_for(&slot.blk1, dest), block_mac_resource_for(&slot.blk2, dest)])
+        .flatten()
+        .find(|pdu| pdu.chan_alloc_element.is_some())
+        .expect("the channel allocation goes out on the MCCH")
+}
+
+/// Field case (M5a, D-RESTORE ACK): an acknowledged PDU that sends the MS to a traffic channel
+/// was repeated on the MCCH after the MS had left, because the MS had no uplink to acknowledge
+/// on. A subslot granted on the current channel carries the acknowledgement before the move
+/// (TS 100 392-2 clause 23.5.4.3.1 b, "position of grant" 0 = current channel, clause 21.4.3.1).
+#[test]
+fn test_acknowledged_channel_change_grants_a_subslot_on_the_current_channel() {
+    // BL-DATA (0001), N(S) 0, then an MLE PDU.
+    let pdu = mcch_resource_with_chan_alloc("00010101100001110000000000100010001110000000000100001011000");
+    assert!(pdu.slot_granting_element.is_some(), "the MS needs uplink capacity for its BL-ACK");
+    assert_eq!(pdu.pos_of_grant, 0, "the grant is on the current channel");
+}
+
+#[test]
+fn test_unacknowledged_channel_change_gets_no_grant() {
+    // BL-UDATA (0010): nothing to acknowledge.
+    let pdu = mcch_resource_with_chan_alloc("00100101100001110000000000100010001110000000000100001011000");
+    assert!(pdu.slot_granting_element.is_none());
+}

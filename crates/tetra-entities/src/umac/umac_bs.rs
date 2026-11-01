@@ -4,6 +4,7 @@ use tetra_config::bluestation::SharedConfig;
 use tetra_core::freqs::FreqInfo;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, Todo, unimplemented_log};
+use tetra_pdus::llc::enums::llc_pdu_type::LlcPduType;
 use tetra_pdus::mle::fields::bs_service_details::BsServiceDetails;
 use tetra_pdus::mle::pdus::d_mle_sync::DMleSync;
 use tetra_pdus::mle::pdus::d_mle_sysinfo::DMleSysinfo;
@@ -388,6 +389,21 @@ impl UmacBs {
         }
 
         true
+    }
+
+    /// An individually addressed acknowledged basic link PDU (BL-ADATA / BL-DATA, clause 21.2.1)
+    /// whose channel allocation moves the MS off its current channel.
+    fn moves_ms_awaiting_l2_ack(pdu: &MacResource, sdu: &BitBuffer) -> bool {
+        let moves = pdu
+            .chan_alloc_element
+            .as_ref()
+            .is_some_and(|ca| matches!(ca.alloc_type, ChanAllocType::Replace | ChanAllocType::ReplaceWithCarrierSignalling));
+        let individual = pdu.addr.is_some_and(|a| a.ssi_type != SsiType::Gssi);
+        let acknowledged = sdu
+            .peek_bits_startoffset(0, 4)
+            .and_then(|t| LlcPduType::try_from(t).ok())
+            .is_some_and(|t| matches!(t, LlcPduType::BlAdata | LlcPduType::BlData | LlcPduType::BlAdataFcs | LlcPduType::BlDataFcs));
+        moves && individual && acknowledged
     }
 
     fn cmce_to_mac_chanalloc(&self, chan_alloc: &CmceChanAllocReq, carrier_num: u16) -> Option<ChanAllocElement> {
@@ -1888,6 +1904,15 @@ impl UmacBs {
             chan_alloc_element: mac_chan_alloc,
         };
         pdu.update_len_and_fill_ind(sdu.get_len());
+
+        if Self::moves_ms_awaiting_l2_ack(&pdu, &sdu) {
+            // The MS acknowledges on the current channel before it moves (clause 23.5.4.3.1 b);
+            // without a subslot there the acknowledgement never comes and the PDU is repeated
+            // on the MCCH after the MS has left.
+            if !self.channel_scheduler.ul_grant_ack_before_channel_change(prim.main_address, prim.link_id) {
+                tracing::debug!("rx_ul_tma_unitdata_req: no subslot for {}'s acknowledgement before its channel change", prim.main_address);
+            }
+        }
 
         // Normal control signalling must stay on the primary MCCH even when the
         // embedded chan_alloc points at a secondary traffic carrier. Secondary
