@@ -35,6 +35,7 @@ Based on FlowStation by **Razvan Zeces / YO6RZV** (itself built on [tetra-bluest
 | Sidebar update badge | Glance notice when a newer commit is available on the **active OTA channel** |
 | Spanish-first UI (multi-language) | Ready for operators who prefer ES |
 | **Multi-cell** *(new in v0.5.0)* | One station, several SDRs: each SDR is one more TETRA cell, linked for calls, SDS and handover |
+| **Moving between stations** | Separate stations on one Brew server keep a radio's group and individual calls when it changes station |
 | **Ambience Listening (SS-AL)** *(new in v0.5.4)* | Dispatcher-invoked receive-only call: a supporting radio connects and keys its mic on its own (indicated on the radio, not covert) |
 | **Request for Location (LIP)** *(new in v0.5.4)* | Dispatcher asks a radio for its position (once or polled); the LIP report reaches the console that requested it |
 
@@ -265,6 +266,57 @@ The registered-radios table shows every cell's radios with a C0/C1… badge, the
 - CPU and USB/network bandwidth for several SDRs on one Pi are untested; start with two cells.
 
 Design notes and per-phase status: [`Docs/multi-cell-plan.md`](Docs/multi-cell-plan.md).
+
+## Moving between stations over Brew
+
+Two or more separate stations on the same Brew server can keep a radio's calls when it moves from one to the other. The radio decides when it changes cells (TETRA cell reselection, ETSI TS 100 392-2 clause 18.3.4); the stations and the server only make sure the call is there when it arrives.
+
+> **Status:** field-tested with two single-cell stations (Pluto+ and SX1255) and a Motorola MTP6650, October/November 2026.
+
+### What you get
+
+- **Group calls** go on after a cell change: a listener hears the rest of the over on the new station (gap about 0.5 to 1.5 s), a talker holding PTT keeps the floor there.
+- **Individual calls** (simplex and duplex) with a Brew party are restored on the new station (U-CALL RESTORE). A call the radio gave up (link lost at the cell edge) ends for the other party at once, so they can call back.
+- **The old station lets the radio go**: no stale registration, no traffic channel left open for a group nobody listens to any more.
+- **Announced changes** (U-PREPARE naming the other station's cell) are prepared on the target through the server: it registers the radio (forward registration) and joins its group call before the radio arrives. Unannounced changes and type 3 announcements work without that.
+
+### What it needs
+
+- A Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade, e.g. brew-server with its `docs/Handover.md`). The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
+- One cell per station: a multi-cell station hands over between its own cells (see above) but is not a cross-station target yet.
+- Each station lists the other as a neighbour. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
+
+  ```toml
+  [cell_info]
+  rxlev_access_min_dbm = -100            # same on both stations
+
+  [cell_info.cell_reselect]               # values of the field test (defaults 10 / 20)
+  fast_threshold_db = 30
+  slow_threshold_db = 10                 # added to the fast threshold (clause 18.5.4)
+
+  [[cell_info.neighbor_cells_ca]]
+  cell_identifier_ca = 1
+  cell_reselection_types_supported = 2   # forward registration, no expedited reselection (table 18.22)
+  neighbor_cell_synchronized = false
+  cell_load_ca = 0
+  main_carrier_number = 1530
+  location_area = 1                      # the neighbour's real location area
+
+  [cell_info.neighbor_cells_ca.bs_service_details]
+  registration = true                    # every field left out is broadcast as false
+  deregistration = true
+  system_wide_services = true
+  voice_service = true
+  ```
+
+  Without `bs_service_details` the neighbour is broadcast without registration and voice, and radios will not use it. How the thresholds work: [`Docs/cell-reselection.md`](Docs/cell-reselection.md).
+
+### Known limits
+
+- Most radios change cells unannounced (a listener always, clause 18.3.4.7.1), so a short break stays. The MTP6650 never announced with a target cell in the field test (its background scan of the neighbour needs synchronized cells), so announced types 1 and 2 are covered by tests only.
+- A radio that loses the link at the cell edge before it reaches the new station gives up an individual call; that is the radio's decision (clause 16.4 a)).
+
+The server side and the Brew messages are documented in brew-server: `docs/Handover.md` (operators) and `docs/Brew-Extensions.md` (protocol for other server and Basestation implementations).
 
 ## Stability and system robustness
 
