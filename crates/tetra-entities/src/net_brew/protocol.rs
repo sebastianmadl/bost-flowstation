@@ -916,6 +916,24 @@ pub fn parse_call_restore_answer(json_data: &str) -> Result<(u32, u32, Option<Ne
     Ok((issi, peer, call))
 }
 
+/// Service type a station sends a server that offered [`BREW_EXT_CALL_RESTORE`] when a radio
+/// registered with a plain roaming location update (`{"issi":2320972}`): an MS with a circuit
+/// mode call registers with "service restoration roaming" (TS 100 392-2 clause 16.4 a)), so it
+/// has no call to restore and the server ends a call that moved here with it at once
+/// (brew-server)
+pub const BREW_SERVICE_CALL_NOT_RESTORED: u8 = 0x1C;
+
+/// Build a Service (0xf4) [`BREW_SERVICE_CALL_NOT_RESTORED`] report, NULL-terminated JSON.
+pub fn build_service_call_not_restored(issi: u32) -> Vec<u8> {
+    let json = serde_json::json!({ "issi": issi }).to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(BREW_SERVICE_CALL_NOT_RESTORED);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
+}
+
 /// Service type: serving station asks the target to prepare an announced cell reselection
 /// (U-PREPARE without a registration, TS 100 392-2 clause 18.4.1.4.6)
 pub const BREW_SERVICE_HO_PREPARE: u8 = 0x15;

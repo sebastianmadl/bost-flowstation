@@ -171,6 +171,8 @@ struct Relay {
     call_releases: Vec<(usize, Uuid, u8)>,
     /// Every SERVICE_CALL_RESTORE request: (station, issi, peer)
     restore_requests: Vec<(usize, u32, u32)>,
+    /// Every SERVICE_CALL_NOT_RESTORED report: (station, issi)
+    not_restored: Vec<(usize, u32)>,
     /// Voice frames the stations sent: (station, call)
     voice_up: Vec<(usize, Uuid)>,
 }
@@ -303,6 +305,18 @@ impl Relay {
                     msg.extend_from_slice(answer.to_string().as_bytes());
                     msg.push(0);
                     send(from, &msg);
+                }
+                BREW_SERVICE_CALL_NOT_RESTORED => {
+                    // brew-server `call_restore::handle_not_restored`: the moved call ends at once.
+                    let json: serde_json::Value = serde_json::from_str(&svc.json_data).unwrap();
+                    let issi = json["issi"].as_u64().unwrap() as u32;
+                    self.not_restored.push((from, issi));
+                    let ended: Vec<Uuid> =
+                        self.private.iter().filter(|(id, c)| c.radio == issi && c.owner == from && self.restoring.contains(*id)).map(|(id, _)| *id).collect();
+                    for id in ended {
+                        self.restoring.remove(&id);
+                        self.private.remove(&id);
+                    }
                 }
                 BREW_SERVICE_MS_RESELECTION => {
                     let json: serde_json::Value = serde_json::from_str(&svc.json_data).unwrap();
@@ -2045,21 +2059,30 @@ fn sim_individual_calls_follow_their_radios_to_another_station() {
         });
         sim.steps(10);
 
-        sim.register(to, radio, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
-        assert_eq!(sim.relay.private[&id].owner, to, "the call moved with the registration");
+        // A radio that keeps its call registers with service restoration roaming, one that gave
+        // it up (every sixth) with plain roaming (TS 100 392-2 clause 16.4 a)).
+        let gives_up = n % 6 == 5;
+        let lu_type = if gives_up {
+            LocationUpdateType::RoamingLocationUpdating
+        } else {
+            LocationUpdateType::ServiceRestorationRoamingLocationUpdating
+        };
+        let reports_before = sim.relay.not_restored.len();
+        sim.register(to, radio, lu_type, &[gssi]);
         sim.run_until(&format!("station {from} lets ISSI {radio}'s call go"), |s| {
             cmce_pdu_to(&s.stations[from].air, radio, CmcePduTypeDl::DRelease)
         });
-        if n % 6 == 5 {
+        if gives_up {
             sim.steps(100);
-            assert!(sim.relay.restoring.contains(&id), "the network still waits for ISSI {radio}");
+            assert!(sim.relay.not_restored.contains(&(to, radio)), "station {to} reports ISSI {radio} has no call");
+            assert!(!sim.relay.restoring.contains(&id), "the network ended ISSI {radio}'s call at once");
             assert!(call_restore_to(&sim.stations[to].air, radio).is_none());
             assert!(sim.relay.restore_requests.iter().all(|(_, issi, _)| *issi != radio));
-            sim.relay.private.remove(&id);
-            sim.relay.restoring.remove(&id);
             not_restored += 1;
             continue;
         }
+        assert_eq!(sim.relay.private[&id].owner, to, "the call moved with the registration");
+        assert!(sim.relay.not_restored[reports_before..].iter().all(|(_, issi)| *issi != radio), "a radio with a call is not reported");
 
         // Simplex: the radio asks for the floor in every other restore; the floor is free.
         let request = duplex || n % 4 == 1;

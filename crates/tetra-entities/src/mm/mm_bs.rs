@@ -9,6 +9,7 @@ use tetra_config::bluestation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Layer2Service, Sap, TdmaTime, TetraAddress, unimplemented_log};
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
+use tetra_saps::control::call_control::CallControl;
 use tetra_saps::lmm::LmmMleUnitdataReq;
 use tetra_saps::{SapMsg, SapMsgInner};
 
@@ -1033,6 +1034,22 @@ impl MmBs {
             }),
         };
         queue.push_back(msg);
+
+        // A plain roaming registration: an MS with a circuit mode call would have asked for
+        // service restoration roaming (clause 16.4 a)), so an individual call that moved here
+        // with it on the network will not be restored. Demand location updating (an answer to
+        // our COMMAND) says nothing about calls and is not reported.
+        if pdu.location_update_type == LocationUpdateType::RoamingLocationUpdating
+            && (net_brew::is_site_linked(&self.config)
+                || (net_brew::is_active(&self.config) && net_brew::is_brew_issi_routable(&self.config, issi)))
+        {
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Mm,
+                dest: TetraEntity::Brew,
+                msg: SapMsgInner::CmceCallControl(CallControl::RegisteredWithoutCall { issi }),
+            });
+        }
 
         // Send D-LOCATION-UPDATE-COMMAND to prompt a full re-registration (TEI + group
         // identity report) ONLY for a genuinely new (unknown) radio that didn't ITSI-attach

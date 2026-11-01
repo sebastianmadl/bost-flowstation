@@ -278,6 +278,11 @@ pub enum CallControl {
         peer: u32,
         call: Option<NetworkRestoredCall>,
     },
+    /// MM → Brew: `issi` registered here with a plain roaming location update. An MS with a
+    /// circuit mode call registers with "service restoration roaming" instead (TS 100 392-2
+    /// clause 16.4 a)), so it has no call to restore: the network may end an individual call that
+    /// moved here with it at once.
+    RegisteredWithoutCall { issi: u32 },
 }
 
 /// An individual call the network moved to this station with its MS (see

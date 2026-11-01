@@ -2125,6 +2125,11 @@ impl TetraEntityTrait for BrewEntity {
                     });
                 }
             }
+            SapMsgInner::CmceCallControl(CallControl::RegisteredWithoutCall { issi }) => {
+                if self.connected {
+                    let _ = self.command_sender.send(BrewCommand::ReportRegisteredWithoutCall { issi });
+                }
+            }
             SapMsgInner::CmceCallControl(CallControl::HandoverDone { issi }) => {
                 self.ho_departing.insert(issi, Instant::now() + HO_DEPARTURE_DELAY);
             }

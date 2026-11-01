@@ -160,6 +160,9 @@ pub enum BrewCommand {
     /// Ask the server for the individual call `issi` restores here with `peer` (only a server
     /// that offered `call-restore`; otherwise answered "no call" at once)
     RequestCallRestore { issi: u32, peer: u32 },
+    /// `issi` registered with a plain roaming location update: it has no call to restore
+    /// (`SERVICE_CALL_NOT_RESTORED`, only to a server that moves calls)
+    ReportRegisteredWithoutCall { issi: u32 },
 
     /// Deregister a subscriber (ISSI)
     DeregisterSubscriber { issi: u32 },
@@ -767,6 +770,17 @@ impl<T: NetworkTransport> BrewWorker<T> {
                             self.send_event(BrewEvent::CallRestoreAnswer { issi, peer, call: None });
                         } else {
                             tracing::info!("BrewWorker: asked the server for ISSI {}'s call with peer {}", issi, peer);
+                        }
+                    }
+                    BrewCommand::ReportRegisteredWithoutCall { issi } => {
+                        if !restores_calls(&self.config.config(), self.transport.server_brew_extensions()) {
+                            continue;
+                        }
+                        let msg = build_service_call_not_restored(issi);
+                        if let Err(e) = self.transport.send_reliable(&msg) {
+                            tracing::error!("BrewWorker: failed to report ISSI {} registered without a call: {}", issi, e);
+                        } else {
+                            tracing::debug!("BrewWorker: ISSI {} registered by roaming, no call to restore", issi);
                         }
                     }
                     BrewCommand::SendHandoverResult(result) => {
@@ -1469,6 +1483,21 @@ password = "x"
         assert_eq!((offered[0][0], offered[0][1]), (BREW_CLASS_SERVICE, BREW_SERVICE_CALL_RESTORE));
         let json = serde_json::from_slice::<serde_json::Value>(&offered[0][2..offered[0].len() - 1]).unwrap();
         assert_eq!(json, serde_json::json!({ "issi": 2320972, "peer": 2320997 }));
+        assert!(run_commands(MockTransport::new().with_brew_extensions(&["bts-info", "handover-v1", "ms-moved"]), commands()).is_empty());
+        assert!(run_commands(MockTransport::new(), commands()).is_empty());
+    }
+
+    #[test]
+    fn a_registration_without_a_call_is_reported_only_to_a_server_that_moves_calls() {
+        let commands = || vec![BrewCommand::ReportRegisteredWithoutCall { issi: 2320972 }];
+        let offered = run_commands(
+            MockTransport::new().with_brew_extensions(&["bts-info", "handover-v1", "ms-moved", BREW_EXT_CALL_RESTORE]),
+            commands(),
+        );
+        assert_eq!(offered.len(), 1);
+        assert_eq!((offered[0][0], offered[0][1]), (BREW_CLASS_SERVICE, BREW_SERVICE_CALL_NOT_RESTORED));
+        let json = serde_json::from_slice::<serde_json::Value>(&offered[0][2..offered[0].len() - 1]).unwrap();
+        assert_eq!(json, serde_json::json!({ "issi": 2320972 }));
         assert!(run_commands(MockTransport::new().with_brew_extensions(&["bts-info", "handover-v1", "ms-moved"]), commands()).is_empty());
         assert!(run_commands(MockTransport::new(), commands()).is_empty());
     }

@@ -1274,6 +1274,46 @@ fn test_moved_to_sibling_cell_drops_registration_silently() {
     );
 }
 
+/// A plain roaming registration tells the Brew entity the radio has no call to restore: an MS
+/// with a circuit mode call registers with service restoration roaming (TS 100 392-2 clause
+/// 16.4 a)). Demand location updating answers our COMMAND and says nothing about calls.
+#[test]
+fn test_plain_roaming_registration_is_reported_as_without_call() {
+    use tetra_saps::control::call_control::CallControl;
+    let reported = |lu_type: LocationUpdateType, brew: bool| {
+        let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
+        if brew {
+            config.cell.local_ssi_ranges = tetra_core::ranges::SortedDisjointSsiRanges::from_vec_ssirange(vec![]);
+            config.brew = Some(tetra_config::bluestation::CfgBrew {
+                host: "brew.example".into(),
+                port: 3000,
+                tls: false,
+                username: None,
+                password: None,
+                reconnect_delay: std::time::Duration::from_secs(1),
+                jitter_initial_latency_frames: 0,
+                feature_sds_enabled: true,
+                whitelisted_ssis: None,
+                feature_rssi_export: false,
+                feature_lip_forward: false,
+                lip_forward_issi: None,
+                pbx_gateway_issis: None,
+                backhaul_hysteresis_secs: 0,
+            });
+        }
+        let mut test = ComponentTest::from_config(config, Some(TdmaTime::default()));
+        test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce, TetraEntity::Brew]);
+        submit_location_update(&mut test, 2320972, 0, lu_type);
+        test.dump_sinks().iter().any(|m| {
+            m.dest == TetraEntity::Brew && matches!(m.msg, SapMsgInner::CmceCallControl(CallControl::RegisteredWithoutCall { issi: 2320972 }))
+        })
+    };
+    assert!(reported(LocationUpdateType::RoamingLocationUpdating, true));
+    assert!(!reported(LocationUpdateType::ServiceRestorationRoamingLocationUpdating, true));
+    assert!(!reported(LocationUpdateType::DemandLocationUpdating, true));
+    assert!(!reported(LocationUpdateType::RoamingLocationUpdating, false), "nothing without Brew");
+}
+
 // ── Detach all + attach (group report) ───────────────────────────────────────────────────────
 
 fn attach_entry(gssi: u32) -> tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink {
