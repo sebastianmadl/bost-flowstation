@@ -1295,8 +1295,12 @@ impl BrewEntity {
             return;
         };
 
+        // CALL_RELEASE reaches here too (the worker sends both end events); for an individual
+        // call the circuit release that follows does the work, so only the label differs.
+        let individual = self.ul_forwarded.values().any(|f| f.uuid == uuid && f.kind == UlForwardKind::Circuit);
         tracing::info!(
-            "BrewEntity: group call ended uuid={} call_id={:?} gssi={} frames={}",
+            "BrewEntity: {} ended uuid={} call_id={:?} gssi={} frames={}",
+            if individual { "individual call" } else { "group call" },
             uuid,
             call.call_id,
             call.dest_gssi,

@@ -52,7 +52,9 @@ impl CcBsSubentity {
                         let (dest_ssi, resend) = match self.cached_setups.get(&call_id) {
                             Some(c) => (c.dest_addr.ssi, c.resend),
                             None => {
-                                tracing::debug!(
+                                // Every few seconds for each individual call (restored ones too):
+                                // trace only.
+                                tracing::trace!(
                                     "CMCE: skipping D-SETUP resend for call_id={} (no cached D-SETUP; likely Brew-routed individual call)",
                                     call_id
                                 );
