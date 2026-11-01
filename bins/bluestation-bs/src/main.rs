@@ -845,12 +845,14 @@ fn main() {
                                         health_registry().set_registered_radios(radio_count);
                                         radio_directory::on_deregister(*issi);
                                     }
-                                    // Left for another cell or station: no longer attached here, but
-                                    // still registered on the network (the directory keeps it).
-                                    TelemetryEvent::MsMovedAway { .. } => {
+                                    // Left for another cell or station: no longer attached to that cell;
+                                    // the directory drops it only when it left the station.
+                                    TelemetryEvent::MsMovedAway { issi, cell } => {
                                         radio_count = health_registry::attached_radios_after(radio_count, &event);
                                         health_registry().set_registered_radios(radio_count);
+                                        radio_directory::on_moved_away(*issi, *cell);
                                     }
+                                    TelemetryEvent::MsCell { issi, cell } => radio_directory::on_cell(*issi, *cell),
                                     TelemetryEvent::MsRssi { issi, rssi_dbfs } => {
                                         health_registry().note_radio_activity();
                                         radio_directory::on_rssi(*issi, *rssi_dbfs);

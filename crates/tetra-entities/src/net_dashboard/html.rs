@@ -13892,6 +13892,10 @@ function handleMsg(msg){
     case 'ms_cell':
       if(state.ms[msg.issi]){state.ms[msg.issi].cell=msg.cell;renderStations();}
       break;
+    case 'ms_moved_away':
+      // Still on the cell it left: it went to another station (a sibling cell's ms_cell moves the row).
+      if(state.ms[msg.issi]&&(state.ms[msg.issi].cell??0)===msg.cell){delete state.ms[msg.issi];delete state.secByIssi[msg.issi];renderStations();renderDgnaPage();}
+      break;
     case 'ms_rssi':
       if(state.ms[msg.issi]){state.ms[msg.issi].rssi_dbfs=msg.rssi_dbfs;state.ms[msg.issi]._last_seen_ts=Date.now();}
       scheduleStationsRender();break;

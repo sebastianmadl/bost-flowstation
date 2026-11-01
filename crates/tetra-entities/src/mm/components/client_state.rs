@@ -618,7 +618,7 @@ impl MmClientMgr {
     pub fn remove_client_quiet(&mut self, ssi: u32) -> Option<MmClientProperties> {
         let client = self.clients.remove(&ssi)?;
         if let Some(sink) = &self.telemetry_sink {
-            sink.send(TelemetryEvent::MsMovedAway { issi: ssi });
+            sink.send(TelemetryEvent::MsMovedAway { issi: ssi, cell: 0 });
         }
         Some(client)
     }
@@ -688,7 +688,7 @@ mod tests {
         while source.try_recv().is_some() {}
 
         assert!(mgr.remove_client_quiet(100).is_some());
-        assert!(matches!(source.try_recv(), Some(TelemetryEvent::MsMovedAway { issi: 100 })));
+        assert!(matches!(source.try_recv(), Some(TelemetryEvent::MsMovedAway { issi: 100, cell: 0 })));
         assert!(source.try_recv().is_none());
         // Nothing to report for a radio that is not here.
         assert!(mgr.remove_client_quiet(100).is_none());

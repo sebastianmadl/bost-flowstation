@@ -273,9 +273,11 @@ pub enum TelemetryEvent {
     /// text, or "timeout". Appended last for bitcode wire-stability.
     OtarSck { issi: u32, sckn: u8, sck_vn: u16, status: String },
     /// A radio left this cell for another cell or station without deregistering: it stays
-    /// registered on the network, so this is not an `MsDeregistration`. Appended last for bitcode
-    /// wire-stability.
-    MsMovedAway { issi: u32 },
+    /// registered on the network, so this is not an `MsDeregistration`. `cell` is the cell it
+    /// left (0 = primary), set by the cell-tagged sink like `MsCell`: a radio whose last `MsCell`
+    /// still names that cell went to another station, not to a sibling cell. Appended last for
+    /// bitcode wire-stability.
+    MsMovedAway { issi: u32, cell: u8 },
 }
 
 impl TelemetryEvent {

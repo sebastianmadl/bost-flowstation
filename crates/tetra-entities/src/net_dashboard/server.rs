@@ -2329,10 +2329,17 @@ impl DashboardServer {
                     let level = if status == "accepted" || status == "sent" { "INFO" } else { "WARN" };
                     s.push_log(level, format!("OTAR SCK {} v{} to ISSI {}: {}", sckn, sck_vn, issi, status));
                 }
-                TelemetryEvent::MsMovedAway { issi } => {
-                    // Still registered on the network: on a sibling cell the radio stays listed
-                    // (its MsCell updates the cell), so only the log notes it.
-                    s.push_log("INFO", format!("MS {} moved to another cell or station", issi));
+                TelemetryEvent::MsMovedAway { issi, cell } => {
+                    // Moved to a sibling cell: its MsCell already put the row on the new cell, so
+                    // it stays listed. A row still on the cell it left means the radio went to
+                    // another station and is no longer attached here.
+                    if s.ms_map.get(issi).is_some_and(|e| e.cell.unwrap_or(0) == *cell) {
+                        s.ms_map.remove(issi);
+                        s.ms_security.remove(issi);
+                        s.push_log("INFO", format!("MS {} moved to another station", issi));
+                    } else {
+                        s.push_log("INFO", format!("MS {} moved to another cell", issi));
+                    }
                 }
                 TelemetryEvent::MsDeregistration { issi } => {
                     s.ms_map.remove(issi);
@@ -2915,7 +2922,7 @@ fn event_to_ws_msg(event: &TelemetryEvent) -> Option<String> {
         TelemetryEvent::OtarSck { issi, sckn, sck_vn, status } => {
             serde_json::json!({"type":"otar_sck","issi":issi,"sckn":sckn,"sck_vn":sck_vn,"status":status})
         }
-        TelemetryEvent::MsMovedAway { .. } => return None,
+        TelemetryEvent::MsMovedAway { issi, cell } => serde_json::json!({"type":"ms_moved_away","issi":issi,"cell":cell}),
         TelemetryEvent::GroupCallStarted {
             call_id,
             gssi,
@@ -9978,6 +9985,31 @@ dest_issi = 2632585
         server.handle_telemetry(TelemetryEvent::MsDeregistration { issi: 2358245 });
         server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 2358245 });
         assert_eq!(snap(2358245), Some((false, false)), "flags are per registration");
+    }
+
+    /// Field case (M5a, H): the radio went to another station, the stack here dropped it (a kick
+    /// found nothing), but the row stayed listed. A move to a sibling cell keeps the row.
+    #[test]
+    fn a_radio_that_moved_to_another_station_leaves_the_list() {
+        let server = DashboardServer::new("/tmp/fs_moved_away_test_config.toml".to_string());
+        let row = |issi: u32| server.state.read().unwrap().snapshot_ms().into_iter().find(|m| m.issi == issi).map(|m| m.cell);
+
+        // Single-cell station: no MsCell, the radio leaves cell 0 for another station.
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 100 });
+        server.handle_telemetry(TelemetryEvent::MsMovedAway { issi: 100, cell: 0 });
+        assert_eq!(row(100), None);
+
+        // Multi-cell: registered on cell 1, then on sibling cell 2, then cell 1 drops it.
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 200 });
+        server.handle_telemetry(TelemetryEvent::MsCell { issi: 200, cell: 1 });
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 200 });
+        server.handle_telemetry(TelemetryEvent::MsCell { issi: 200, cell: 2 });
+        server.handle_telemetry(TelemetryEvent::MsMovedAway { issi: 200, cell: 1 });
+        assert_eq!(row(200), Some(Some(2)), "still listed on the sibling cell");
+
+        // Then cell 2 loses it to another station.
+        server.handle_telemetry(TelemetryEvent::MsMovedAway { issi: 200, cell: 2 });
+        assert_eq!(row(200), None);
     }
 
     /// FH-BUG (brew shown as v0): the transport reports version 0 ("unknown") on every (re)connect

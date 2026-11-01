@@ -371,7 +371,7 @@ mod tests {
         // MsMovedAway decrement the count stays one too high for good ("1 attached, silent").
         let events = [
             TelemetryEvent::MsRegistration { issi: 7 },
-            TelemetryEvent::MsMovedAway { issi: 7 },
+            TelemetryEvent::MsMovedAway { issi: 7, cell: 0 },
             TelemetryEvent::MsRegistration { issi: 7 },
             TelemetryEvent::MsDeregistration { issi: 7 },
         ];
@@ -383,7 +383,7 @@ mod tests {
             })
             .collect();
         assert_eq!(counts, vec![1, 0, 1, 0]);
-        assert_eq!(attached_radios_after(0, &TelemetryEvent::MsMovedAway { issi: 7 }), 0);
+        assert_eq!(attached_radios_after(0, &TelemetryEvent::MsMovedAway { issi: 7, cell: 0 }), 0);
     }
 
     #[test]
