@@ -2,6 +2,8 @@
 
 Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu versión actual.
 
+English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
+
 ## v0.5.5 — Wizard µCell (SoapyMuCell)
 
 - **Wizard µCell.** El asistente y la página Setup pueden instalar el driver `mucell` (placa µCell BB, distinto de SXceiver): clona/compila SoapyMuCell y el overlay `mu-cell-bb_raspberrypi`, escribe `device = "driver=mucell"`, y si el helper imprime `NEED_REBOOT` ofrece reiniciar la Pi (`POST /api/system/reboot`) para cargar el device-tree. Familias de ganancia/antenas alineadas con SXceiver; validación `SoapyDriverFamily::MuCell`.
