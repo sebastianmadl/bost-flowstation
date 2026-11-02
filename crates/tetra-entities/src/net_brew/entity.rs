@@ -2024,6 +2024,10 @@ impl TetraEntityTrait for BrewEntity {
                     carrier_num,
                     ts
                 );
+                // A call restored on another cell of a multi-cell station moves to a new
+                // timeslot: its old one no longer carries this call's uplink.
+                self.ul_forwarded
+                    .retain(|&slot, fwd| slot == (carrier_num, ts) || fwd.uuid != brew_uuid || fwd.kind != UlForwardKind::Circuit);
                 // Register UL forwarding: voice on `ts` gets sent to TetraPack.
                 self.ul_forwarded.insert(
                     (carrier_num, ts),
@@ -2041,6 +2045,12 @@ impl TetraEntityTrait for BrewEntity {
                 // from TetraPack (handle_voice_frame + drain_jitter_playout) are delivered to the MS.
                 // Without this entry handle_voice_frame silently drops all incoming DL audio because
                 // it looks up the uuid in active_calls and finds nothing.
+                if let Some(call) = self.active_calls.get_mut(&brew_uuid) {
+                    // Downlink voice follows the call to its new timeslot (restored on a sibling cell).
+                    call.call_id = Some(call_id);
+                    call.carrier_num = Some(carrier_num);
+                    call.ts = Some(ts);
+                }
                 self.active_calls.entry(brew_uuid).or_insert_with(|| ActiveCall {
                     uuid: brew_uuid,
                     call_id: Some(call_id),

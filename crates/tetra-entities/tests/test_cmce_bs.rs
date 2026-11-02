@@ -3619,6 +3619,35 @@ fn test_restore_with_an_identifier_used_here_by_another_call_asks_the_network() 
     assert!(find_lcmc_req(&msgs, local_issi, CmcePduTypeDl::DRelease).is_none(), "the local call runs on");
 }
 
+/// Multi-cell station (milestone 7): a cell of a linked station asks the site switch the same way
+/// for an individual call it does not hold (the call may run with the network from a sibling
+/// cell), and restores it on a channel here when the switch moves it.
+#[test]
+fn test_site_linked_restore_of_unknown_individual_call_asks_the_switch() {
+    debug::setup_logging_verbose();
+    let mut config = brew_test_config();
+    config.site_linked = true;
+    let mut test = ComponentTest::from_config(config, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew, TetraEntity::Mm],
+    );
+    test.config.state_write().subscribers.register(MOVER);
+    test.submit_message(p2p_call_restore(MOVER, false));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert_eq!(restore_requests(&msgs), vec![(MOVER, RESTORE_PEER)], "asks the switch");
+    assert!(find_lcmc_req(&msgs, MOVER, CmcePduTypeDl::DRelease).is_none(), "waits for the answer");
+
+    test.submit_message(restore_answer(MOVER, Some(moved_call(true, None))));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (restore, chan) = d_call_restore_to(&msgs, MOVER).expect("D-CALL RESTORE, not D-RELEASE");
+    assert_eq!(restore.call_identifier, OLD_CALL_ID);
+    assert!(restore.new_call_identifier.is_some() && chan.is_some());
+    assert!(msgs.iter().any(|m| matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::NetworkCircuitMediaReady { .. }))));
+}
+
 /// The field case of 2026-10-30 (duplex, BS1 → BS2): D-CALL RESTORE keeps the old identifier,
 /// gives this station's as the new one, grants (duplex) and sends the MS to a traffic channel here;
 /// the voice of the call is then bridged to the network.

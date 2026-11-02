@@ -262,7 +262,7 @@ The registered-radios table shows every cell's radios with a C0/C1… badge, the
 
 - The bit layout of the reselection parameters and the neighbour carrier extension follows our reading of EN 300 392-2; check a radio's field-test display if reselection misbehaves.
 - A group call spanning cells shows once per cell in the Calls list (each cell runs its own traffic channel).
-- Individual calls do not survive a change of cell.
+- Individual calls with a Brew party (e.g. the TetraLink app) follow the radio to another cell (U-CALL RESTORE, answered through the site switch). Calls between two radios of the station do not survive a change of cell yet.
 - CPU and USB/network bandwidth for several SDRs on one Pi are untested; start with two cells.
 
 Design notes and per-phase status: [`Docs/multi-cell-plan.md`](Docs/multi-cell-plan.md).

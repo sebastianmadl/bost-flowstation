@@ -160,16 +160,18 @@ impl CcBsSubentity {
             call_id = id;
         }
 
-        // Separate station on a Brew network: an individual call (basic service information
-        // point-to-point, mandatory in U-CALL RESTORE, table 14.22 note 3) the MS had on the
-        // station it left is not here. Ask the network to move it here (`call-restore`); the
-        // answer completes or rejects the restore. Call identifiers are per station, so the
-        // other station's identifier may be in use here by a call the MS is not a party to.
-        if !group_restore
-            && !own_individual_call
-            && brew::is_active(&self.config)
-            && !brew::is_site_linked(&self.config)
-        {
+        // An individual call (basic service information point-to-point, mandatory in U-CALL
+        // RESTORE, table 14.22 note 3) the MS had on the cell it left is not here. Ask the network
+        // to move it here: the site switch when it runs on a sibling cell of this station, else
+        // the Brew network (`call-restore`, separate stations); the answer completes or rejects
+        // the restore. Call identifiers are per cell, so the other cell's identifier may be in use
+        // here by a call the MS is not a party to. A leg pre-provisioned by the site switch's
+        // announced handover (above) is the MS's own call already.
+        let party_here = self
+            .individual_calls
+            .get(&call_id)
+            .is_some_and(|c| sender.ssi == c.calling_addr.ssi || sender.ssi == c.called_addr.ssi);
+        if !group_restore && !party_here && (brew::is_site_linked(&self.config) || brew::is_active(&self.config)) {
             let peer = pdu.other_party_ssi.unwrap_or(0) as u32;
             tracing::info!(
                 "CMCE: U-CALL RESTORE from ISSI {} for call_id={} peer={} — not held here, asking the network",

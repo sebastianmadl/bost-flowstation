@@ -55,7 +55,7 @@ the native codec). Suggested test with two Pluto+ and Brew enabled, in this orde
 ## Known limits (by design, documented)
 
 - Linking needs Brew or LST; without them each cell runs alone (Asterisk then primary-only).
-- Individual calls don't survive a change of cell.
+- Individual calls between two radios of the station don't survive a change of cell yet; calls with a Brew party do (the switch answers the new cell's `IndividualCallRestoreRequest`, see `net_site/switch.rs` `restore_from_sibling`).
 - A group call spanning cells shows once per cell in the Calls list.
 - Only MM's first answer to a forwarded registration is captured; follow-up MM PDUs go on air on
   the target cell.
