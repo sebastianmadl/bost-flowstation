@@ -808,6 +808,16 @@ fn group_release_sent(air: &[SapMsg], gssi: u32) -> bool {
     })
 }
 
+fn group_setups(air: &[SapMsg], gssi: u32) -> usize {
+    air_to(air, gssi)
+        .iter()
+        .filter(|bits| {
+            bits.strip_prefix(PD_CMCE)
+                .is_some_and(|rest| BitBuffer::from_bitstr(rest).peek_bits(5) == Some(CmcePduTypeDl::DSetup.into_raw()))
+        })
+        .count()
+}
+
 fn group_setup_call_id(air: &[SapMsg], gssi: u32) -> Option<u16> {
     air_to(air, gssi).iter().rev().find_map(|bits| {
         let rest = bits.strip_prefix(PD_CMCE)?;
@@ -1260,8 +1270,17 @@ fn sim_group_report_after_reselection_keeps_the_call_running() {
             let call_id = sim.local_call_id(to, gssi);
 
             sim.register(to, issi, LocationUpdateType::RoamingLocationUpdating, &[]);
+            // The radio ignored the D-SETUP sent before its own registration (field test
+            // 2026-11-02, F1): its group attach must bring the late-entry D-SETUP again at once,
+            // not only with the periodic one 5 multiframes later.
+            let setups_before = group_setups(&sim.stations[to].air, gssi);
             sim.submit(to, u_attach_detach_all(issi, &[gssi]));
-            sim.steps(100);
+            sim.steps(4);
+            assert!(
+                group_setups(&sim.stations[to].air, gssi) > setups_before,
+                "station {to} repeats the late-entry D-SETUP on {gssi} after ISSI {issi} attached again"
+            );
+            sim.steps(96);
             assert!(!group_release_sent(&sim.stations[to].air, gssi), "station {to} released the call on {gssi}");
             assert_eq!(sim.local_call_id(to, gssi), call_id, "station {to} kept the call identifier");
             assert!(sim.relay.calls.contains_key(&session), "the over on {gssi} still runs");

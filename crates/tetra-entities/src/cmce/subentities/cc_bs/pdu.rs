@@ -109,6 +109,37 @@ impl CcBsSubentity {
             },
         );
 
+        self.send_late_entry_d_setup(queue, call_id, gssi, carrier_num, ts, usage, tx_active);
+    }
+
+    /// A radio attached again to a group it was already counted in (U-ATTACH/DETACH GROUP
+    /// IDENTITY after its own roaming registration, which made it drop its group attachments,
+    /// clause 16.4.1.1 a)): repeat the late-entry D-SETUP of a call already running on `gssi`
+    /// at once. A D-SETUP sent between the station's registration and the radio's own one is
+    /// ignored by the radio, and the periodic one only comes every 5 multiframes.
+    pub(super) fn repeat_late_entry_for_reattached_gssi(&mut self, queue: &mut MessageQueue, gssi: u32) {
+        let Some((call_id, carrier_num, ts, usage, tx_active)) = self
+            .active_calls
+            .iter()
+            .find(|(_, c)| c.dest_gssi == gssi)
+            .map(|(&id, c)| (id, c.carrier_num, c.ts, c.usage, c.is_tx_active()))
+        else {
+            return;
+        };
+        self.send_late_entry_d_setup(queue, call_id, gssi, carrier_num, ts, usage, tx_active);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_late_entry_d_setup(
+        &mut self,
+        queue: &mut MessageQueue,
+        call_id: u16,
+        gssi: u32,
+        carrier_num: u16,
+        ts: u8,
+        usage: u8,
+        tx_active: bool,
+    ) {
         let Some(cached) = self.cached_setups.get_mut(&call_id) else {
             return;
         };
@@ -547,13 +578,19 @@ impl CcBsSubentity {
             }
             BrewSubscriberAction::Affiliate => {
                 let mut new_groups = Vec::new();
+                let mut reattached = Vec::new();
                 {
                     let entry = self.subscriber_groups.entry(issi).or_insert_with(HashSet::new);
                     for gssi in groups {
                         if entry.insert(gssi) {
                             new_groups.push(gssi);
+                        } else {
+                            reattached.push(gssi);
                         }
                     }
+                }
+                for gssi in &reattached {
+                    self.repeat_late_entry_for_reattached_gssi(queue, *gssi);
                 }
                 for gssi in &new_groups {
                     // A restore already counted this MS for the group: MM's affiliation takes

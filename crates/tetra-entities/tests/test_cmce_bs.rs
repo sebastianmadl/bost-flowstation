@@ -3020,6 +3020,73 @@ fn test_affiliate_during_active_group_call_emits_late_entry_snapshot() {
     );
 }
 
+/// A radio that arrives on a cell during a group call is registered first (answer to the
+/// station's D-LOCATION UPDATE COMMAND, which already joins it to the call), then does its own
+/// roaming registration and attaches its groups again (clause 16.4.1.1 a)). The late-entry
+/// D-SETUP sent before that is ignored by the radio, so the re-attach must repeat it at once
+/// instead of leaving the radio until the periodic one (field test 2026-11-02, F1).
+#[test]
+fn test_reattach_during_active_group_call_repeats_late_entry_d_setup() {
+    debug::setup_logging_verbose();
+
+    let gssi = 334;
+    let issi = 2200704;
+    let brew_uuid = uuid::Uuid::parse_str("c1a1e03c-0489-4106-a246-5ccddf75e65b").unwrap();
+    let mut test = ComponentTest::from_config(brew_test_config(), Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew],
+    );
+
+    // Re-attach without a call on the group: nothing to send.
+    register_subscriber(&mut test, issi, gssi);
+    let affiliate = || SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Mm,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::MmSubscriberUpdate(MmSubscriberUpdate {
+            issi,
+            groups: vec![gssi],
+            action: BrewSubscriberAction::Affiliate,
+        }),
+    };
+    test.submit_message(affiliate());
+    test.run_stack(Some(1));
+    assert_eq!(count_d_setups(&test.dump_sinks()), 0, "no call on the group, no D-SETUP");
+
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::NetworkCallStart {
+            brew_uuid,
+            source_issi: 2200107,
+            dest_gssi: gssi,
+            priority: 1,
+        }),
+    });
+    test.run_stack(Some(2));
+    let mut ready = test.dump_sinks();
+    for r in extract_d_setup_reporters(&mut ready) {
+        if r.get_state() == TxState::Pending {
+            r.mark_transmitted();
+        }
+    }
+
+    // The radio attaches the group it is already counted in once more.
+    test.submit_message(affiliate());
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(count_d_setups(&msgs) > 0, "re-attach during the call must repeat the late-entry D-SETUP at once");
+    assert!(
+        !msgs.iter().any(|m| matches!(
+            &m.msg,
+            SapMsgInner::CmceCallControl(CallControl::OngoingGroupCall { .. } | CallControl::GroupListenersAvailable { .. })
+        )),
+        "a re-attach is no new listener for Brew or the LST console"
+    );
+}
+
 /// Mid-QSO deaffiliate of the last listener must Hold (not End) so re-Affiliate can late-enter.
 #[test]
 fn test_deaffiliate_last_listener_holds_network_call() {
