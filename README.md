@@ -35,7 +35,7 @@ Based on FlowStation by **Razvan Zeces / YO6RZV** (itself built on [tetra-bluest
 | Sidebar update badge | Glance notice when a newer commit is available on the **active OTA channel** |
 | Spanish-first UI (multi-language) | Ready for operators who prefer ES |
 | **Multi-cell** *(new in v0.5.0)* | One station, several SDRs: each SDR is one more TETRA cell, linked for calls, SDS and handover |
-| **Moving between stations** | Separate stations on one Brew server keep a radio's group and individual calls when it changes station |
+| **Roaming between stations** *(new in v0.5.6)* | Separate stations on one Brew server keep a radio's group and individual calls when it changes station |
 | **Ambience Listening (SS-AL)** *(new in v0.5.4)* | Dispatcher-invoked receive-only call: a supporting radio connects and keys its mic on its own (indicated on the radio, not covert) |
 | **Request for Location (LIP)** *(new in v0.5.4)* | Dispatcher asks a radio for its position (once or polled); the LIP report reaches the console that requested it |
 
@@ -267,7 +267,7 @@ The registered-radios table shows every cell's radios with a C0/C1… badge, the
 
 Design notes and per-phase status: [`Docs/multi-cell-plan.md`](Docs/multi-cell-plan.md).
 
-## Moving between stations over Brew
+## Roaming between stations over Brew *(v0.5.6)*
 
 Two or more separate stations on the same Brew server can keep a radio's calls when it moves from one to the other. The radio decides when it changes cells (TETRA cell reselection, ETSI TS 100 392-2 clause 18.3.4); the stations and the server only make sure the call is there when it arrives.
 
@@ -282,7 +282,7 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 
 ### What it needs
 
-- A Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade, e.g. brew-server with its `docs/Handover.md`). The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
+- brew-server 1.20.0 or newer, or another Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade; see brew-server `docs/Handover.md` and `docs/Brew-Extensions.md`). Until it is released upstream, 1.20.0 is only in the fork `sebastianmadl/brew-server`, branch `handover`. The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
 - One cell per station: a multi-cell station hands over between its own cells (see above) but is not a cross-station target yet.
 - Each station lists the other as a neighbour. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
 
