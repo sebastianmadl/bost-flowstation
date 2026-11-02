@@ -5740,6 +5740,11 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                         </select>
                       </label>
                       <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-reverse"> <span><span data-i18n="ui_reverse_operation">Reverse operation</span></span></label>
+                      <label class="field"><span data-i18n="cfg_rxlev_min">Min. access level (dBm)</span>
+                        <select id="vc-rxlev-min" class="form-input">
+                          <option value="" data-i18n="cfg_rxlev_default">Default (−110)</option><option value="-125">-125</option><option value="-120">-120</option><option value="-115">-115</option><option value="-110">-110</option><option value="-105">-105</option><option value="-100">-100</option><option value="-95">-95</option><option value="-90">-90</option><option value="-85">-85</option><option value="-80">-80</option><option value="-75">-75</option><option value="-70">-70</option><option value="-65">-65</option><option value="-60">-60</option><option value="-55">-55</option><option value="-50">-50</option>
+                        </select>
+                      </label>
                     </div>
                   </details>
                   <details style="margin-top:14px" id="vc-hw-rf-details">
@@ -5809,6 +5814,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                       <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-syswide"> <span><span data-i18n="ui_system_wide_services">System-wide services</span></span></label>
                       <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-late-entry" checked> <span data-i18n="cfg_late_entry">Late entry</span></label>
                       <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-voice"> <span><span data-i18n="ui_voice_service">Voice service</span></span></label>
+                      <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-migration"> <span data-i18n="cfg_migration">Migration supported</span></label>
                       <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-recovery"> <span data-i18n="cfg_recovery">Restart recovery (proactive)</span></label>
                       <label class="field"><span><span data-i18n="ui_local_ssi_ranges">Local SSI ranges</span></span><input type="text" id="vc-local-ssi" class="form-input" placeholder="0-90, 100-120"></label>
                     </div>
@@ -7770,6 +7776,7 @@ const LANGS={
     cfg_help_custom_duplex:'Optional duplex spacing in MHz (e.g. 7.6). Empty = use duplex spacing id. Overrides the table id when set.',
     cfg_help_freq_offset:'Fine carrier offset in Hz (±6250 / ±12500). Usually 0.',
     cfg_help_reverse:'Swap UL/DL sense of the duplex. Rare; leave off unless your plan requires reverse operation.',
+    cfg_rxlev_min:'Min. access level (dBm)',cfg_rxlev_default:'Default (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN in SYSINFO (ETSI table 21.65): radios below this level cannot use the cell, and a higher value makes them reselect a better neighbour earlier. −125 to −50 dBm in 5 dB steps; default −110. Use the same value on neighbouring stations or set it per neighbour. See Docs/cell-reselection.md.',cfg_migration:'Migration supported',cfg_help_migration:'BS service details in SYSINFO: migration is supported by this cell (ETSI 18.5.2.1), i.e. radios of another network (other MCC/MNC) may register here. A neighbour with a different MCC/MNC must support migration. Default off.',
     cfg_help_hw_device:'SoapySDR device string from Setup. Change device in Setup, not here.',
     cfg_help_ppm:'Frequency correction in PPM (comma or dot). Empty/reset not used — typically 0.',
     cfg_help_rx_ant:'RX antenna port for this SDR driver. Empty = device default.',
@@ -8370,6 +8377,7 @@ const LANGS={
     cfg_help_custom_duplex:'Separación de dúplex en MHz (p. ej. 7,6). Vacío = usar el id de tabla. Si lo rellenas, manda sobre el id.',
     cfg_help_freq_offset:'Offset fino de portadora en Hz (±6250 / ±12500). Normalmente 0.',
     cfg_help_reverse:'Invierte el sentido UL/DL del dúplex. Raro; déjalo apagado salvo que tu plan lo exija.',
+    cfg_rxlev_min:'Nivel mín. de acceso (dBm)',cfg_rxlev_default:'Por defecto (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN en SYSINFO (ETSI tabla 21.65): las radios por debajo de este nivel no pueden usar la celda, y un valor más alto hace que reseleccionen antes una vecina mejor. −125 a −50 dBm en pasos de 5 dB; por defecto −110. Usa el mismo valor en las estaciones vecinas o ajústalo por vecina. Ver Docs/cell-reselection.md.',cfg_migration:'Migración admitida',cfg_help_migration:'Detalles de servicio en SYSINFO: esta celda admite migración (ETSI 18.5.2.1), es decir, radios de otra red (otro MCC/MNC) pueden registrarse aquí. Una vecina con otro MCC/MNC debe admitir migración. Apagado por defecto.',
     cfg_help_hw_device:'Cadena SoapySDR del dispositivo (viene de Setup). Cambia el SDR en Setup, no aquí.',
     cfg_help_ppm:'Corrección de frecuencia en PPM (coma o punto). Suele ser 0.',
     cfg_help_rx_ant:'Puerto de antena RX del driver. Vacío = default del dispositivo.',
@@ -15570,7 +15578,7 @@ const CFG_HELP_BY_ID={
   'vc-tx-freq':'cfg_help_tx','vc-rx-freq':'cfg_help_rx','vc-colour':'cfg_help_colour',
   'vc-dual-carrier':'cfg_dual_help','vc-secondary-carrier':'cfg_dual_help',
   'vc-main-carrier':'cfg_help_main_carrier','vc-freq-band':'cfg_help_freq_band','vc-duplex-id':'cfg_help_duplex_id',
-  'vc-custom-duplex':'cfg_help_custom_duplex','vc-freq-offset':'cfg_help_freq_offset','vc-reverse':'cfg_help_reverse',
+  'vc-custom-duplex':'cfg_help_custom_duplex','vc-freq-offset':'cfg_help_freq_offset','vc-reverse':'cfg_help_reverse','vc-rxlev-min':'cfg_help_rxlev_min','vc-migration':'cfg_help_migration',
   'vc-device':'cfg_help_hw_device','vc-ppm':'cfg_help_ppm','vc-rx-ant':'cfg_help_rx_ant','vc-tx-ant':'cfg_help_tx_ant',
   'vc-rx-lna':'cfg_help_gain','vc-rx-tia':'cfg_help_gain','vc-rx-pga':'cfg_help_gain',
   'vc-tx-pad':'cfg_help_gain','vc-tx-iamp':'cfg_help_gain','vc-tx-dac':'cfg_help_gain','vc-tx-mixer':'cfg_help_gain','vc-tx-pga':'cfg_help_gain',
@@ -15705,6 +15713,7 @@ function collectVisualConfig(){
     system_wide_services:!!document.getElementById('vc-syswide')?.checked,
     late_entry_supported:document.getElementById('vc-late-entry')?!!document.getElementById('vc-late-entry').checked:true,
     voice_service:!!document.getElementById('vc-voice')?.checked,
+    migration:!!document.getElementById('vc-migration')?.checked,
   };
   const dualOn=!!document.getElementById('vc-dual-carrier')?.checked;
   cell_info.dual_carrier_enabled=dualOn;
@@ -15719,6 +15728,8 @@ function collectVisualConfig(){
   }
   const customDuplex=mhzFieldToHz('vc-custom-duplex'); if(customDuplex!==null)cell_info.custom_duplex_spacing=customDuplex;
   const tz=vcStr('vc-tz'); if(tz)cell_info.timezone=tz;
+  // Empty = omit key (server prunes TOML -> -110 dBm default).
+  const rxlev=vcNum('vc-rxlev-min'); if(rxlev!==null)cell_info.rxlev_access_min_dbm=rxlev;
   // Timers: empty = omit key (server prunes TOML → engine defaults). Explicit 0 kept where valid.
   const ht=vcNum('vc-hangtime'); if(ht!==null)cell_info.hangtime_secs=ht;
   const ct=vcNum('vc-call-timeout'); if(ct!==null)cell_info.call_timeout_secs=ct;
@@ -15782,7 +15793,8 @@ function fillVisualConfig(d,opts){
   vcSet('vc-call-timeout',cell.call_timeout_secs); vcSet('vc-ul-inact',cell.ul_inactivity_secs);
   vcSet('vc-t351',cell.periodic_registration_secs);
   syncAllVcTimerResets();
-  vcSet('vc-syswide',!!cell.system_wide_services); vcSet('vc-late-entry',cell.late_entry_supported!==false); vcSet('vc-voice',cell.voice_service!==false);
+  vcSet('vc-syswide',!!cell.system_wide_services); vcSet('vc-late-entry',cell.late_entry_supported!==false); vcSet('vc-voice',cell.voice_service!==false); vcSet('vc-migration',!!cell.migration);
+  vcSet('vc-rxlev-min',cell.rxlev_access_min_dbm!=null?String(cell.rxlev_access_min_dbm):'');
   vcSet('vc-recovery',!!(d&&d.recovery&&d.recovery.enabled));
   vcSet('vc-local-ssi',formatLocalSsiRanges(cell.local_ssi_ranges));
   const net=d?.net_info||{}; vcSet('vc-mcc',net.mcc); vcSet('vc-mnc',net.mnc);
