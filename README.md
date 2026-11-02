@@ -282,7 +282,7 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 
 ### What it needs
 
-- brew-server 1.20.0 or newer, or another Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade; see brew-server `docs/Handover.md` and `docs/Brew-Extensions.md`). Until it is released upstream, 1.20.0 is only in the fork `sebastianmadl/brew-server`, branch `handover`. The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
+- [brew-server](https://github.com/ysamouhos/brew-server) 1.20.0 or newer (when released), or another Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade; see brew-server `docs/Handover.md` and `docs/Brew-Extensions.md`). The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
 - One cell per station: a multi-cell station hands over between its own cells (see above) but is not a cross-station target yet.
 - Each station lists the other as a neighbour. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
 
@@ -463,6 +463,7 @@ For Asterisk, DAPNET, Snom, GeoAlarm and deep protocol notes, use the upstream d
 - **Aitor, EA4HBL** — this fork (install, Setup, visual config, OTA UX, Spanish UI).
 - **Yiannis Samouhos, ysamouhos** — Multi-cell support with multiple SDR and AIE.
 - **David Harcus, MM7FDM** — TETRA authentication (TAA1), TEA2/TEA3, SCK OTAR, the Security dashboard page, USRP B210 support, the WAP packet-data (SNDCP) gateway with its live status page, and end-to-end encryption (E2EE) of SDS.
+- **Sebastian, OE4SXM** ([sebastianmadl](https://github.com/sebastianmadl)) — roaming between stations over Brew (group and individual calls across stations, announced and unannounced cell reselection), configurable minimum access level, English changelog.
 
 ---
 
