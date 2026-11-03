@@ -2669,6 +2669,17 @@ impl MmBs {
                 .client_mgr
                 .should_send_registration_command_now(issi, ts, interval_secs, presence_secs, EE_WINDOW_WAIT_SECS, now)
             {
+                if net_brew::is_site_linked(&self.config) {
+                    // Multi-cell: within its location area the radio may have changed cell
+                    // without registering (TS 100 392-2 clause 18.3.4.7.1a); the site switch
+                    // has the area's other cells ask too.
+                    queue.push_back(SapMsg {
+                        sap: Sap::Control,
+                        src: TetraEntity::Mm,
+                        dest: TetraEntity::Brew,
+                        msg: SapMsgInner::CmceCallControl(CallControl::SitePresenceProbe { issi }),
+                    });
+                }
                 if let Some(receipt) = self.send_registration_check(queue, issi, presence_secs != 0) {
                     self.client_mgr.queue_registration_command(issi, now);
                     self.registration_probe_receipts.insert(issi, receipt);
@@ -3360,10 +3371,15 @@ mod presence_tests {
     use crate::net_telemetry::{TelemetryEvent, channel::telemetry_channel};
 
     fn station() -> (MmBs, crate::net_telemetry::channel::TelemetrySource) {
+        station_linked(false)
+    }
+
+    fn station_linked(site_linked: bool) -> (MmBs, crate::net_telemetry::channel::TelemetrySource) {
         let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
         cfg.cell.periodic_registration_secs = 3600;
         cfg.cell.presence_check_secs = 30;
         cfg.cell.presence_response_secs = 60;
+        cfg.site_linked = site_linked;
         let shared = SharedConfig::from_parts(cfg, None);
         let (sink, events) = telemetry_channel();
         let mut mm = MmBs::new(shared, Some(sink), None);
@@ -3498,6 +3514,30 @@ mod presence_tests {
         mm.drive_registration_checks(&mut queue, next, now, true);
         assert!(queue.pop_front().is_some());
         assert!(queue.pop_front().is_none());
+    }
+
+    fn probes(queue: &mut MessageQueue) -> Vec<u32> {
+        std::iter::from_fn(|| queue.pop_front())
+            .filter_map(|m| match m.msg {
+                SapMsgInner::CmceCallControl(CallControl::SitePresenceProbe { issi }) if m.dest == TetraEntity::Brew => Some(issi),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_site_linked_cell_has_its_location_area_siblings_check_presence_too() {
+        let now = Instant::now() + Duration::from_secs(31);
+        let ts = TdmaTime { t: 1, f: 1, m: 1, h: 0 };
+        for linked in [false, true] {
+            let (mut mm, _) = station_linked(linked);
+            radio(&mut mm, 100);
+            mm.registration_check_last_tick = Some(now - Duration::from_secs(1));
+            let mut queue = MessageQueue::new();
+            mm.drive_registration_checks(&mut queue, ts, now, true);
+            let expected: Vec<u32> = if linked { vec![100] } else { vec![] };
+            assert_eq!(probes(&mut queue), expected, "linked = {linked}");
+        }
     }
 
     #[test]

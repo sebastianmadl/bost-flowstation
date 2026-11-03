@@ -20,6 +20,7 @@ impl CcBsSubentity {
             deferred_individual_restores: Vec::new(),
             handover_reservations: Vec::new(),
             restore_listeners: HashSet::new(),
+            area_members: HashMap::new(),
         }
     }
 
@@ -497,6 +498,37 @@ impl CcBsSubentity {
             .iter()
             .find(|(_, call)| call.calling_addr.ssi == issi || call.called_addr.ssi == issi)
             .map(|(call_id, call)| (*call_id, call.state))
+    }
+
+    /// Multi-cell (site switch): `issi`, registered on a sibling cell of this cell's location area,
+    /// counts as a listener of `groups` here, so group calls to them run on this cell too: within
+    /// its registered area a radio changes cell without registering (TS 100 392-2 clause
+    /// 18.3.4.7.1a), so the SwMI does not know which of the area's cells it listens to.
+    /// It may also be called here: the switch pages it on every cell of the area.
+    pub(super) fn set_area_members(&mut self, queue: &mut MessageQueue, issi: u32, groups: Option<Vec<u32>>) {
+        let here = groups.is_some();
+        let new: HashSet<u32> = groups.unwrap_or_default().into_iter().collect();
+        let old = self.area_members.remove(&issi).unwrap_or_default();
+        for gssi in old.difference(&new) {
+            self.dec_group_listener(*gssi);
+            self.drop_group_calls_if_unlistened(queue, *gssi);
+        }
+        for gssi in new.difference(&old) {
+            let first_listener = !self.has_listener(*gssi);
+            self.inc_group_listener(*gssi);
+            if first_listener {
+                Self::push_control(queue, TetraEntity::Brew, CallControl::GroupListenersAvailable { gssi: *gssi });
+            }
+        }
+        if here {
+            tracing::debug!("CMCE: ISSI {} may be here (same location area), groups {:?}", issi, new);
+            self.area_members.insert(issi, new);
+        }
+    }
+
+    /// `issi` is registered on a sibling cell of this cell's location area (see `set_area_members`).
+    pub(super) fn is_area_member(&self, issi: u32) -> bool {
+        self.area_members.contains_key(&issi)
     }
 
     pub(super) fn drop_group_calls_if_unlistened(&mut self, queue: &mut MessageQueue, gssi: u32) {

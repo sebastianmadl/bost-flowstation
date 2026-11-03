@@ -28,6 +28,17 @@ use super::sec_tpg2200_action::{CfgTpg2200ActionDto, apply_tpg2200_action_patch}
 use super::sec_wx::{CfgWxServiceDto, apply_wx_service_patch};
 use super::{PhyIoDto, phy_dto_to_cfg};
 
+/// A `neighbor_cells_ca` array of tables (`what` names it in errors).
+pub(crate) fn parse_neighbour_list(v: Value, what: &str) -> Result<Vec<CfgNeighborCellCa>, String> {
+    // v is a Value::Array of Value::Table — deserialise via serde
+    let tables = v.try_into::<Vec<toml::Table>>().map_err(|e| format!("{what}: {e}"))?;
+    tables
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| Value::Table(t).try_into::<CfgNeighborCellCa>().map_err(|e| format!("{what}[{i}]: {e}")))
+        .collect()
+}
+
 /// Build `StackConfig` from a TOML configuration file
 pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::Error>> {
     // Parse once as raw Value so we can extract neighbor_cells_ca before
@@ -47,22 +58,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
                 None
             }
         })
-        .map(|v| {
-            // v is a Value::Array of Value::Table — deserialise via serde
-            v.try_into::<Vec<toml::Table>>()
-                .map_err(|e| format!("cell_info.neighbor_cells_ca: {}", e))
-                .and_then(|tables| {
-                    tables
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, t)| {
-                            Value::Table(t)
-                                .try_into::<CfgNeighborCellCa>()
-                                .map_err(|e| format!("cell_info.neighbor_cells_ca[{}]: {}", i, e))
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-        })
+        .map(|v| parse_neighbour_list(v, "cell_info.neighbor_cells_ca"))
         .transpose()?
         .unwrap_or_default();
 

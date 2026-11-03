@@ -2368,3 +2368,91 @@ fn sim_multi_cell_individual_calls_follow_their_radios_between_cells_with_own_lo
 fn sim_multi_cell_individual_calls_follow_their_radios_between_cells_in_one_location_area() {
     individual_calls_follow_their_radios_between_cells(1);
 }
+
+/// Milestone 7: within its location area a radio changes cell without registering (TS 100 392-2
+/// clause 18.3.4.7.1a), so a group call to the members of one cell of a multi-cell station runs on
+/// every cell of that cell's location area; with an own location area per cell it stays on the
+/// members' cell. 26 radios, all registered on the primary cell; the talkers are on station 2.
+fn group_calls_on_the_cells_of_the_members_location_area(cell1_la: u16) {
+    let extensions = ["bts-info", "handover-v1", "ms-cell"];
+    let mut sim = multi_cell_sim(cell1_la, &extensions);
+    let same_la = cell1_la == 1;
+    for n in 0..26u32 {
+        register_on_cell(&mut sim, 0, FIRST_ISSI + 600 + n, LocationUpdateType::RoamingLocationUpdating, &[GROUPS[n as usize % 5]]);
+    }
+    for (n, &gssi) in GROUPS.iter().enumerate() {
+        let talker = FIRST_ISSI + 700 + n as u32;
+        sim.register(2, talker, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+        sim.clear_air();
+        let session = sim.start_call(2, talker, gssi);
+        sim.run_until(&format!("the primary cell sets up {gssi}"), |s| group_setups(&s.stations[0].air, gssi) > 0);
+        sim.steps(40);
+        assert_eq!(
+            group_setups(&sim.stations[SIBLING].air, gssi) > 0,
+            same_la,
+            "group {gssi} on the sibling cell (location area {cell1_la})"
+        );
+        sim.end_call(2, talker, gssi, session);
+    }
+}
+
+#[test]
+fn sim_multi_cell_group_calls_run_on_every_cell_of_one_location_area() {
+    group_calls_on_the_cells_of_the_members_location_area(1);
+}
+
+#[test]
+fn sim_multi_cell_group_calls_stay_on_the_members_cell_with_own_location_areas() {
+    group_calls_on_the_cells_of_the_members_location_area(11);
+}
+
+/// Milestone 7: an individual call from the network (the TetraLink app) to a radio that changed
+/// cell idle within the location area of a multi-cell station, without registering (TS 100 392-2
+/// clause 18.3.4.7.1a). Both cells page it; it answers on the cell it is on, which takes the call,
+/// and the other cell lets go without a release to the network. 26 radios registered on the
+/// primary cell; every second one has moved to the sibling cell.
+#[test]
+fn sim_multi_cell_individual_call_reaches_a_radio_that_moved_within_the_location_area() {
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED, BREW_EXT_CALL_RESTORE];
+    let mut sim = multi_cell_sim(1, &extensions);
+    let radios: Vec<u32> = (0..26).map(|r| FIRST_ISSI + 800 + r).collect();
+    for (n, &radio) in radios.iter().enumerate() {
+        register_on_cell(&mut sim, 0, radio, LocationUpdateType::RoamingLocationUpdating, &[GROUPS[n % 5]]);
+    }
+    for (n, &radio) in radios.iter().enumerate() {
+        sim.clear_air();
+        let on = if n % 2 == 1 { SIBLING } else { 0 };
+        let other = if on == 0 { SIBLING } else { 0 };
+        let duplex = n % 3 != 0;
+        let id = Uuid::from_u128(0x7B00 + n as u128);
+        sim.relay.call_radio(id, 2_200_801 + n as u32, radio, 0, duplex, &sim.wires);
+        sim.run_until(&format!("both cells page ISSI {radio}"), |s| {
+            individual_setup_call_id(&s.stations[0].air, radio).is_some() && individual_setup_call_id(&s.stations[SIBLING].air, radio).is_some()
+        });
+        let call_id = individual_setup_call_id(&sim.stations[on].air, radio).unwrap();
+        sim.submit(on, u_connect(radio, call_id, duplex));
+        sim.run_until(&format!("ISSI {radio}'s call is connected on cell {on}"), |s| {
+            cmce_pdu_to(&s.stations[on].air, radio, CmcePduTypeDl::DConnectAcknowledge)
+        });
+        sim.run_until(&format!("cell {other} stops paging ISSI {radio}"), |s| {
+            cmce_pdu_to(&s.stations[other].air, radio, CmcePduTypeDl::DRelease)
+        });
+        assert!(!sim.relay.call_releases.iter().any(|(_, c, _)| *c == id), "nobody ended the call on the network");
+
+        // Voice from the network reaches the cell the radio answered on.
+        let carrier = sim.stations[on].carrier;
+        for _ in 0..8 {
+            sim.wires[0].lock().unwrap().to_station.push_back(build_voice_frame(&id, 274, &[0u8; 36]));
+        }
+        sim.run_until(&format!("cell {on} plays the app's voice to ISSI {radio}"), |s| {
+            s.stations[on].voice_down.iter().any(|(c, _)| *c == carrier)
+        });
+
+        sim.wires[0].lock().unwrap().to_station.push_back(build_call_release(&id, 1));
+        sim.relay.private.remove(&id);
+        sim.run_until(&format!("cell {on} releases ISSI {radio}"), |s| {
+            cmce_pdu_to(&s.stations[on].air, radio, CmcePduTypeDl::DRelease)
+        });
+        sim.steps(20);
+    }
+}

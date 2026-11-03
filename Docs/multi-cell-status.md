@@ -57,6 +57,8 @@ the native codec). Suggested test with two Pluto+ and Brew enabled, in this orde
 - Linking needs Brew or LST; without them each cell runs alone (Asterisk then primary-only).
 - Individual calls between two radios of the station don't survive a change of cell yet; calls with a Brew party do (the switch answers the new cell's `IndividualCallRestoreRequest`, see `net_site/switch.rs` `restore_from_sibling`).
 - A group call spanning cells shows once per cell in the Calls list.
+- Cells sharing a location area: group calls run on every cell of a member's area (`SiteAreaMembers` to the sibling CMCEs) and presence checks are repeated there (`SitePresenceProbe` → `MmRequestLocationUpdate`); network individual call setups are paged on every cell of the area (`CircuitCall.paging`, first cell to alert/connect wins, the others get a silent release); an individual SDS or a radio-to-radio call to an idle radio still goes to the cell it last registered on until it transmits or answers a presence check.
+- Extra cells may have their own neighbour list (`[[cells.cell_info.neighbor_cells_ca]]`); without one they advertise only the siblings. Dashboard page Roaming (`net_dashboard/roaming.rs`, `/api/roaming`).
 - Only MM's first answer to a forwarded registration is captured; follow-up MM PDUs go on air on
   the target cell.
 - CPU / bandwidth with several SDRs on one Pi untested; start with two cells.

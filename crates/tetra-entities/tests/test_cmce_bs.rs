@@ -4209,3 +4209,63 @@ fn test_moved_network_talker_restore_forgets_old_session() {
 
     end_old_session_keeps_over(&mut test, gssi, brew_uuid);
 }
+
+fn site_area_members(issi: u32, groups: Option<Vec<u32>>) -> SapMsg {
+    SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::SiteAreaMembers { issi, groups }),
+    }
+}
+
+/// Multi-cell, one location area: a radio registered on a sibling cell may be here without
+/// registering (TS 100 392-2 clause 18.3.4.7.1a), so the switch makes it a listener of its groups
+/// here; a network call to such a group runs here, and ends when the last such listener goes.
+#[test]
+fn test_site_area_member_makes_a_group_call_run_on_this_cell() {
+    debug::setup_logging_verbose();
+    let gssi = 230;
+    let mut config = brew_test_config();
+    config.site_linked = true;
+    let mut test = ComponentTest::from_config(config, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew, TetraEntity::Mm],
+    );
+    test.submit_message(site_area_members(MOVER, Some(vec![gssi])));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::GroupListenersAvailable { gssi: g }) if *g == gssi)),
+        "the group has a listener here now"
+    );
+    // A repeat changes nothing (counted once).
+    test.submit_message(site_area_members(MOVER, Some(vec![gssi])));
+    test.run_stack(Some(1));
+    test.dump_sinks();
+
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::NetworkCallStart {
+            brew_uuid: uuid::Uuid::new_v4(),
+            source_issi: 2300010,
+            dest_gssi: gssi,
+            priority: 1,
+        }),
+    });
+    test.run_stack(Some(5));
+    test.dump_sinks();
+    assert!(test.get_shared_config().state_read().active_call_ts.contains_key(&gssi), "call runs here");
+
+    test.submit_message(site_area_members(MOVER, None));
+    test.run_stack(Some(5));
+    test.dump_sinks();
+    assert!(
+        !test.get_shared_config().state_read().active_call_ts.contains_key(&gssi),
+        "no listener left: the call ends here"
+    );
+}

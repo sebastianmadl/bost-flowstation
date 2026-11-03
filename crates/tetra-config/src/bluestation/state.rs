@@ -532,6 +532,9 @@ pub struct StackState {
     pub network_connected: bool,
     /// Immediate Brew transport up/down — gates Brew-routed CMCE setups. Updated without hysteresis.
     pub brew_link_up: bool,
+    /// Brew extensions (`X-Brew-Extensions`) the server offered on the last connect, for the
+    /// dashboard's Roaming page.
+    pub brew_server_extensions: Vec<String>,
     /// After a real Brew disconnect→reconnect, CMCE may request a selective SwMI-initiated
     /// location update for an ISSI whose Brew-routed setup fails (TIP/ETSI interrogation, not
     /// a mass kick). `None` or a past Instant means the soft-recovery window is closed.
@@ -744,6 +747,7 @@ impl Default for StackState {
             timeslot_alloc: TimeslotAllocator::default(),
             network_connected: false,
             brew_link_up: false,
+            brew_server_extensions: Vec::new(),
             brew_soft_recovery_until: None,
             subscribers: SubscriberRegistry::new(),
             live_sds_queue: VecDeque::new(),

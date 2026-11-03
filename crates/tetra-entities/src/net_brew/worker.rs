@@ -419,6 +419,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
                 Ok(()) => {
                     tracing::info!("BrewWorker: transport connected");
                     let server_version = self.transport.server_brew_version();
+                    self.config.state_write().brew_server_extensions = self.transport.server_brew_extensions().to_vec();
                     self.send_event(BrewEvent::Connected { server_version });
                     self.announce_cells();
                 }

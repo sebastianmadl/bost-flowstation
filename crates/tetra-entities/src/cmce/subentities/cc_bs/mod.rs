@@ -93,6 +93,9 @@ pub struct CcBsSubentity {
     deferred_individual_restores: Vec<DeferredIndividualRestore>,
     /// (ISSI, GSSI) listener counts added by a restore rather than an MM affiliation
     restore_listeners: HashSet<(u32, u32)>,
+    /// Multi-cell: groups of radios registered on a sibling cell of the same location area, which
+    /// may be here without registering (each (ISSI, GSSI) counts once as a listener)
+    area_members: HashMap<u32, HashSet<u32>>,
     /// MSs arriving by announced type 1 cell reselection whose group call is not up here yet
     handover_reservations: Vec<HandoverReservation>,
 }

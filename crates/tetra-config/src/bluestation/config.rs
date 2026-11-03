@@ -397,6 +397,7 @@ impl StackConfig {
                 return Err(format!("{}: {RXLEV_ACCESS_MIN_RANGE}", c.id));
             }
             Self::validate_cell_rf(self.phy_io.backend, &c.cell, c.soapysdr.as_ref()).map_err(|e| format!("{}: {e}", c.id))?;
+            validate_neighbours(&c.cell).map_err(|e| format!("{}: {e}", c.id))?;
         }
 
         let cells = self.cells();
@@ -489,82 +490,7 @@ impl StackConfig {
             return Err("lst_dispatch.enabled cannot be used together with [brew]");
         }
 
-        // Validate neighbor cells
-        if self.cell.neighbor_cells_ca.len() > 7 {
-            return Err("cell.neighbor_cells_ca supports at most 7 entries");
-        }
-
-        // Check for duplicate cell_identifier_ca and main_carrier_number
-        {
-            let mut seen_ids = std::collections::HashSet::new();
-            let mut seen_carriers = std::collections::HashSet::new();
-            for cell in &self.cell.neighbor_cells_ca {
-                if !seen_ids.insert(cell.cell_identifier_ca) {
-                    return Err("cell.neighbor_cells_ca: duplicate cell_identifier_ca — each neighbour must have a unique identifier");
-                }
-                if !seen_carriers.insert(cell.main_carrier_number) {
-                    return Err("cell.neighbor_cells_ca: duplicate main_carrier_number — each neighbour must be on a different carrier");
-                }
-                if cell.main_carrier_number == self.cell.main_carrier {
-                    return Err("cell.neighbor_cells_ca: main_carrier_number is this cell's own main_carrier — a cell cannot be its own neighbour");
-                }
-            }
-        }
-
-        for cell in &self.cell.neighbor_cells_ca {
-            if cell.cell_identifier_ca > 0x1F {
-                return Err("cell.neighbor_cells_ca: cell_identifier_ca must be 0-31");
-            }
-            if cell.cell_reselection_types_supported > 0x3 {
-                return Err("cell.neighbor_cells_ca: cell_reselection_types_supported must be 0-3");
-            }
-            if cell.cell_load_ca > 0x3 {
-                return Err("cell.neighbor_cells_ca: cell_load_ca must be 0-3");
-            }
-            if cell.main_carrier_number > 0xFFF {
-                return Err("cell.neighbor_cells_ca: main_carrier_number must be 0-4095");
-            }
-            if let Some(v) = cell.main_carrier_number_extension
-                && v > 0x3FF
-            {
-                return Err("cell.neighbor_cells_ca: main_carrier_number_extension must be 0-1023");
-            }
-            if let Some(v) = cell.mcc
-                && v > 0x3FF
-            {
-                return Err("cell.neighbor_cells_ca: mcc must be 0-1023");
-            }
-            if let Some(v) = cell.mnc
-                && v > 0x3FFF
-            {
-                return Err("cell.neighbor_cells_ca: mnc must be 0-16383");
-            }
-            if let Some(v) = cell.location_area
-                && v > 0x3FFF
-            {
-                return Err("cell.neighbor_cells_ca: location_area must be 0-16383");
-            }
-            if let Some(v) = cell.maximum_ms_transmit_power
-                && v > 0x7
-            {
-                return Err("cell.neighbor_cells_ca: maximum_ms_transmit_power must be 0-7");
-            }
-            if let Some(v) = cell.minimum_rx_access_level
-                && v > 0xF
-            {
-                return Err("cell.neighbor_cells_ca: minimum_rx_access_level must be 0-15");
-            }
-            if let Some(v) = cell.timeshare_cell_information_or_security_parameters
-                && v > 0x1F
-            {
-                return Err("cell.neighbor_cells_ca: timeshare_cell_information_or_security_parameters must be 0-31");
-            }
-            if let Some(v) = cell.tdma_frame_offset
-                && v > 0x3F
-            {
-                return Err("cell.neighbor_cells_ca: tdma_frame_offset must be 0-63");
-            }
-        }
+        validate_neighbours(&self.cell)?;
 
         // Restart recovery: an explicit allowlist must not exceed the cache cap (the numeric
         // ranges are already clamped in apply_recovery_patch). Only meaningful when enabled.
@@ -577,6 +503,86 @@ impl StackConfig {
 
         Ok(())
     }
+}
+
+/// Checks of a cell's `neighbor_cells_ca` list (field widths of table 18.64, uniqueness).
+pub(crate) fn validate_neighbours(cell_info: &CfgCellInfo) -> Result<(), &'static str> {
+    if cell_info.neighbor_cells_ca.len() > 7 {
+        return Err("cell.neighbor_cells_ca supports at most 7 entries");
+    }
+
+    // Check for duplicate cell_identifier_ca and main_carrier_number
+    {
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_carriers = std::collections::HashSet::new();
+        for cell in &cell_info.neighbor_cells_ca {
+            if !seen_ids.insert(cell.cell_identifier_ca) {
+                return Err("cell.neighbor_cells_ca: duplicate cell_identifier_ca — each neighbour must have a unique identifier");
+            }
+            if !seen_carriers.insert(cell.main_carrier_number) {
+                return Err("cell.neighbor_cells_ca: duplicate main_carrier_number — each neighbour must be on a different carrier");
+            }
+            if cell.main_carrier_number == cell_info.main_carrier {
+                return Err("cell.neighbor_cells_ca: main_carrier_number is this cell's own main_carrier — a cell cannot be its own neighbour");
+            }
+        }
+    }
+
+    for cell in &cell_info.neighbor_cells_ca {
+        if cell.cell_identifier_ca > 0x1F {
+            return Err("cell.neighbor_cells_ca: cell_identifier_ca must be 0-31");
+        }
+        if cell.cell_reselection_types_supported > 0x3 {
+            return Err("cell.neighbor_cells_ca: cell_reselection_types_supported must be 0-3");
+        }
+        if cell.cell_load_ca > 0x3 {
+            return Err("cell.neighbor_cells_ca: cell_load_ca must be 0-3");
+        }
+        if cell.main_carrier_number > 0xFFF {
+            return Err("cell.neighbor_cells_ca: main_carrier_number must be 0-4095");
+        }
+        if let Some(v) = cell.main_carrier_number_extension
+            && v > 0x3FF
+        {
+            return Err("cell.neighbor_cells_ca: main_carrier_number_extension must be 0-1023");
+        }
+        if let Some(v) = cell.mcc
+            && v > 0x3FF
+        {
+            return Err("cell.neighbor_cells_ca: mcc must be 0-1023");
+        }
+        if let Some(v) = cell.mnc
+            && v > 0x3FFF
+        {
+            return Err("cell.neighbor_cells_ca: mnc must be 0-16383");
+        }
+        if let Some(v) = cell.location_area
+            && v > 0x3FFF
+        {
+            return Err("cell.neighbor_cells_ca: location_area must be 0-16383");
+        }
+        if let Some(v) = cell.maximum_ms_transmit_power
+            && v > 0x7
+        {
+            return Err("cell.neighbor_cells_ca: maximum_ms_transmit_power must be 0-7");
+        }
+        if let Some(v) = cell.minimum_rx_access_level
+            && v > 0xF
+        {
+            return Err("cell.neighbor_cells_ca: minimum_rx_access_level must be 0-15");
+        }
+        if let Some(v) = cell.timeshare_cell_information_or_security_parameters
+            && v > 0x1F
+        {
+            return Err("cell.neighbor_cells_ca: timeshare_cell_information_or_security_parameters must be 0-31");
+        }
+        if let Some(v) = cell.tdma_frame_offset
+            && v > 0x3F
+        {
+            return Err("cell.neighbor_cells_ca: tdma_frame_offset must be 0-63");
+        }
+    }
+    Ok(())
 }
 
 /// Global shared configuration: immutable config + mutable state.

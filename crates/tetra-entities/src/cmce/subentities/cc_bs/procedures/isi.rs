@@ -36,7 +36,15 @@ impl CcBsSubentity {
             return;
         }
 
-        if !self.is_locally_registered_issi(called_addr.ssi) {
+        if self.is_area_member(called_addr.ssi) && !self.is_locally_registered_issi(called_addr.ssi) {
+            // Multi-cell: registered on a sibling cell of this location area; the site switch
+            // pages it here too, where it may be without registering (clause 18.3.4.7.1a).
+            tracing::info!(
+                "CMCE: paging ISSI {} here for uuid={} (registered on a sibling cell of this location area)",
+                called_addr.ssi,
+                brew_uuid
+            );
+        } else if !self.is_locally_registered_issi(called_addr.ssi) {
             tracing::info!(
                 "CMCE: rejecting Brew setup request uuid={} src={} dst={} number='{}' (called ISSI not registered locally, known registry ISSIs={:?})",
                 brew_uuid,

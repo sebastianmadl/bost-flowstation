@@ -216,7 +216,7 @@ Every extra SDR can run one more TETRA cell from the same station — for exampl
 
 ### Setting it up
 
-- **Dashboard:** the Home page **Cells** card lists every cell (RF state, carriers, SDR, radios). *Scan* finds your SDRs; pick the device, a free carrier and optionally a colour code, and *Add cell* — the station restarts. *Remove* takes a cell out again.
+- **Dashboard:** the Home page **Cells** card lists every cell (RF state, carriers, SDR, radios). *Scan* finds your SDRs; pick the device, a free carrier and optionally a colour code and location area (LA; empty = the primary's), and *Add cell* — the station restarts. *Remove* takes a cell out again.
 - **By hand:** add a `[[cells]]` entry per extra SDR. It inherits everything from `[cell_info]` except what you override:
 
   ```toml
@@ -250,11 +250,15 @@ Cells are **linked** when Brew or LST Dispatch is enabled; without either, each 
 ### Moving between cells
 
 - Every cell automatically advertises the others as neighbours (no need to list them in `neighbor_cells_ca`), with what radios need to find and rank them, and supporting both unannounced and announced reselection.
+- **One location area or one per cell:** cells inherit the primary's `location_area`. Within one location area radios change cell without registering (ETSI 18.3.4.7.1a), so group calls run on every cell of the area where a member is registered, a call from the network to a radio is set up on all of the area's cells (the cell where it answers keeps it), and a presence check is sent on all of them; the radio registers where it answers. With an own `location_area` per cell radios register on every change, so station and Brew server always know the exact cell, and group calls stay on the members' cells.
 - **Unannounced:** a radio that registers on another cell is dropped silently on the old one, and restores its group call on the new one.
 - **Announced (D-NEW-CELL):** the new cell joins the radio's group calls before it arrives; a registration the radio forwards in U-PREPARE is processed by the new cell and answered in D-NEW-CELL.
 - Reselection thresholds and hysteresis are configurable in `[cell_info.cell_reselect]` (defaults 20/10/10/6 dB), the minimum access level in `[cell_info] rxlev_access_min_dbm` (default −110 dBm). How they work together: [`Docs/cell-reselection.md`](Docs/cell-reselection.md).
 
 ### Dashboard and telemetry
+
+The **Roaming** page (left menu) edits everything about moving between cells in one place: location area per cell, reselection thresholds and hysteresis, minimum access level, migration, presence check, and each cell's own neighbour list (`[[cells.cell_info.neighbor_cells_ca]]` for extra cells; without one a cell advertises only the station's cells). It also shows each cell's global id and which roaming extensions the Brew server offers.
+
 
 The registered-radios table shows every cell's radios with a C0/C1… badge, the Calls page includes calls on every cell, and telemetry carries each radio's cell (`MsCell` event).
 
@@ -263,6 +267,7 @@ The registered-radios table shows every cell's radios with a C0/C1… badge, the
 - The bit layout of the reselection parameters and the neighbour carrier extension follows our reading of EN 300 392-2; check a radio's field-test display if reselection misbehaves.
 - A group call spanning cells shows once per cell in the Calls list (each cell runs its own traffic channel).
 - Individual calls with a Brew party (e.g. the TetraLink app) follow the radio to another cell (U-CALL RESTORE, answered through the site switch). Calls between two radios of the station do not survive a change of cell yet.
+- Within one location area an individual SDS, or a call from another radio of the station, to an idle radio goes to the cell it last registered on, until its next transmission or presence check moves it.
 - CPU and USB/network bandwidth for several SDRs on one Pi are untested; start with two cells.
 
 Design notes and per-phase status: [`Docs/multi-cell-plan.md`](Docs/multi-cell-plan.md).
@@ -284,7 +289,7 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 
 - [brew-server](https://github.com/ysamouhos/brew-server) 1.20.0 or newer (when released), or another Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade; see brew-server `docs/Handover.md` and `docs/Brew-Extensions.md`). The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
 - One cell per station: a multi-cell station hands over between its own cells (see above) but is not a cross-station target yet.
-- Each station lists the other as a neighbour. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
+- Each station lists the other as a neighbour (dashboard page **Roaming**, or by hand). The Roaming page also shows whether the server offers the extensions. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
 
   ```toml
   [cell_info]

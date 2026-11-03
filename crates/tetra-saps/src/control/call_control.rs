@@ -283,6 +283,16 @@ pub enum CallControl {
     /// clause 16.4 a)), so it has no call to restore: the network may end an individual call that
     /// moved here with it at once.
     RegisteredWithoutCall { issi: u32 },
+    /// Multi-cell only (site switch → CMCE): `issi`, registered on a sibling cell of the same
+    /// location area, may be on this cell without registering here (TS 100 392-2 clause
+    /// 18.3.4.7.1a: no registration within the registered area). `Some`: count it as a listener
+    /// of these groups on this cell and accept individual calls for it (they are paged on every
+    /// cell of the area), replacing what an earlier message said; `None`: not any more.
+    SiteAreaMembers { issi: u32, groups: Option<Vec<u32>> },
+    /// Multi-cell only (MM → site switch, never forwarded to Brew/LST): MM sent `issi` a presence
+    /// check (D-LOCATION UPDATE COMMAND). The radio may be on a sibling cell of the same location
+    /// area, so the switch has those cells ask too.
+    SitePresenceProbe { issi: u32 },
 }
 
 /// An individual call the network moved to this station with its MS (see

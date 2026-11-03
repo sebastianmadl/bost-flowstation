@@ -4202,6 +4202,16 @@ fn handle_connection(
             None => "{\"cells\":[]}".to_string(),
         };
         http_json_response(s, 200, &body);
+    } else if req_line.contains("GET /api/roaming") {
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        match crate::net_dashboard::roaming::roaming_json(&config_path, shared_config.as_ref()) {
+            Ok(v) => http_json_response(s, 200, &v.to_string()),
+            Err(e) => http_response(s, 500, &e),
+        }
+    } else if req_line.contains("POST /api/roaming") {
+        let (inner, body_str) = read_post_body(stream);
+        serve_roaming_save(inner, &config_path, &body_str);
     } else if req_line.contains("POST /api/cells/add") {
         let (inner, body_str) = read_post_body(stream);
         serve_cells_add(inner, &config_path, &body_str);
@@ -5756,7 +5766,23 @@ fn apply_cells_config(stream: PrefixedConn, config_path: &str, text: &str, what:
     http_response(stream, 200, &format!("{what}; the base station is restarting to apply it."));
 }
 
-/// POST /api/cells/add — `{"device": "...", "main_carrier": N, "colour_code": N?}`.
+/// POST /api/roaming — see `roaming::apply_roaming`; writes the config and restarts.
+fn serve_roaming_save(stream: PrefixedConn, config_path: &str, body: &str) {
+    let req: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
+    };
+    let original = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
+    };
+    match crate::net_dashboard::roaming::apply_roaming(&original, &req) {
+        Ok(text) => apply_cells_config(stream, config_path, &text, "roaming settings saved".to_string()),
+        Err(e) => http_response(stream, 400, &e),
+    }
+}
+
+/// POST /api/cells/add — `{"device": "...", "main_carrier": N, "colour_code": N?, "location_area": N?}`.
 fn serve_cells_add(stream: PrefixedConn, config_path: &str, body: &str) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -5767,11 +5793,18 @@ fn serve_cells_add(stream: PrefixedConn, config_path: &str, body: &str) {
         return http_response(stream, 400, "main_carrier (0-4095) is required");
     };
     let colour_code = req.get("colour_code").and_then(|v| v.as_u64()).map(|v| v.min(63) as u8);
+    let location_area = match req.get("location_area").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => match v.as_u64().filter(|n| *n <= 16383) {
+            Some(n) => Some(n as u16),
+            None => return http_response(stream, 400, "location_area must be 0-16383"),
+        },
+    };
     let original = match std::fs::read_to_string(config_path) {
         Ok(s) => s,
         Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
     };
-    match crate::net_dashboard::cells::add_cell_toml(&original, device, main_carrier as u16, colour_code) {
+    match crate::net_dashboard::cells::add_cell_toml(&original, device, main_carrier as u16, colour_code, location_area) {
         Ok((text, id)) => apply_cells_config(stream, config_path, &text, format!("cell {id} added (carrier {main_carrier})")),
         Err(e) => http_response(stream, 400, &e),
     }
