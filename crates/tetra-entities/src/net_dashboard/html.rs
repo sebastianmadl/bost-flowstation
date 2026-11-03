@@ -18441,7 +18441,7 @@ function roamRenderCells(){
     const la=c.primary||c.location_area_own?String(c.location_area):'';
     return '<tr><td data-label="'+escHtmlAttr(t('roam_th_cell'))+'">'+escHtml(t('cells_cell',{n:c.id}))+(c.primary?' ★':'')+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_global'))+'">'+escHtml(c.global_id||'—')+'</td>'+
-      '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+c.main_carrier+'</td>'+
+      '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(c.main_carrier,c.carrier_ext)+'</td>'+
       '<td data-label="CC">'+c.colour_code+'</td>'+
       '<td data-label="LA"><input type="number" class="form-input" style="width:100px" min="0" max="16383" id="rm-la-'+c.id+'" value="'+escHtmlAttr(la)+'"'+
       (c.primary?'':' placeholder="'+escHtmlAttr(String(primaryLa))+'"')+'></td></tr>';
@@ -18465,7 +18465,7 @@ function roamRenderNeighbours(){
   if(own)own.checked=c.primary||c.own_list;
   const editable=c.primary||c.own_list;
   const rows=(editable?c.neighbours:[]).map((n,i)=>'<tr><td data-label="ID">'+n.cell_identifier_ca+'</td>'+
-    '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+n.main_carrier_number+(n.main_carrier_number_extension!=null?' / ext '+n.main_carrier_number_extension:'')+'</td>'+
+    '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(n.main_carrier_number,n.main_carrier_number_extension!=null?n.main_carrier_number_extension:c.carrier_ext)+'</td>'+
     '<td data-label="LA">'+(n.location_area!=null?n.location_area:'—')+'</td>'+
     '<td data-label="'+escHtmlAttr(t('roam_th_server'))+'">'+roamServerCell(n,c)+'</td>'+
     '<td data-label="'+escHtmlAttr(t('roam_th_types'))+'">'+n.cell_reselection_types_supported+' — '+escHtml(t('roam_types_'+n.cell_reselection_types_supported))+'</td>'+
@@ -18473,7 +18473,7 @@ function roamRenderNeighbours(){
     '<td data-label="'+escHtmlAttr(t('th_actions'))+'"><button class="btn btn-sm" onclick="roamEdit('+i+')">'+escHtml(t('roam_edit'))+'</button> '+
     '<button class="btn btn-sm" onclick="roamDelete('+i+')">'+escHtml(t('cells_remove'))+'</button></td></tr>');
   const auto=(c.siblings||[]).map(s=>'<tr style="color:var(--muted)"><td data-label="ID">'+s.cell_identifier_ca+'</td>'+
-    '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+s.main_carrier_number+'</td>'+
+    '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(s.main_carrier_number,(roamData.cells.find(x=>x.main_carrier===s.main_carrier_number)||c).carrier_ext)+'</td>'+
     '<td data-label="LA">'+(s.location_area!=null?s.location_area:'—')+'</td>'+
     '<td colspan="4">'+escHtml(t('roam_auto_sibling'))+'</td></tr>');
   const tb=document.getElementById('roam-nb-tbody');
@@ -18513,6 +18513,19 @@ function roamDiffs(n,c,e){
   }
   return out;
 }
+// Downlink frequency of a carrier on an absolute band plan ("main carrier number extension"):
+// band x 100 MHz + carrier x 25 kHz + offset (bits 5-4: 0, +6.25, -6.25, +12.5 kHz), clause 21.4.4.1.
+function roamMhz(carrier,ext){
+  if(ext==null||carrier==null)return '';
+  const off=[0,6.25,-6.25,12.5][(ext>>4)&3];
+  const khz=((ext>>6)&15)*100000+carrier*25+off;
+  return (khz/1000).toFixed(5).replace(/0{1,2}$/,'')+' MHz';
+}
+// "1530 · 438.250 MHz", the band plan number as a tooltip.
+function roamCarrier(carrier,ext){
+  const f=roamMhz(carrier,ext);
+  return '<span'+(ext!=null?' title="ext '+ext+'"':'')+'>'+carrier+(f?' · <span style="white-space:nowrap">'+f+'</span>':'')+'</span>';
+}
 function roamDot(online){return '<span style="color:'+(online?'var(--ok,#2a9d4b)':'var(--muted)')+'">●</span> ';}
 function roamServerCell(n,c){
   if(!roamData.directory)return '<span style="color:var(--muted)">—</span>';
@@ -18531,7 +18544,7 @@ function roamRenderDirectory(){
   const offered=((roamData.brew||{}).extensions||[]).some(x=>x.name==='cell-directory'&&x.offered);
   const pick=document.getElementById('rm-n-pick'),pickRow=document.getElementById('rm-n-pick-row');
   if(pickRow)pickRow.style.display=dir&&dir.length?'':'none';
-  if(pick&&dir)pick.innerHTML='<option value="">—</option>'+dir.map((e,i)=>'<option value="'+i+'">'+escHtml(e.id+' · '+t('cells_carrier')+' '+e.carrier+' · LA '+e.location_area+(e.online?'':' · '+t('roam_offline')))+'</option>').join('');
+  if(pick&&dir)pick.innerHTML='<option value="">—</option>'+dir.map((e,i)=>'<option value="'+i+'">'+escHtml(e.id+' · '+e.carrier+' · '+roamMhz(e.carrier,e.carrier_ext)+' · LA '+e.location_area+(e.online?'':' · '+t('roam_offline')))+'</option>').join('');
   if(!dir){tb.innerHTML='';setText('roam-dir-note',t(offered?'roam_dir_wait':'roam_dir_off'));return;}
   setText('roam-dir-note',t('roam_dir_count',{n:dir.length}));
   const own=c=>c.primary||c.own_list?c.neighbours:[];
@@ -18541,7 +18554,7 @@ function roamRenderDirectory(){
     const lv=(e.rxlev_access_min_dbm!=null?e.rxlev_access_min_dbm+' dBm':'—')+' / '+(e.ms_txpwr_max_dbm!=null?e.ms_txpwr_max_dbm+' dBm':'—');
     return '<tr><td data-label="'+escHtmlAttr(t('roam_th_global'))+'"><b>'+escHtml(e.id)+'</b></td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_state'))+'"><span style="white-space:nowrap">'+roamDot(e.online)+escHtml(t(e.online?'roam_online':'roam_offline'))+'</span></td>'+
-      '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+e.carrier+' / ext '+e.carrier_ext+'</td>'+
+      '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(e.carrier,e.carrier_ext)+'</td>'+
       '<td data-label="LA">'+e.location_area+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_levels'))+'">'+escHtml(lv)+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_listed_here'))+'">'+escHtml(by.length?by.join(', '):t('roam_dir_none'))+'</td>'+
