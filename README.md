@@ -216,7 +216,7 @@ Every extra SDR can run one more TETRA cell from the same station — for exampl
 
 ### Setting it up
 
-- **Dashboard:** the Home page **Cells** card lists every cell (RF state, carriers, SDR, radios). *Scan* finds your SDRs; pick the device, a free carrier and optionally a colour code and location area (LA; empty = the primary's), and *Add cell* — the station restarts. *Remove* takes a cell out again.
+- **Dashboard:** the **Cells** card on the **Roaming / Cells** page lists every cell (RF state, carriers, SDR, radios). *Scan* finds your SDRs; pick the device, a free carrier and optionally a colour code and location area (LA; empty = the primary's), and *Add cell* — the station restarts. *Remove* takes a cell out again.
 - **By hand:** add a `[[cells]]` entry per extra SDR. It inherits everything from `[cell_info]` except what you override:
 
   ```toml
