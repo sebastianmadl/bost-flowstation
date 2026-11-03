@@ -11,7 +11,7 @@ use tetra_core::CellId;
 use toml::{Table, Value as TomlValue};
 
 /// Brew extensions the roaming features need (FlowStation ↔ brew-server, opt-in).
-const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore"];
+const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "cell-directory"];
 
 /// Integer neighbour keys with their maximum (field widths, TS 100 392-2 table 18.64).
 const NEIGHBOUR_INT_KEYS: &[(&str, i64)] = &[
@@ -31,7 +31,7 @@ const NEIGHBOUR_INT_KEYS: &[(&str, i64)] = &[
 ];
 /// Neighbour keys a radio must have; the others are optional (absent = not broadcast).
 const NEIGHBOUR_REQUIRED: &[&str] = &["cell_identifier_ca", "cell_reselection_types_supported", "cell_load_ca", "main_carrier_number"];
-/// BS service details flags (table 18.66), all booleans.
+/// BS service details flags (table 18.26), all booleans.
 const SERVICE_DETAILS: &[&str] = &[
     "registration",
     "deregistration",
@@ -118,6 +118,11 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
                 "primary": id.is_primary(),
                 "global_id": brew_login.as_ref().map(|login| format!("{login}/{}", id.0)),
                 "main_carrier": c.main_carrier,
+                // Absolute band plan, to match this cell in the server's cell directory.
+                "carrier_ext": tetra_config::bluestation::carrier_band_plan(c),
+                "rxlev_access_min_dbm": c.rxlev_access_min_dbm,
+                // MS_TXPWR_MAX_CELL code 1-7 = 15-45 dBm (table 18.57), 0 reserved.
+                "ms_txpwr_max_dbm": (1..=7).contains(&c.ms_txpwr_max_cell).then(|| 10 + 5 * c.ms_txpwr_max_cell as u16),
                 "colour_code": c.colour_code,
                 "location_area": c.location_area,
                 "location_area_own": la_own,
@@ -149,8 +154,13 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
     };
     let offered: Vec<String> = shared.map(|s| s.state_read().brew_server_extensions.clone()).unwrap_or_default();
     let link_up = shared.is_some_and(|s| s.state_read().brew_link_up);
+    let directory = shared.and_then(|s| s.state_read().brew_cell_directory.clone());
     Ok(json!({
         "cells": cells,
+        "mcc": cfg.net.mcc,
+        "mnc": cfg.net.mnc,
+        // The Brew server's cell list (extension `cell-directory`), `null` until one arrived.
+        "directory": directory,
         "max_cells": CellId::MAX as usize + 1,
         "reselect": {
             "slow_threshold_db": cfg.cell.cell_reselect.slow_threshold_db,
@@ -424,6 +434,41 @@ main_carrier = 1525
         assert_eq!(v["reselect"]["slow_threshold_db"], 20, "default");
         assert_eq!(v["rxlev_access_min_dbm"], JsonValue::Null);
         assert_eq!(v["brew"]["configured"], true);
+    }
+
+    #[test]
+    fn get_carries_the_servers_cell_directory_and_what_matching_needs() {
+        let f = write(BASE);
+        let cfg = parsing::from_toml_str(BASE).unwrap();
+        let shared = SharedConfig::from_parts(cfg, None);
+        let v = roaming_json(f.str(), Some(&shared)).unwrap();
+        assert_eq!(v["directory"], JsonValue::Null, "nothing from the server yet");
+        assert_eq!((v["mcc"].as_u64(), v["mnc"].as_u64()), (Some(901), Some(9999)));
+        // band 4, offset 0, duplex spacing 4: (4 << 6) | (4 << 1)
+        assert_eq!(v["cells"][0]["carrier_ext"], 264);
+        assert_eq!(v["cells"][0]["rxlev_access_min_dbm"], -110, "effective value");
+        assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "cell-directory"));
+
+        shared.state_write().brew_cell_directory = Some(vec![tetra_config::bluestation::BrewDirectoryCell {
+            id: "1000002/0".into(),
+            station: "1000002".into(),
+            cell: 0,
+            online: true,
+            last_seen_ms: None,
+            mcc: 901,
+            mnc: 9999,
+            carrier: 1530,
+            carrier_ext: 264,
+            location_area: 2,
+            ms_txpwr_max_dbm: Some(30),
+            rxlev_access_min_dbm: Some(-100),
+            service_details: None,
+            neighbours: Some(vec![]),
+        }]);
+        let v = roaming_json(f.str(), Some(&shared)).unwrap();
+        assert_eq!(v["directory"][0]["id"], "1000002/0");
+        assert_eq!(v["directory"][0]["rxlev_access_min_dbm"], -100);
+        assert_eq!(v["directory"][0]["neighbours"], json!([]));
     }
 
     #[test]

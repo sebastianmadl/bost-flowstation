@@ -1,5 +1,6 @@
 //! Brew protocol binary message parsing and serialization (2-byte [kind, type] prefix, little-endian)
 
+use tetra_config::bluestation::{BrewDirectoryCell, BrewDirectoryNeighbour};
 use tetra_saps::control::call_control::{CellReselection, NetworkRestoredCall};
 use uuid::Uuid;
 
@@ -774,7 +775,7 @@ pub const BREW_SERVICE_BTS_INFO: u8 = 0x14;
 pub const BREW_EXT_BTS_INFO: &str = "bts-info";
 
 /// One cell in a [`BREW_SERVICE_BTS_INFO`] message
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BrewBtsCell {
     /// Cell number within the station (0 = primary, then the `[[cells]]` ids); the server names
     /// the cell `<login>/<cell>`
@@ -783,6 +784,16 @@ pub struct BrewBtsCell {
     /// Absolute band plan in the "main carrier number extension" layout, never "same as serving"
     pub carrier_ext: u16,
     pub location_area: u16,
+    /// Optional: what the cell broadcasts, so other stations can list it as a neighbour with the
+    /// right values (sent to a server that offered [`BREW_EXT_CELL_DIRECTORY`]; older servers
+    /// ignore unknown fields anyway). MS_TXPWR_MAX_CELL in dBm (table 18.57).
+    pub ms_txpwr_max_dbm: Option<u8>,
+    /// RXLEV_ACCESS_MIN in dBm (table 21.65)
+    pub rxlev_access_min_dbm: Option<i16>,
+    /// BS service details (table 18.26) as broadcast
+    pub service_details: Option<Vec<(&'static str, bool)>>,
+    /// The neighbour cells the cell broadcasts (D-NWRK-BROADCAST)
+    pub neighbours: Option<Vec<BrewDirectoryNeighbour>>,
 }
 
 /// Build a Service (0xf4) BTS info message, NULL-terminated JSON:
@@ -793,7 +804,31 @@ pub struct BrewBtsCell {
 pub fn build_service_bts_info(mcc: u16, mnc: u16, cells: &[BrewBtsCell], capabilities: &[&str]) -> Vec<u8> {
     let cells: Vec<serde_json::Value> = cells
         .iter()
-        .map(|c| serde_json::json!({ "cell": c.cell, "carrier": c.carrier, "carrier_ext": c.carrier_ext, "location_area": c.location_area }))
+        .map(|c| {
+            let mut v = serde_json::json!({ "cell": c.cell, "carrier": c.carrier, "carrier_ext": c.carrier_ext, "location_area": c.location_area });
+            if let Some(p) = c.ms_txpwr_max_dbm {
+                v["ms_txpwr_max_dbm"] = p.into();
+            }
+            if let Some(r) = c.rxlev_access_min_dbm {
+                v["rxlev_access_min_dbm"] = r.into();
+            }
+            if let Some(details) = &c.service_details {
+                v["service_details"] = details.iter().map(|(k, on)| (k.to_string(), serde_json::Value::Bool(*on))).collect();
+            }
+            if let Some(list) = &c.neighbours {
+                v["neighbours"] = list
+                    .iter()
+                    .map(|n| {
+                        let mut e = serde_json::json!({ "mcc": n.mcc, "mnc": n.mnc, "carrier": n.carrier, "carrier_ext": n.carrier_ext });
+                        if let Some(la) = n.location_area {
+                            e["location_area"] = la.into();
+                        }
+                        e
+                    })
+                    .collect();
+            }
+            v
+        })
         .collect();
     let json = serde_json::json!({ "mcc": mcc, "mnc": mnc, "cells": cells, "capabilities": capabilities }).to_string();
     let mut buf = Vec::with_capacity(3 + json.len());
@@ -802,6 +837,45 @@ pub fn build_service_bts_info(mcc: u16, mnc: u16, cells: &[BrewBtsCell], capabil
     buf.extend_from_slice(json.as_bytes());
     buf.push(0); // NULL terminator
     buf
+}
+
+/// Service type the server sends with the cells of the other stations it knows, online and
+/// offline, with what they broadcast: `{"cells":[{"id":"1000002/0","station":"1000002","cell":0,
+/// "online":true,"mcc":232,"mnc":5,"carrier":1530,"carrier_ext":264,"location_area":1,...}]}`
+/// (brew-server)
+pub const BREW_SERVICE_CELL_DIRECTORY: u8 = 0x1D;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it sends
+/// [`BREW_SERVICE_CELL_DIRECTORY`]; the station then names it in its `SERVICE_BTS_INFO`
+/// capabilities to get it
+pub const BREW_EXT_CELL_DIRECTORY: &str = "cell-directory";
+
+/// Most directory cells kept (the server sends at most 256)
+pub const MAX_DIRECTORY_CELLS: usize = 256;
+
+/// Parse a [`BREW_SERVICE_CELL_DIRECTORY`] payload. A cell that does not parse or is out of range
+/// is left out (logged), an optional field that is out of range is dropped: the list is only shown.
+pub fn parse_cell_directory(json_data: &str) -> Result<Vec<BrewDirectoryCell>, String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    let list = json.get("cells").and_then(|c| c.as_array()).ok_or("missing: cells")?;
+    let mut cells = Vec::new();
+    for v in list.iter().take(MAX_DIRECTORY_CELLS) {
+        let mut cell: BrewDirectoryCell = match serde_json::from_value(v.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("BrewWorker: cell directory entry ignored ({}): {}", e, v);
+                continue;
+            }
+        };
+        if cell.mcc > 0x3ff || cell.mnc > 0x3fff || cell.carrier > 0xfff || cell.carrier_ext > 0x3ff || cell.location_area > 0x3fff {
+            tracing::warn!("BrewWorker: cell directory entry out of range ignored: {}", v);
+            continue;
+        }
+        cell.ms_txpwr_max_dbm = cell.ms_txpwr_max_dbm.filter(|p| (15..=45).contains(p) && p % 5 == 0);
+        cell.rxlev_access_min_dbm = cell.rxlev_access_min_dbm.filter(|r| (-125..=-50).contains(r) && r % 5 == 0);
+        cells.push(cell);
+    }
+    Ok(cells)
 }
 
 /// Service type reporting the cell (carrier) a radio registered on (brew-server)

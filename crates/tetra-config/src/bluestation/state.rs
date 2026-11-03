@@ -524,6 +524,50 @@ pub struct SdsCommandRuntimeOverride {
     pub commands: Vec<CfgSdsCommandEntry>,
 }
 
+/// One cell of the Brew server's cell directory (`SERVICE_CELL_DIRECTORY`, brew-server extension
+/// `cell-directory`): a cell of another station, online or not, with what it broadcasts. Shown on
+/// the dashboard's Roaming page, to name the neighbours and to pick a neighbour from the list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrewDirectoryCell {
+    /// Global cell id `<station login>/<cell>`.
+    pub id: String,
+    pub station: String,
+    pub cell: u8,
+    pub online: bool,
+    /// When an offline station went away (Unix ms).
+    #[serde(default)]
+    pub last_seen_ms: Option<u64>,
+    pub mcc: u16,
+    pub mnc: u16,
+    pub carrier: u16,
+    /// Absolute band plan ("main carrier number extension" layout).
+    pub carrier_ext: u16,
+    pub location_area: u16,
+    /// MS_TXPWR_MAX_CELL in dBm (15-45, table 18.57), when the station reported it.
+    #[serde(default)]
+    pub ms_txpwr_max_dbm: Option<u8>,
+    /// RXLEV_ACCESS_MIN in dBm (-125 to -50, table 21.65), when reported.
+    #[serde(default)]
+    pub rxlev_access_min_dbm: Option<i16>,
+    /// BS service details (table 18.26), flag name -> set, when reported.
+    #[serde(default)]
+    pub service_details: Option<BTreeMap<String, bool>>,
+    /// The neighbour cells this cell broadcasts, when reported.
+    #[serde(default)]
+    pub neighbours: Option<Vec<BrewDirectoryNeighbour>>,
+}
+
+/// A neighbour a directory cell broadcasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrewDirectoryNeighbour {
+    pub mcc: u16,
+    pub mnc: u16,
+    pub carrier: u16,
+    pub carrier_ext: u16,
+    #[serde(default)]
+    pub location_area: Option<u16>,
+}
+
 /// Mutable, stack-editable state (mutex-protected).
 #[derive(Debug, Clone)]
 pub struct StackState {
@@ -535,6 +579,9 @@ pub struct StackState {
     /// Brew extensions (`X-Brew-Extensions`) the server offered on the last connect, for the
     /// dashboard's Roaming page.
     pub brew_server_extensions: Vec<String>,
+    /// The Brew server's cell directory as last received (`None` until one arrives on this
+    /// connection, or when the server does not offer `cell-directory`).
+    pub brew_cell_directory: Option<Vec<BrewDirectoryCell>>,
     /// After a real Brew disconnect→reconnect, CMCE may request a selective SwMI-initiated
     /// location update for an ISSI whose Brew-routed setup fails (TIP/ETSI interrogation, not
     /// a mass kick). `None` or a past Instant means the soft-recovery window is closed.
@@ -748,6 +795,7 @@ impl Default for StackState {
             network_connected: false,
             brew_link_up: false,
             brew_server_extensions: Vec::new(),
+            brew_cell_directory: None,
             brew_soft_recovery_until: None,
             subscribers: SubscriberRegistry::new(),
             live_sds_queue: VecDeque::new(),

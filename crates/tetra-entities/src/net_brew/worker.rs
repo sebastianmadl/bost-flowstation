@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
+use tetra_config::bluestation::BrewDirectoryNeighbour;
 use tetra_config::bluestation::CfgBrew;
 use tetra_config::bluestation::SharedConfig;
 use tetra_config::bluestation::StackConfig;
@@ -273,19 +274,24 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
     if !server_extensions.iter().any(|e| e == BREW_EXT_BTS_INFO) {
         return None;
     }
+    let directory = server_extensions.iter().any(|e| e == BREW_EXT_CELL_DIRECTORY);
     let cells: Vec<BrewBtsCell> = config
         .cells()
         .into_iter()
         .filter_map(|(id, cell, _)| {
-            Some(BrewBtsCell {
-                cell: id.0,
-                carrier: cell.main_carrier,
-                carrier_ext: tetra_config::bluestation::carrier_band_plan(cell)?,
-                location_area: cell.location_area,
-            })
+            let carrier_ext = tetra_config::bluestation::carrier_band_plan(cell)?;
+            let mut entry = BrewBtsCell { cell: id.0, carrier: cell.main_carrier, carrier_ext, location_area: cell.location_area, ..Default::default() };
+            if directory {
+                // What the cell broadcasts, for the other stations' neighbour lists.
+                broadcast_values(config, cell, carrier_ext, &mut entry);
+            }
+            Some(entry)
         })
         .collect();
     let mut capabilities: Vec<&str> = Vec::new();
+    if directory {
+        capabilities.push(BREW_EXT_CELL_DIRECTORY);
+    }
     if handles_handover(config, server_extensions) {
         capabilities.push(BREW_EXT_HANDOVER);
         if server_extensions.iter().any(|e| e == BREW_EXT_MS_MOVED) {
@@ -296,6 +302,41 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
         }
     }
     Some(build_service_bts_info(config.net.mcc, config.net.mnc, &cells, &capabilities))
+}
+
+/// The optional `SERVICE_BTS_INFO` fields of `cell`: MS_TXPWR_MAX_CELL (code 1-7 = 15-45 dBm,
+/// table 18.57; 0 is reserved and left out), RXLEV_ACCESS_MIN, the BS service details as broadcast
+/// (system wide services while the network link is configured, as the SYSINFO sends them) and the
+/// neighbour list with siblings. An element a neighbour entry leaves out is the serving cell's own
+/// (TS 100 392-2 table 18.64 notes 1 and 2), so the network, band plan and LA are filled in.
+fn broadcast_values(config: &StackConfig, cell: &tetra_config::bluestation::CfgCellInfo, carrier_ext: u16, entry: &mut BrewBtsCell) {
+    entry.ms_txpwr_max_dbm = (1..=7).contains(&cell.ms_txpwr_max_cell).then(|| 10 + 5 * cell.ms_txpwr_max_cell);
+    entry.rxlev_access_min_dbm = Some(cell.rxlev_access_min_dbm);
+    entry.service_details = Some(vec![
+        ("registration", cell.registration),
+        ("deregistration", cell.deregistration),
+        ("priority_cell", cell.priority_cell),
+        ("no_minimum_mode", cell.no_minimum_mode),
+        ("migration", cell.migration),
+        ("system_wide_services", cell.system_wide_services || config.has_network_link()),
+        ("voice_service", cell.voice_service),
+        ("circuit_mode_data_service", cell.circuit_mode_data_service),
+        ("sndcp_service", cell.sndcp_service),
+        ("aie_service", cell.aie_service),
+        ("advanced_link", cell.advanced_link),
+    ]);
+    entry.neighbours = Some(
+        cell.neighbor_cells_ca
+            .iter()
+            .map(|n| BrewDirectoryNeighbour {
+                mcc: n.mcc.unwrap_or(config.net.mcc),
+                mnc: n.mnc.unwrap_or(config.net.mnc),
+                carrier: n.main_carrier_number,
+                carrier_ext: n.main_carrier_number_extension.unwrap_or(carrier_ext),
+                location_area: Some(n.location_area.unwrap_or(cell.location_area)),
+            })
+            .collect(),
+    );
 }
 
 /// This station answers handover requests from other stations: the server relays them
@@ -419,7 +460,12 @@ impl<T: NetworkTransport> BrewWorker<T> {
                 Ok(()) => {
                     tracing::info!("BrewWorker: transport connected");
                     let server_version = self.transport.server_brew_version();
-                    self.config.state_write().brew_server_extensions = self.transport.server_brew_extensions().to_vec();
+                    {
+                        let mut state = self.config.state_write();
+                        state.brew_server_extensions = self.transport.server_brew_extensions().to_vec();
+                        // A new list comes after the announcement, if the server offers one.
+                        state.brew_cell_directory = None;
+                    }
                     self.send_event(BrewEvent::Connected { server_version });
                     self.announce_cells();
                 }
@@ -909,6 +955,15 @@ impl<T: NetworkTransport> BrewWorker<T> {
                     Err(e) => tracing::warn!("BrewWorker: malformed MS moved message: {}", e),
                 }
             }
+            BREW_SERVICE_CELL_DIRECTORY if self.transport.server_brew_extensions().iter().any(|e| e == BREW_EXT_CELL_DIRECTORY) => {
+                match parse_cell_directory(&svc.json_data) {
+                    Ok(cells) => {
+                        tracing::info!("BrewWorker: cell directory from the server: {} cells", cells.len());
+                        self.config.state_write().brew_cell_directory = Some(cells);
+                    }
+                    Err(e) => tracing::warn!("BrewWorker: malformed cell directory: {}", e),
+                }
+            }
             _ => tracing::debug!("BrewWorker: service type={}: {}", svc.service_type, svc.json_data),
         }
     }
@@ -1392,6 +1447,84 @@ password = "x"
         plain.transport.connect().unwrap();
         plain.announce_cells();
         assert!(plain.transport.sent_payloads().is_empty(), "nothing new towards a plain Brew server");
+    }
+
+    // ── Cell directory (cell-directory) ──
+
+    const NEIGHBOUR: &str = "ms_txpwr_max_cell = 4\nrxlev_access_min_dbm = -100\n\n[[cell_info.neighbor_cells_ca]]\ncell_identifier_ca = 1\ncell_reselection_types_supported = 2\nneighbor_cell_synchronized = false\ncell_load_ca = 0\nmain_carrier_number = 1530\nlocation_area = 1\n\n[[cell_info.neighbor_cells_ca]]\ncell_identifier_ca = 2\ncell_reselection_types_supported = 2\nneighbor_cell_synchronized = false\ncell_load_ca = 0\nmain_carrier_number = 1600\nmain_carrier_number_extension = 280\nmcc = 901\nmnc = 9\n";
+
+    /// `NEIGHBOUR` goes into `[cell_info]`, before `[brew]`.
+    fn config_with_neighbours(extra: &str) -> SharedConfig {
+        let base = CONFIG.replace("location_area = 10\n", &format!("location_area = 10\n{NEIGHBOUR}"));
+        let mut cfg = tetra_config::bluestation::parsing::from_toml_str(&format!("{base}{extra}")).expect("test config parses");
+        cfg.add_sibling_neighbours();
+        SharedConfig::from_parts(cfg, None)
+    }
+
+    #[test]
+    fn bts_info_reports_what_the_cells_broadcast_only_with_cell_directory() {
+        let offered = ["bts-info".to_string(), BREW_EXT_CELL_DIRECTORY.to_string()];
+        let msg = json_of(&bts_info_message(&config_with_neighbours("").config(), &offered).unwrap());
+        assert_eq!(msg["capabilities"], serde_json::json!(["cell-directory"]));
+        let cell = &msg["cells"][0];
+        assert_eq!(cell["ms_txpwr_max_dbm"], 30, "code 4 = 30 dBm (table 18.57)");
+        assert_eq!(cell["rxlev_access_min_dbm"], -100);
+        assert_eq!(cell["service_details"]["registration"], true);
+        assert_eq!(cell["service_details"]["system_wide_services"], true, "broadcast while the Brew link is configured");
+        assert_eq!(cell["service_details"].as_object().unwrap().len(), 11);
+        assert_eq!(
+            cell["neighbours"],
+            serde_json::json!([
+                {"mcc": 232, "mnc": 5, "carrier": 1530, "carrier_ext": 264, "location_area": 1},
+                {"mcc": 901, "mnc": 9, "carrier": 1600, "carrier_ext": 280, "location_area": 10},
+            ]),
+            "an element left out is the serving cell's own (table 18.64 notes 1, 2)"
+        );
+
+        // A second cell lists its sibling.
+        let multi = config_with_neighbours("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1532\n");
+        let msg = json_of(&bts_info_message(&multi.config(), &offered).unwrap());
+        assert!(msg["cells"][1]["neighbours"].as_array().unwrap().iter().any(|n| n["carrier"] == 1528), "{msg}");
+
+        // Not offered: the message stays as before.
+        let plain = json_of(&bts_info_message(&config_with_neighbours("").config(), &["bts-info".to_string()]).unwrap());
+        assert_eq!(plain["capabilities"], serde_json::json!([]));
+        assert_eq!(plain["cells"][0], serde_json::json!({"cell": 0, "carrier": 1528, "carrier_ext": 264, "location_area": 10}));
+    }
+
+    fn cell_directory(json: &str) -> Vec<u8> {
+        let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_CELL_DIRECTORY];
+        msg.extend_from_slice(json.as_bytes());
+        msg.push(0);
+        msg
+    }
+
+    const DIRECTORY: &str = r#"{"cells":[
+        {"id":"1000002/0","station":"1000002","cell":0,"online":true,"mcc":232,"mnc":5,"carrier":1530,"carrier_ext":264,"location_area":1,
+         "rxlev_access_min_dbm":-100,"ms_txpwr_max_dbm":32,"neighbours":[{"mcc":232,"mnc":5,"carrier":1528,"carrier_ext":264}],"later":1},
+        {"id":"1000003/0","station":"1000003","cell":0,"online":false,"last_seen_ms":5,"mcc":232,"mnc":5,"carrier":1532,"carrier_ext":264,"location_area":1},
+        {"id":"bad","station":"x","cell":0,"online":true,"mcc":232,"mnc":5,"carrier":5000,"carrier_ext":264,"location_area":1},
+        {"id":"also bad"}
+    ]}"#;
+
+    #[test]
+    fn the_cell_directory_reaches_the_dashboard_state_only_where_offered() {
+        let mut w = worker(MockTransport::new().with_brew_extensions(&["bts-info", BREW_EXT_CELL_DIRECTORY]));
+        w.transport.connect().unwrap();
+        w.handle_incoming_binary(&cell_directory(DIRECTORY));
+        let dir = w.config.state_read().brew_cell_directory.clone().expect("stored");
+        assert_eq!(dir.iter().map(|c| (c.id.as_str(), c.online)).collect::<Vec<_>>(), [("1000002/0", true), ("1000003/0", false)]);
+        assert_eq!(dir[0].rxlev_access_min_dbm, Some(-100));
+        assert_eq!(dir[0].ms_txpwr_max_dbm, None, "32 dBm is no table 18.57 value");
+        assert_eq!(dir[0].neighbours.as_ref().unwrap()[0].carrier, 1528);
+        assert_eq!(dir[1].last_seen_ms, Some(5));
+        w.handle_incoming_binary(&cell_directory("not json"));
+        assert_eq!(w.config.state_read().brew_cell_directory.as_ref().map(|d| d.len()), Some(2), "a broken list keeps the last one");
+
+        let mut plain = worker(MockTransport::new().with_brew_extensions(&["bts-info"]));
+        plain.transport.connect().unwrap();
+        plain.handle_incoming_binary(&cell_directory(DIRECTORY));
+        assert!(plain.config.state_read().brew_cell_directory.is_none());
     }
 
     // ── Handover messages (target side) ──
