@@ -148,7 +148,8 @@ impl MleBs {
     /// to the neighbour `cell_identifier_ca`. A neighbour we do not advertise gets D-PREPARE-FAIL.
     /// Otherwise the target is prepared before D-NEW-CELL goes out: a sibling cell of a linked
     /// multi-cell station through the site switch, a cell of another station through Brew
-    /// (`handover-v1`). Only a station with neither answers D-NEW-CELL at once.
+    /// (`handover-v1`, also from a cell of a multi-cell station, whose switch passes the request
+    /// on). Only a station with neither answers D-NEW-CELL at once.
     fn rx_u_prepare(&mut self, queue: &mut MessageQueue, addr: TetraAddress, link_id: LinkId, endpoint_id: EndpointId, pdu: UPrepare) {
         let cfg = self.config.config();
         if pdu.cell_identifier_ca.is_none() {
@@ -195,7 +196,7 @@ impl MleBs {
             cross_station,
             stch,
         };
-        if crate::net_brew::is_site_linked(&self.config) {
+        if crate::net_brew::is_site_linked(&self.config) && cfg.is_station_carrier(target_carrier) {
             tracing::info!(
                 "MLE: U-PREPARE from {} → sibling cell ci={} carrier={}",
                 addr.ssi,
@@ -1105,6 +1106,10 @@ location_area = 7
 "#;
         let mut cfg = tetra_config::bluestation::parsing::from_toml_str(&format!("{toml}{extra}")).unwrap();
         cfg.site_linked = site_linked;
+        if site_linked {
+            // The neighbour on 1525 is a sibling cell of the same station.
+            cfg.station_carriers = vec![1521, 1525];
+        }
         SharedConfig::from_parts(cfg, None)
     }
 
@@ -1527,6 +1532,81 @@ location_area = 7
         let msgs = drain(&mut q);
         assert_eq!(sent_mle_pdus(&msgs), vec![format!("000010{}", MM_ACCEPT)]);
         assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverDone { issi: MS })));
+    }
+
+    #[test]
+    fn u_prepare_from_a_multi_cell_station_to_another_station_asks_brew() {
+        // Cell 1525 of a linked two-cell station; its neighbour 1521 is the sibling, 1600 is a
+        // cell of another station.
+        let mut cfg = tetra_config::bluestation::parsing::from_toml_str(&format!(
+            "{}{}",
+            r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "None"
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[cell_info]
+main_carrier = 1525
+freq_band = 4
+freq_offset = 0
+duplex_spacing = 4
+reverse_operation = false
+location_area = 1
+
+[[cell_info.neighbor_cells_ca]]
+cell_identifier_ca = 1
+cell_reselection_types_supported = 1
+neighbor_cell_synchronized = false
+cell_load_ca = 0
+main_carrier_number = 1600
+location_area = 7
+
+[[cell_info.neighbor_cells_ca]]
+cell_identifier_ca = 2
+cell_reselection_types_supported = 1
+neighbor_cell_synchronized = false
+cell_load_ca = 0
+main_carrier_number = 1521
+"#,
+            r#"
+[brew]
+host = "brew.example"
+port = 3000
+tls = false
+username = 1
+password = "x"
+"#
+        ))
+        .unwrap();
+        cfg.site_linked = true;
+        cfg.station_carriers = vec![1521, 1525];
+        let mut mle = MleBs::new(SharedConfig::from_parts(cfg, None));
+        let mut q = MessageQueue::new();
+
+        let msgs = cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        assert!(sent_mle_pdus(&msgs).is_empty(), "D-NEW-CELL waits for the other station");
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest { issi: MS, target_carrier: 1600, sdu: Some(_), .. })));
+        assert!(!told_brew(&msgs, |cc| matches!(cc, CallControl::SiteHandoverPrepare { .. } | CallControl::SiteForwardRegistration { .. })));
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, Some(MM_ACCEPT)));
+        let msgs = drain(&mut q);
+        assert_eq!(sent_mle_pdus(&msgs), vec![format!("000010{}", MM_ACCEPT)]);
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverDone { issi: MS })));
+
+        // The sibling stays with the site switch.
+        let prepare = UPrepare {
+            cell_identifier_ca: Some(2),
+            sdu: Some(BitBuffer::from_bitstr(MM_DEMAND)),
+        };
+        mle.rx_prim(&mut q, uplink_mle(|b| prepare.to_bitbuf(b).unwrap()));
+        let msgs = drain(&mut q);
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::SiteForwardRegistration { target_carrier: 1521, .. })));
+        assert!(!told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest { .. })));
     }
 
     #[test]

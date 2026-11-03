@@ -2321,8 +2321,11 @@ impl BrewEntity {
         req.transaction_id = self.ho_last_transaction;
         // Type 1 needs the target's channel in this cell's channel allocation, which names it
         // in this cell's band plan (no extended carrier numbering, clause 21.5.2).
+        // A linked multi-cell station runs its group calls per cell (call identifiers and
+        // channels belong to the cells, not to this entity), so it offers type 2 only.
         let same_plan = tetra_config::bluestation::carrier_band_plan(&self.config.config().cell) == Some(req.target_carrier_ext);
-        let call = if req.sdu.is_some() && same_plan { self.type1_call(req.issi) } else { None };
+        let linked = super::is_site_linked(&self.config);
+        let call = if req.sdu.is_some() && same_plan && !linked { self.type1_call(req.issi) } else { None };
         req.call_gssi = call.map(|c| c.gssi);
         self.ho_requests.insert(
             req.transaction_id,
@@ -2507,6 +2510,15 @@ impl BrewEntity {
     /// channel here (hang time included), from CMCE's published call table. An individual call
     /// still being set up does not count.
     fn in_circuit_call(&self, issi: u32) -> bool {
+        // On a linked multi-cell station the call table above is the primary cell's only; the
+        // calls this entity carries for any cell count too (its talkers and individual calls,
+        // and network group calls to the radio's groups).
+        let groups = self.subscriber_groups.get(&issi);
+        if self.ul_forwarded.values().any(|c| c.source_issi == issi || (c.kind != UlForwardKind::Group && c.dest_gssi == issi))
+            || self.active_calls.values().any(|c| c.dest_gssi != 0 && groups.is_some_and(|g| g.contains(&c.dest_gssi)))
+        {
+            return true;
+        }
         let state = self.config.state_read();
         state.active_call_ts.contains_key(&issi)
             || state

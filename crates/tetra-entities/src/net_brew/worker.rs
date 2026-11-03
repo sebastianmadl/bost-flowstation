@@ -339,11 +339,12 @@ fn broadcast_values(config: &StackConfig, cell: &tetra_config::bluestation::CfgC
     );
 }
 
-/// This station answers handover requests from other stations: the server relays them
-/// (`handover-v1` offered) and the station is a single cell. A linked multi-cell station hands
-/// over between its own cells through the site switch; between stations it is not a target yet.
-fn handles_handover(config: &StackConfig, server_extensions: &[String]) -> bool {
-    !config.is_site_linked() && server_extensions.iter().any(|e| e == BREW_EXT_HANDOVER)
+/// This station takes part in announced reselection with other stations: the server relays the
+/// requests (`handover-v1` offered). A linked multi-cell station too: its site switch hands each
+/// request to the cell of the target carrier and each answer back to the asking cell (between its
+/// own cells it never asks the server).
+fn handles_handover(_config: &StackConfig, server_extensions: &[String]) -> bool {
+    server_extensions.iter().any(|e| e == BREW_EXT_HANDOVER)
 }
 
 /// This station restores individual calls of radios that come from another station: it takes
@@ -1532,7 +1533,7 @@ password = "x"
     const HANDOVER: [&str; 3] = ["bts-info", "handover-v1", "ms-cell"];
 
     #[test]
-    fn bts_info_announces_handover_only_where_offered_and_single_cell() {
+    fn bts_info_announces_handover_only_where_offered() {
         let offered: Vec<String> = HANDOVER.iter().map(|e| e.to_string()).collect();
         let single = bts_info_message(&config("").config(), &offered).unwrap();
         assert_eq!(json_of(&single)["capabilities"], serde_json::json!(["handover-v1"]));
@@ -1543,7 +1544,7 @@ password = "x"
         let multi = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
         assert!(multi.config().is_site_linked());
         let multi = bts_info_message(&multi.config(), &offered).unwrap();
-        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "multi-cell stations are not a target yet");
+        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!(["handover-v1"]), "a multi-cell station is a target too");
     }
 
     #[test]
@@ -1555,7 +1556,11 @@ password = "x"
 
         let multi = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
         let multi = bts_info_message(&multi.config(), &offered).unwrap();
-        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "only with handover-v1");
+        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!(["handover-v1", "ms-moved"]), "multi-cell too");
+
+        offered.retain(|e| e != BREW_EXT_HANDOVER);
+        let no_ho = bts_info_message(&config("").config(), &offered).unwrap();
+        assert_eq!(json_of(&no_ho)["capabilities"], serde_json::json!([]), "only with handover-v1");
     }
 
     fn ms_moved(json: &str) -> Vec<u8> {
@@ -1603,7 +1608,7 @@ password = "x"
         assert_eq!(json_of(&single)["capabilities"], serde_json::json!(["handover-v1", "ms-moved", "call-restore"]));
         let multi = config("\n[[cells]]\nid = 3\n[cells.cell_info]\nmain_carrier = 1530\nlocation_area = 11\n");
         let multi = bts_info_message(&multi.config(), &offered).unwrap();
-        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!([]), "only with handover-v1");
+        assert_eq!(json_of(&multi)["capabilities"], serde_json::json!(["handover-v1", "ms-moved", "call-restore"]), "multi-cell too");
     }
 
     #[test]

@@ -258,6 +258,10 @@ colour_code = 2
         assert!(cell.is_multi_cell() && cfg.is_multi_cell());
         assert_eq!(cell.net.mcc, cfg.net.mcc);
         cell.validate().unwrap();
+        let primary = cfg.cell.main_carrier;
+        assert!(cfg.is_station_carrier(primary) && cfg.is_station_carrier(1525), "the primary knows its siblings");
+        assert!(cell.is_station_carrier(primary) && cell.is_station_carrier(1525), "an extra cell knows its siblings");
+        assert!(!cell.is_station_carrier(1600) && !cfg.is_station_carrier(1600), "another station's carrier");
 
         assert!(cfg.for_extra_cell(CellId(2)).is_none());
     }

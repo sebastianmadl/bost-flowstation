@@ -2173,6 +2173,17 @@ const SIBLING_CARRIER: u16 = 1599;
 /// `bluestation-bs` does: the real Brew entity inside the site switch on cell 0, a cell link in
 /// cell 1's network slot.
 fn multi_cell_sim(cell1_la: u16, extensions: &[&str]) -> Sim {
+    multi_cell_sim_with(cell1_la, extensions, Vec::new(), &|_, _| {})
+}
+
+/// `multi_cell_sim` with neighbour lists: `cell1_neighbours` for station 0's second cell,
+/// `configure` for stations 1 to 9.
+fn multi_cell_sim_with(
+    cell1_la: u16,
+    extensions: &[&str],
+    cell1_neighbours: Vec<CfgNeighborCellCa>,
+    configure: &dyn Fn(usize, &mut StackConfig),
+) -> Sim {
     let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
     config.cell.main_carrier = 1521;
     config.cell.location_area = 1;
@@ -2181,6 +2192,7 @@ fn multi_cell_sim(cell1_la: u16, extensions: &[&str]) -> Sim {
     let mut cell1 = config.cell.clone();
     cell1.main_carrier = SIBLING_CARRIER;
     cell1.location_area = cell1_la;
+    cell1.neighbor_cells_ca = cell1_neighbours;
     config.extra_cells = vec![CfgExtraCell {
         id: CellId(1),
         cell: cell1,
@@ -2221,7 +2233,7 @@ fn multi_cell_sim(cell1_la: u16, extensions: &[&str]) -> Sim {
         voice_down: Vec::new(),
     };
     let mut stations = vec![cell(primary, wire, 1521)];
-    stations.extend((1..STATIONS).map(|i| station(i, i as u16 + 1, extensions, &|_, _| {})));
+    stations.extend((1..STATIONS).map(|i| station(i, i as u16 + 1, extensions, configure)));
     stations.push(cell(sibling, Arc::new(Mutex::new(Wire::default())), SIBLING_CARRIER));
     let wires = stations.iter().map(|s| s.wire.clone()).collect();
     let mut sim = Sim {
@@ -2455,4 +2467,154 @@ fn sim_multi_cell_individual_call_reaches_a_radio_that_moved_within_the_location
         });
         sim.steps(20);
     }
+}
+
+/// Milestone 7 step 3: a multi-cell station takes part in roaming between stations like a
+/// single-cell one; its site switch hands each request to the cell concerned. 26 radios, station
+/// 0's second cell (own location area 11) lists stations 1 to 6, which list it back. Each radio:
+///
+/// 1. announced reselection (U-PREPARE with forward registration, TS 100 392-2 clause 18.3.4.7.5)
+///    from station k to the second cell: the second cell's MM registers it, k sends D-NEW-CELL
+///    with that accept;
+/// 2. an individual call from the network reaches it there; it moves unannounced to station m with
+///    service restoration roaming (clause 16.4 a)): the network moves the call, the second cell
+///    lets its leg go (`call-restore`), drops the radio (`ms-moved`) without deregistering it,
+///    and the radio restores the call on m (clause 14.5.1.2.4);
+/// 3. every second radio: a call on m, then it moves unannounced back to the second cell and
+///    restores the call there (voice both ways on the second cell's channel), then leaves by
+///    announced reselection to another station, which registers it; the second cell drops it.
+#[test]
+fn sim_multi_cell_station_roams_with_other_stations() {
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED, BREW_EXT_MS_RESELECTION, BREW_EXT_CALL_RESTORE];
+    let cell1_la = 11;
+    let neighbours: Vec<CfgNeighborCellCa> = (1..=6u8).map(|i| neighbour(i, 1521 + 2 * i as u16, i as u16 + 1)).collect();
+    let mut sim = multi_cell_sim_with(cell1_la, &extensions, neighbours, &|i, cfg| {
+        cfg.cell.neighbor_cells_ca = vec![neighbour(1, SIBLING_CARRIER, 11), neighbour(2, 1521 + 2 * ((i % 9) + 1) as u16, (i % 9) as u16 + 2)];
+    });
+    let caps = &sim.relay.cells[&0].1;
+    for cap in [BREW_EXT_HANDOVER, BREW_EXT_MS_MOVED, BREW_EXT_CALL_RESTORE] {
+        assert!(caps.iter().any(|c| c == cap), "the multi-cell station announces {cap}: {caps:?}");
+    }
+    assert!(sim.relay.cells[&0].0.contains(&SIBLING_CARRIER), "both cells announced");
+
+    let accept = format!("{:04b}", MmPduTypeDl::DLocationUpdateAccept.into_raw());
+    let registered = |sim: &Sim, cell: usize, issi: u32| sim.stations[cell].test.get_shared_config().state_read().subscribers.is_registered(issi);
+    let (mut arrived, mut restored_away, mut restored_here, mut left) = (0, 0, 0, 0);
+    for n in 0..26usize {
+        let radio = FIRST_ISSI + 900 + n as u32;
+        let gssi = GROUPS[n % 5];
+        let k = 1 + n % 6;
+        let m = 1 + (n + 3) % 6;
+        sim.clear_air();
+
+        // 1. Announced from station k to the second cell.
+        sim.register(k, radio, LocationUpdateType::RoamingLocationUpdating, &[gssi]);
+        sim.submit(k, u_prepare(radio, 1, true));
+        sim.run_until(&format!("station {k} answers ISSI {radio}'s U-PREPARE"), |s| prepare_answer(&s.stations[k].air, radio).is_some());
+        let answer = prepare_answer(&sim.stations[k].air, radio).unwrap();
+        assert!(answer.starts_with(&format!("{D_NEW_CELL_CHANGE_NOW}{accept}")), "ISSI {radio}: D-NEW-CELL with the second cell's accept, got {answer}");
+        assert_eq!(sim.relay.location.get(&radio), Some(&0), "registered on the multi-cell station before leaving");
+        assert!(registered(&sim, SIBLING, radio) && !registered(&sim, 0, radio), "the second cell registered it");
+        arrived += 1;
+
+        // 2. A network call on the second cell, then unannounced to station m.
+        let app = 2_200_901 + n as u32;
+        let duplex = n % 3 != 0;
+        let id = Uuid::from_u128(0x7C00 + n as u128);
+        sim.relay.call_radio(id, app, radio, 0, duplex, &sim.wires);
+        sim.run_until(&format!("the second cell pages ISSI {radio}"), |s| individual_setup_call_id(&s.stations[SIBLING].air, radio).is_some());
+        assert!(individual_setup_call_id(&sim.stations[0].air, radio).is_none(), "own location area: only its cell pages");
+        let old_id = individual_setup_call_id(&sim.stations[SIBLING].air, radio).unwrap();
+        sim.submit(SIBLING, u_connect(radio, old_id, duplex));
+        sim.run_until(&format!("ISSI {radio}'s call is connected on the second cell"), |s| {
+            cmce_pdu_to(&s.stations[SIBLING].air, radio, CmcePduTypeDl::DConnectAcknowledge)
+        });
+        sim.steps(10);
+        sim.register(m, radio, LocationUpdateType::ServiceRestorationRoamingLocationUpdating, &[gssi]);
+        sim.run_until(&format!("the second cell lets ISSI {radio}'s leg go"), |s| {
+            cmce_pdu_to(&s.stations[SIBLING].air, radio, CmcePduTypeDl::DRelease)
+        });
+        assert!(sim.relay.ms_moved.contains(&(radio, 0)), "the network told the multi-cell station");
+        sim.run_until(&format!("the second cell drops ISSI {radio}"), |s| !registered(s, SIBLING, radio));
+        sim.submit(m, u_restore_individual(radio, old_id, app, true, cell1_la as u64));
+        sim.run_until(&format!("ISSI {radio} is restored on station {m}"), |s| call_restore_to(&s.stations[m].air, radio).is_some());
+        sim.wires[m].lock().unwrap().to_station.push_back(build_call_release(&id, 1));
+        sim.relay.private.remove(&id);
+        sim.run_until(&format!("station {m} releases ISSI {radio}"), |s| cmce_pdu_to(&s.stations[m].air, radio, CmcePduTypeDl::DRelease));
+        restored_away += 1;
+        sim.steps(20);
+        assert!(!sim.relay.deregistrations.contains(&(radio, 0)), "the multi-cell station deregistered ISSI {radio} on the network");
+        assert_eq!(sim.relay.location.get(&radio), Some(&m));
+        if n % 2 == 1 {
+            continue;
+        }
+
+        // 3. A call on m, back to the second cell unannounced, restored there.
+        sim.clear_air();
+        let id = Uuid::from_u128(0x7D00 + n as u128);
+        sim.relay.call_radio(id, app, radio, m, duplex, &sim.wires);
+        sim.run_until(&format!("station {m} pages ISSI {radio}"), |s| individual_setup_call_id(&s.stations[m].air, radio).is_some());
+        let old_id = individual_setup_call_id(&sim.stations[m].air, radio).unwrap();
+        sim.submit(m, u_connect(radio, old_id, duplex));
+        sim.run_until(&format!("ISSI {radio}'s call is connected on station {m}"), |s| {
+            cmce_pdu_to(&s.stations[m].air, radio, CmcePduTypeDl::DConnectAcknowledge)
+        });
+        sim.steps(10);
+        register_on_cell(&mut sim, SIBLING, radio, LocationUpdateType::ServiceRestorationRoamingLocationUpdating, &[gssi]);
+        sim.run_until(&format!("station {m} lets ISSI {radio}'s call go"), |s| cmce_pdu_to(&s.stations[m].air, radio, CmcePduTypeDl::DRelease));
+        assert_eq!(sim.relay.private[&id].owner, 0, "the call moved to the multi-cell station");
+        sim.submit(SIBLING, u_restore_individual(radio, old_id, app, true, (m + 1) as u64));
+        sim.run_until(&format!("ISSI {radio} is restored on the second cell"), |s| call_restore_to(&s.stations[SIBLING].air, radio).is_some());
+        let (pdu, ts) = call_restore_to(&sim.stations[SIBLING].air, radio).unwrap();
+        assert_eq!(pdu.call_identifier, old_id, "D-CALL RESTORE names the call the radio restored");
+        assert_eq!(pdu.transmission_grant, TransmissionGrant::Granted.into_raw() as u8);
+        assert_eq!(sim.relay.restore_requests.last(), Some(&(0, radio, app)), "the second cell asked the network");
+        assert!(call_restore_to(&sim.stations[0].air, radio).is_none(), "the primary cell stays out of it");
+        for _ in 0..8 {
+            sim.wires[0].lock().unwrap().to_station.push_back(build_voice_frame(&id, 274, &[0u8; 36]));
+        }
+        sim.run_until(&format!("the second cell plays the app's voice to ISSI {radio}"), |s| {
+            s.stations[SIBLING].voice_down.contains(&(SIBLING_CARRIER, ts))
+        });
+        sim.relay.voice_up.retain(|(_, c)| *c != id);
+        sim.submit(
+            SIBLING,
+            SapMsg {
+                sap: Sap::TmdSap,
+                src: TetraEntity::Umac,
+                dest: TetraEntity::Brew,
+                msg: SapMsgInner::TmdCircuitDataInd(TmdCircuitDataInd {
+                    carrier_num: SIBLING_CARRIER,
+                    ts,
+                    data: vec![0u8; 35],
+                }),
+            },
+        );
+        sim.run_until(&format!("ISSI {radio}'s voice reaches the network from the second cell"), |s| s.relay.voice_up.contains(&(0, id)));
+        assert!(!sim.relay.call_releases.iter().any(|(_, c, _)| *c == id), "nobody ended the call on the network");
+        sim.wires[0].lock().unwrap().to_station.push_back(build_call_release(&id, 1));
+        sim.relay.private.remove(&id);
+        sim.run_until(&format!("the second cell releases ISSI {radio}"), |s| {
+            cmce_pdu_to(&s.stations[SIBLING].air, radio, CmcePduTypeDl::DRelease)
+        });
+        restored_here += 1;
+        sim.steps(20);
+
+        //    Announced from the second cell to station j (one the radio has not been on: k
+        //    may still be dropping it, after its departure delay).
+        let j = 1 + (n + 1) % 6;
+        sim.clear_air();
+        sim.submit(SIBLING, u_prepare(radio, j as u64, true));
+        sim.run_until(&format!("the second cell answers ISSI {radio}'s U-PREPARE"), |s| prepare_answer(&s.stations[SIBLING].air, radio).is_some());
+        let answer = prepare_answer(&sim.stations[SIBLING].air, radio).unwrap();
+        assert!(answer.starts_with(&format!("{D_NEW_CELL_CHANGE_NOW}{accept}")), "ISSI {radio}: D-NEW-CELL with station {j}'s accept, got {answer}");
+        assert!(prepare_answer(&sim.stations[0].air, radio).is_none(), "the primary cell stays out of it");
+        assert_eq!(sim.relay.location.get(&radio), Some(&j));
+        sim.run_until(&format!("the second cell drops ISSI {radio} after it left"), |s| !registered(s, SIBLING, radio));
+        sim.steps(20);
+        assert!(!sim.relay.deregistrations.contains(&(radio, 0)), "the multi-cell station deregistered ISSI {radio} on the network");
+        assert!(sim.relay.reselections.iter().any(|(i, st, t)| *i == radio && *st == 0 && t == "announced_type_2"), "station 0 reported the announced reselection");
+        left += 1;
+    }
+    assert_eq!((arrived, restored_away, restored_here, left), (26, 26, 13, 13));
 }

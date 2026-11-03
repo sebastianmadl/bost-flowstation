@@ -288,7 +288,7 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 ### What it needs
 
 - [brew-server](https://github.com/ysamouhos/brew-server) 1.20.0 or newer (when released), or another Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade; see brew-server `docs/Handover.md` and `docs/Brew-Extensions.md`). The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
-- One cell per station: a multi-cell station hands over between its own cells (see above) but is not a cross-station target yet.
+- Single-cell and multi-cell stations both take part. On a multi-cell station the site switch hands each request from the server to the cell of the target carrier and each answer back to the cell that asked. Between stations a multi-cell station offers type 2 only (no type 1 with a channel of the other station); between its own cells nothing changes.
 - Each station lists the other as a neighbour (dashboard page **Roaming / Cells**, or by hand). That page also shows whether the server offers the extensions, and with `cell-directory` lets you pick the other station's cell from the server's list and checks that both sides list each other. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
 
   ```toml

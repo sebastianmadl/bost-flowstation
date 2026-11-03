@@ -82,6 +82,11 @@ pub struct StackConfig {
     /// site switch (see [`StackConfig::is_site_linked`]). Always false in parsed configs.
     pub site_linked: bool,
 
+    /// Main carriers of every cell of this station, set on an additional cell's derived config
+    /// (that config has no `extra_cells`). Empty in parsed configs; see
+    /// [`StackConfig::is_station_carrier`].
+    pub station_carriers: Vec<u16>,
+
     /// Which cell of the station this config runs: `CellId::PRIMARY` for the file as parsed, the
     /// `[[cells]]` id on a derived per-cell config (see [`StackConfig::for_extra_cell`]).
     pub cell_id: CellId,
@@ -225,6 +230,7 @@ impl StackConfig {
         cfg.cell = extra.cell.clone();
         cfg.phy_io.soapysdr = extra.soapysdr.clone();
         cfg.site_linked = self.is_site_linked();
+        cfg.station_carriers = self.cells().iter().map(|(_, c, _)| c.main_carrier).collect();
         cfg.cell_id = id;
         cfg.extra_cells = Vec::new();
         cfg.asterisk.enabled = self.asterisk.enabled && self.is_site_linked();
@@ -296,6 +302,12 @@ impl StackConfig {
     /// True for every cell of a station that runs more than one cell.
     pub fn is_multi_cell(&self) -> bool {
         !self.extra_cells.is_empty() || !self.cell_id.is_primary()
+    }
+
+    /// True when `carrier` is the main carrier of a cell of this station (this one or a sibling).
+    /// A neighbour on any other carrier belongs to another station.
+    pub fn is_station_carrier(&self, carrier: u16) -> bool {
+        self.cells().iter().any(|(_, c, _)| c.main_carrier == carrier) || self.station_carriers.contains(&carrier)
     }
 
     /// True when a network link (Brew, or enabled LST Dispatch) is configured.
