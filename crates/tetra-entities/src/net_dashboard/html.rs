@@ -4103,7 +4103,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
     </div>
     <div class="nav-item" onclick="showPage('roaming',this)" id="nav-roaming">
       <span class="nav-icon" data-icon="roaming"></span>
-      <span class="nav-label" data-i18n="roaming">ROAMING</span>
+      <span class="nav-label" data-i18n="roaming">ROAMING / CELLS</span>
     </div>
     <div class="nav-item" onclick="showPage('config',this)" id="nav-config">
       <span class="nav-icon" data-icon="config"></span>
@@ -4551,28 +4551,6 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
               <div class="bts-tile"><div class="bts-tile-label" data-i18n="bts_shift">Duplex Shift</div><div class="bts-tile-value" id="bts-sec-shift">—</div></div>
             </div>
           </div>
-        </div>
-      </div>
-
-      <!-- Cells — one per SDR (multi-cell) -->
-      <div class="card" id="cells-card">
-        <div class="card-head">
-          <div class="card-title" data-i18n="cells_title">Cells</div>
-          <div class="card-actions"><span id="cells-link" class="bts-chip">—</span></div>
-        </div>
-        <div class="card-body">
-          <div class="cells-list" id="cells-list"></div>
-          <div class="help-text" data-i18n="cells_help">Each extra SDR runs one more cell. Pick a free carrier; its frequencies follow from the primary cell's band plan. The station restarts to apply changes.</div>
-          <div class="cells-add">
-            <input type="text" class="form-input" id="cells-device" list="cells-device-options" placeholder="driver=plutosdr,uri=ip:192.168.3.1">
-            <datalist id="cells-device-options"></datalist>
-            <input type="number" class="form-input narrow" id="cells-carrier" min="0" max="4095" placeholder="Carrier" data-i18n-placeholder="bts_sec_carrier">
-            <input type="number" class="form-input narrow" id="cells-cc" min="0" max="63" placeholder="Colour code" data-i18n-placeholder="cfg_colour">
-            <input type="number" class="form-input narrow" id="cells-la" min="0" max="16383" placeholder="Location area" data-i18n-placeholder="cfg_la" title="Location area" data-i18n-title="cells_la_help">
-            <button class="btn btn-sm" onclick="cellsScan()" data-i18n="setup_scan">Scan</button>
-            <button class="btn btn-sm" onclick="cellsAdd()" data-i18n="cells_add">Add cell</button>
-          </div>
-          <div class="help-text" id="cells-msg"></div>
         </div>
       </div>
 
@@ -6079,10 +6057,32 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head"><div class="card-title" data-i18n="roam_cells_title">Cells of this station</div></div>
+      <!-- Cells — one per SDR (multi-cell) -->
+      <div class="card" id="cells-card">
+        <div class="card-head">
+          <div class="card-title" data-i18n="cells_title">Cells</div>
+          <div class="card-actions"><span id="cells-link" class="bts-chip">—</span></div>
+        </div>
         <div class="card-body">
-          <div class="help-text" style="margin-bottom:8px" data-i18n="roam_cells_help">Same location area on all cells: radios change cell without registering, so group calls and individual call setups run on every cell of the area. Own location area per cell: radios register on every change and station and server always know the exact cell (TS 100 392-2 clause 18.3.4.7.1a). Empty = the primary's location area. New cells are added in the Cells card on Home.</div>
+          <div class="cells-list" id="cells-list"></div>
+          <div class="help-text" data-i18n="cells_help">Each extra SDR runs one more cell. Pick a free carrier; its frequencies follow from the primary cell's band plan. The station restarts to apply changes.</div>
+          <div class="cells-add">
+            <input type="text" class="form-input" id="cells-device" list="cells-device-options" placeholder="driver=plutosdr,uri=ip:192.168.3.1">
+            <datalist id="cells-device-options"></datalist>
+            <input type="number" class="form-input narrow" id="cells-carrier" min="0" max="4095" placeholder="Carrier" data-i18n-placeholder="bts_sec_carrier">
+            <input type="number" class="form-input narrow" id="cells-cc" min="0" max="63" placeholder="Colour code" data-i18n-placeholder="cfg_colour">
+            <input type="number" class="form-input narrow" id="cells-la" min="0" max="16383" placeholder="Location area" data-i18n-placeholder="cfg_la" title="Location area" data-i18n-title="cells_la_help">
+            <button class="btn btn-sm" onclick="cellsScan()" data-i18n="setup_scan">Scan</button>
+            <button class="btn btn-sm" onclick="cellsAdd()" data-i18n="cells_add">Add cell</button>
+          </div>
+          <div class="help-text" id="cells-msg"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title" data-i18n="roam_cells_title">Location areas</div></div>
+        <div class="card-body">
+          <div class="help-text" style="margin-bottom:8px" data-i18n="roam_cells_help">Same location area on all cells: radios change cell without registering, so group calls and individual call setups run on every cell of the area. Own location area per cell: radios register on every change and station and server always know the exact cell (TS 100 392-2 clause 18.3.4.7.1a). Empty = the primary's location area. New cells are added in the Cells card above.</div>
           <div class="table-wrap">
             <table class="table-stack">
               <thead><tr>
@@ -6098,9 +6098,12 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head"><div class="card-title" data-i18n="roam_resel_title">Cell reselection (all cells)</div></div>
-        <div class="card-body">
+      <details class="cfg-adv-details" id="roam-resel-details">
+        <summary>
+          <span data-i18n="roam_resel_title">Cell reselection (advanced, all cells)</span>
+          <span style="font-size:11px;font-weight:500;color:var(--text3);text-transform:none;letter-spacing:0" data-i18n="roam_resel_toggle">Show / hide</span>
+        </summary>
+        <div class="cfg-adv-body">
           <div class="group-list">
             <label class="field"><span data-i18n="roam_fast_th">Fast threshold (dB)</span><select id="rm-fast-th" class="form-input"></select></label>
             <label class="field"><span data-i18n="roam_slow_th">Slow threshold above fast (dB)</span><select id="rm-slow-th" class="form-input"></select></label>
@@ -6112,7 +6115,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           </div>
           <div class="help-text" id="roam-dbm-hint" style="margin-top:8px"></div>
         </div>
-      </div>
+      </details>
 
       <div class="card">
         <div class="card-head">
@@ -7722,9 +7725,9 @@ const LANGS={
     terminals:'Radios',registered:'registered',
     active_calls:'Active Calls',circuits:'circuits in use',
     registered_terminals:'Registered Radios',
-    roaming:'Roaming',roam_title:'Roaming, neighbours and cells',roam_reload:'Reload',roam_help:'Everything that decides when and how radios move between cells: the cells of this station and their location areas, the neighbour cells each cell broadcasts, the reselection values and the presence check. Saving checks the whole config first and restarts the station.',
-    roam_cells_title:'Cells of this station',roam_cells_help:'Same location area on all cells: radios change cell without registering, so group calls and individual call setups run on every cell of the area. Own location area per cell: radios register on every change and station and server always know the exact cell (TS 100 392-2 clause 18.3.4.7.1a). Empty = the primary\'s location area. New cells are added in the Cells card on Home.',
-    roam_th_cell:'Cell',roam_th_global:'Global cell id',roam_resel_title:'Cell reselection (all cells)',roam_fast_th:'Fast threshold (dB)',roam_slow_th:'Slow threshold above fast (dB)',roam_fast_hy:'Fast hysteresis (dB)',roam_slow_hy:'Slow hysteresis (dB)',roam_presence:'Presence check after silence (s)',
+    roaming:'Roaming / Cells',roam_title:'Roaming, neighbours and cells',roam_reload:'Reload',roam_help:'Everything that decides when and how radios move between cells: the cells of this station and their location areas, the neighbour cells each cell broadcasts, the reselection values and the presence check. Saving checks the whole config first and restarts the station.',
+    roam_cells_title:'Location areas',roam_cells_help:'Same location area on all cells: radios change cell without registering, so group calls and individual call setups run on every cell of the area. Own location area per cell: radios register on every change and station and server always know the exact cell (TS 100 392-2 clause 18.3.4.7.1a). Empty = the primary\'s location area. New cells are added in the Cells card above.',
+    roam_th_cell:'Cell',roam_th_global:'Global cell id',roam_resel_title:'Cell reselection (advanced, all cells)',roam_resel_toggle:'Show / hide',roam_fast_th:'Fast threshold (dB)',roam_slow_th:'Slow threshold above fast (dB)',roam_fast_hy:'Fast hysteresis (dB)',roam_slow_hy:'Slow hysteresis (dB)',roam_presence:'Presence check after silence (s)',
     roam_nb_title:'Neighbour cells',roam_nb_add:'Add neighbour',roam_nb_help:'What the selected cell broadcasts in D-NWRK-BROADCAST (at most 7, clause 18.5.17). The station\'s other cells are added automatically. An extra cell without its own list broadcasts only the station\'s cells.',roam_own_list:'Own neighbour list for this cell',
     roam_th_types:'Reselection',roam_th_services:'Services',roam_n_id:'Cell identifier (0-31)',roam_n_carrier:'Main carrier (0-4095)',roam_n_ext:'Carrier extension (optional)',roam_n_types:'Reselection types',roam_n_sync:'Synchronised with this cell',roam_n_load:'Cell load',roam_n_la:'Location area (optional)',roam_n_rxlev:'Min. RX access level (optional)',roam_n_txpwr:'Max. MS TX power (optional)',
     roam_n_services_help:'BS service details of the neighbour (table 18.26). Missing flags are broadcast as "not supported", so a new entry starts with this cell\'s own services.',roam_apply:'Apply',roam_edit:'Edit',roam_edit_title:'Neighbour {n}',roam_new_title:'New neighbour',roam_same_as_cell:'Same as this cell',
@@ -8313,9 +8316,9 @@ const LANGS={
   },
   es:{
     "ui_language":"Idioma",
-    roaming:'Roaming',roam_title:'Roaming, vecinas y celdas',roam_reload:'Recargar',roam_help:'Todo lo que decide cuándo y cómo pasan las radios de una celda a otra: las celdas de esta estación y sus áreas de localización, las celdas vecinas que anuncia cada celda, los valores de reselección y la comprobación de presencia. Al guardar se comprueba toda la configuración y la estación se reinicia.',
-    roam_cells_title:'Celdas de esta estación',roam_cells_help:'Misma área de localización en todas las celdas: las radios cambian de celda sin registrarse, así que las llamadas de grupo y los establecimientos de llamada individual se emiten en todas las celdas del área. Área propia por celda: las radios se registran en cada cambio y la estación y el servidor siempre conocen la celda exacta (TS 100 392-2 cláusula 18.3.4.7.1a). Vacío = el área de la primaria. Las celdas nuevas se añaden en la tarjeta Cells de Inicio.',
-    roam_th_cell:'Celda',roam_th_global:'Id. global de celda',roam_resel_title:'Reselección de celda (todas las celdas)',roam_fast_th:'Umbral rápido (dB)',roam_slow_th:'Umbral lento sobre el rápido (dB)',roam_fast_hy:'Histéresis rápida (dB)',roam_slow_hy:'Histéresis lenta (dB)',roam_presence:'Comprobación de presencia tras silencio (s)',
+    roaming:'Roaming / Celdas',roam_title:'Roaming, vecinas y celdas',roam_reload:'Recargar',roam_help:'Todo lo que decide cuándo y cómo pasan las radios de una celda a otra: las celdas de esta estación y sus áreas de localización, las celdas vecinas que anuncia cada celda, los valores de reselección y la comprobación de presencia. Al guardar se comprueba toda la configuración y la estación se reinicia.',
+    roam_cells_title:'Áreas de localización',roam_cells_help:'Misma área de localización en todas las celdas: las radios cambian de celda sin registrarse, así que las llamadas de grupo y los establecimientos de llamada individual se emiten en todas las celdas del área. Área propia por celda: las radios se registran en cada cambio y la estación y el servidor siempre conocen la celda exacta (TS 100 392-2 cláusula 18.3.4.7.1a). Vacío = el área de la primaria. Las celdas nuevas se añaden en la tarjeta Celdas de arriba.',
+    roam_th_cell:'Celda',roam_th_global:'Id. global de celda',roam_resel_title:'Reselección de celda (avanzado, todas las celdas)',roam_resel_toggle:'Mostrar / ocultar',roam_fast_th:'Umbral rápido (dB)',roam_slow_th:'Umbral lento sobre el rápido (dB)',roam_fast_hy:'Histéresis rápida (dB)',roam_slow_hy:'Histéresis lenta (dB)',roam_presence:'Comprobación de presencia tras silencio (s)',
     roam_nb_title:'Celdas vecinas',roam_nb_add:'Añadir vecina',roam_nb_help:'Lo que la celda seleccionada anuncia en D-NWRK-BROADCAST (máx. 7, cláusula 18.5.17). Las demás celdas de la estación se añaden solas. Una celda adicional sin lista propia anuncia solo las celdas de la estación.',roam_own_list:'Lista de vecinas propia para esta celda',
     roam_th_types:'Reselección',roam_th_services:'Servicios',roam_n_id:'Identificador de celda (0-31)',roam_n_carrier:'Portadora principal (0-4095)',roam_n_ext:'Extensión de portadora (opcional)',roam_n_types:'Tipos de reselección',roam_n_sync:'Sincronizada con esta celda',roam_n_load:'Carga de la celda',roam_n_la:'Área de localización (opcional)',roam_n_rxlev:'Nivel mín. de acceso RX (opcional)',roam_n_txpwr:'Potencia TX máx. de la radio (opcional)',
     roam_n_services_help:'Detalles de servicio de la vecina (tabla 18.26). Los que faltan se anuncian como «no admitido», por eso una entrada nueva empieza con los servicios de esta celda.',roam_apply:'Aplicar',roam_edit:'Editar',roam_edit_title:'Vecina {n}',roam_new_title:'Vecina nueva',roam_same_as_cell:'Igual que esta celda',
@@ -11700,6 +11703,7 @@ function showPage(name,el){
   if(el)el.classList.add('active');
   else{const nav=document.getElementById('nav-'+name);if(nav)nav.classList.add('active');}
   document.getElementById('topbar-title').textContent=t(name)||name;
+  if(name==='roaming')loadCells();
   if(name==='stations'){loadBtsInfoLegacy();loadCells();loadDualCarrier();refreshProfileSelects();}
   if(name==='dgna'){syncDgnaAttachmentModePicker();renderDgnaPage();}
   if(name==='sdslog'){loadSdsLog();}
@@ -18351,10 +18355,10 @@ function renderRfCells(cells,siteLinked){
     c.device?('SDR '+c.device):''].concat(carriers).filter(Boolean).join(' · ');
   setText('rf-cell-detail',detail);
 }
-// Keep the per-cell grid and RF list fresh (cell state, radio counts) while either page is open.
+// Keep the per-cell grid, RF list and Cells card fresh (cell state, radio counts) while one of their pages is open.
 setInterval(()=>{
-  const home=document.getElementById('page-stations'),rfp=document.getElementById('page-rf');
-  if((home&&home.classList.contains('active'))||(rfp&&rfp.classList.contains('active')))loadCells();
+  const home=document.getElementById('page-stations'),rfp=document.getElementById('page-rf'),rmp=document.getElementById('page-roaming');
+  if([home,rfp,rmp].some(p=>p&&p.classList.contains('active')))loadCells();
 },15000);
 async function cellsScan(){
   const msg=document.getElementById('cells-msg');

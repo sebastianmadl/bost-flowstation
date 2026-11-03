@@ -257,7 +257,7 @@ Cells are **linked** when Brew or LST Dispatch is enabled; without either, each 
 
 ### Dashboard and telemetry
 
-The **Roaming** page (left menu) edits everything about moving between cells in one place: location area per cell, reselection thresholds and hysteresis, minimum access level, migration, presence check, and each cell's own neighbour list (`[[cells.cell_info.neighbor_cells_ca]]` for extra cells; without one a cell advertises only the station's cells). It also shows each cell's global id and which roaming extensions the Brew server offers. With a brew-server that offers `cell-directory` it lists the other stations' cells (online or offline), names each neighbour entry after the server cell it matches, warns when that cell does not list this one back or broadcasts other levels or services than the entry says, and fills a new neighbour in from the list.
+The **Roaming / Cells** page (left menu) edits everything about moving between cells in one place: the Cells card (add or remove a cell, moved here from Home), location area per cell, reselection thresholds and hysteresis, minimum access level, migration, presence check, and each cell's own neighbour list (`[[cells.cell_info.neighbor_cells_ca]]` for extra cells; without one a cell advertises only the station's cells). It also shows each cell's global id and which roaming extensions the Brew server offers. With a brew-server that offers `cell-directory` it lists the other stations' cells (online or offline), names each neighbour entry after the server cell it matches, warns when that cell does not list this one back or broadcasts other levels or services than the entry says, and fills a new neighbour in from the list.
 
 
 The registered-radios table shows every cell's radios with a C0/C1… badge, the Calls page includes calls on every cell, and telemetry carries each radio's cell (`MsCell` event).
@@ -289,7 +289,7 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 
 - [brew-server](https://github.com/ysamouhos/brew-server) 1.20.0 or newer (when released), or another Brew server that offers the extensions (`X-Brew-Extensions` on the WebSocket upgrade; see brew-server `docs/Handover.md` and `docs/Brew-Extensions.md`). The station uses them only when offered; with TetraPack, Brandmeister or an older server nothing changes.
 - One cell per station: a multi-cell station hands over between its own cells (see above) but is not a cross-station target yet.
-- Each station lists the other as a neighbour (dashboard page **Roaming**, or by hand). The Roaming page also shows whether the server offers the extensions, and with `cell-directory` lets you pick the other station's cell from the server's list and checks that both sides list each other. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
+- Each station lists the other as a neighbour (dashboard page **Roaming / Cells**, or by hand). That page also shows whether the server offers the extensions, and with `cell-directory` lets you pick the other station's cell from the server's list and checks that both sides list each other. Example for a station on carrier 1528 whose neighbour is on 1530 (and the reverse entry on the other station):
 
   ```toml
   [cell_info]
