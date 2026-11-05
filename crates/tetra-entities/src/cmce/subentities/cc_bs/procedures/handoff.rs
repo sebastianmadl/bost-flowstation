@@ -19,11 +19,14 @@ enum Side {
 }
 
 impl CcBsSubentity {
-    /// This station hands local individual calls to the network and joins network calls of two
-    /// of its radios (extension `call-handoff`, separate stations only; a multi-cell station's
-    /// site switch does not route these requests).
+    /// This cell hands local individual calls to the network and joins network calls of two of
+    /// its radios: with the extension `call-handoff` between separate stations, and always
+    /// between the cells of a multi-cell station, whose site switch routes these requests itself.
     pub(in crate::cmce::subentities::cc_bs) fn hands_off_calls(&self) -> bool {
-        if !brew::is_active(&self.config) || brew::is_site_linked(&self.config) {
+        if brew::is_site_linked(&self.config) {
+            return true;
+        }
+        if !brew::is_active(&self.config) {
             return false;
         }
         let offered = self.config.state_read().brew_server_extensions.clone();
@@ -213,7 +216,9 @@ impl CcBsSubentity {
             brew_uuid,
             handed.simplex_duplex
         );
-        // Voice of the leg that stays now runs between its channel and the network.
+        // The answer goes first, so a site switch knows the call before its media is ready. Voice
+        // of the leg that stays then runs between its channel and the network.
+        answer(queue, Some(handed));
         Self::push_control(
             queue,
             TetraEntity::Brew,
@@ -224,7 +229,6 @@ impl CcBsSubentity {
                 ts,
             },
         );
-        answer(queue, Some(handed));
     }
 
     /// `sender` restores, here, the network call it had with `peer` on another station, and

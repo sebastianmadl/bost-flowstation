@@ -2614,6 +2614,120 @@ fn sim_multi_cell_individual_calls_follow_their_radios_between_cells_in_one_loca
     individual_calls_follow_their_radios_between_cells(1);
 }
 
+/// Milestone 7: calls between two radios of a multi-cell station survive a change of cell, as
+/// between stations (`call-handoff`), but through the site switch alone. 26 radios in 13 pairs,
+/// homes alternating between the two cells. Each pair starts a local call on its home cell; the
+/// caller moves to the other cell and restores the call there (U-CALL RESTORE, TS 100 392-2 clause
+/// 14.5.1.2.4): the home cell hands its call to the switch and the two cells carry it, voice both
+/// ways. Then the caller comes back to its peer's cell and restores again: the home cell joins
+/// both legs into its own local call. The network never hears of any of it. Duplex and simplex
+/// alternate; with an own location area per cell the radio registers first.
+fn radio_to_radio_calls_survive_cell_changes(cell1_la: u16) {
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED, BREW_EXT_CALL_RESTORE, BREW_EXT_CALL_HANDOFF];
+    let mut sim = multi_cell_sim(cell1_la, &extensions);
+    let own_la = cell1_la != 1;
+    let la_of = |cell: usize| if cell == SIBLING { cell1_la } else { 1 };
+    const PAIRS: u32 = 13;
+    let pairs: Vec<(u32, u32, usize, usize)> = (0..PAIRS)
+        .map(|k| {
+            let (home, away) = if k % 2 == 0 { (0, SIBLING) } else { (SIBLING, 0) };
+            (FIRST_ISSI + 700 + 2 * k, FIRST_ISSI + 701 + 2 * k, home, away)
+        })
+        .collect();
+    for &(a, b, home, _) in &pairs {
+        register_on_cell(&mut sim, home, a, LocationUpdateType::RoamingLocationUpdating, &[]);
+        register_on_cell(&mut sim, home, b, LocationUpdateType::RoamingLocationUpdating, &[]);
+    }
+
+    let (mut handed, mut joined) = (0, 0);
+    for (k, &(a, b, home, away)) in pairs.iter().enumerate() {
+        sim.clear_air();
+        let duplex = k % 2 == 0 || k % 3 == 0;
+
+        // A calls B on their home cell: a local call.
+        sim.submit(home, u_setup_individual(a, b, duplex));
+        sim.run_until(&format!("cell {home} pages ISSI {b}"), |s| individual_setup_call_id(&s.stations[home].air, b).is_some());
+        let home_id = individual_setup_call_id(&sim.stations[home].air, b).unwrap();
+        sim.submit(home, u_connect(b, home_id, duplex));
+        sim.run_until(&format!("ISSI {a} hears the call is connected"), |s| {
+            cmce_pdu_to(&s.stations[home].air, a, CmcePduTypeDl::DConnect)
+        });
+        sim.steps(10);
+
+        // A goes to the other cell and restores the call there.
+        if own_la {
+            register_on_cell(&mut sim, away, a, LocationUpdateType::ServiceRestorationRoamingLocationUpdating, &[]);
+        }
+        sim.submit(away, u_restore_individual(a, home_id, b, duplex, la_of(home) as u64));
+        sim.run_until(&format!("ISSI {a} is restored on cell {away}"), |s| call_restore_to(&s.stations[away].air, a).is_some());
+        let (pdu, a_ts) = call_restore_to(&sim.stations[away].air, a).unwrap();
+        assert_eq!(pdu.call_identifier, home_id, "D-CALL RESTORE names the call the radio restored");
+        if duplex {
+            assert_eq!(pdu.transmission_grant, TransmissionGrant::Granted.into_raw() as u8, "duplex: always granted");
+        }
+        assert!(!cmce_pdu_to(&sim.stations[home].air, b, CmcePduTypeDl::DRelease), "B keeps its call");
+        assert!(!restore_fail(&sim.stations[away].air, a));
+        handed += 1;
+
+        // Voice from A on the other cell reaches B on the home cell, and back.
+        let (home_carrier, away_carrier) = (sim.stations[home].carrier, sim.stations[away].carrier);
+        sim.steps(100); // earlier pairs' voice played out
+        sim.stations[home].voice_down.clear();
+        for _ in 0..16 {
+            sim.submit(away, uplink_voice(away_carrier, a_ts));
+        }
+        sim.run_until(&format!("cell {home} plays ISSI {a}'s voice to ISSI {b}"), |s| !s.stations[home].voice_down.is_empty());
+        let (_, b_ts) = sim.stations[home].voice_down[0];
+        sim.steps(100);
+        sim.stations[away].voice_down.clear();
+        for _ in 0..16 {
+            sim.submit(home, uplink_voice(home_carrier, b_ts));
+        }
+        sim.run_until(&format!("cell {away} plays ISSI {b}'s voice to ISSI {a}"), |s| {
+            s.stations[away].voice_down.contains(&(away_carrier, a_ts))
+        });
+
+        // A comes back to B's cell and restores again: the home cell joins both legs.
+        sim.clear_air();
+        let away_id = pdu.new_call_identifier.map_or(pdu.call_identifier, |n| n as u16);
+        if own_la {
+            register_on_cell(&mut sim, home, a, LocationUpdateType::ServiceRestorationRoamingLocationUpdating, &[]);
+        }
+        sim.submit(home, u_restore_individual(a, away_id, b, duplex, la_of(away) as u64));
+        sim.run_until(&format!("ISSI {a} is restored on cell {home}"), |s| call_restore_to(&s.stations[home].air, a).is_some());
+        let (back, _) = call_restore_to(&sim.stations[home].air, a).unwrap();
+        assert_eq!(back.call_identifier, away_id);
+        assert_eq!(back.new_call_identifier.map_or(back.call_identifier, |n| n as u16), home_id, "the home cell's own call again");
+        sim.run_until(&format!("cell {away} lets ISSI {a}'s leg go"), |s| {
+            cmce_pdu_to(&s.stations[away].air, a, CmcePduTypeDl::DRelease)
+        });
+        assert!(!cmce_pdu_to(&sim.stations[home].air, b, CmcePduTypeDl::DRelease), "B keeps its call");
+        joined += 1;
+
+        // B hangs up; both radios are released on the home cell.
+        sim.submit(home, u_disconnect(b, home_id));
+        sim.run_until(&format!("ISSI {a} is released on cell {home}"), |s| {
+            cmce_pdu_to(&s.stations[home].air, a, CmcePduTypeDl::DRelease)
+        });
+        sim.steps(20);
+        for &r in &[a, b] {
+            assert!(!sim.relay.restore_requests.iter().any(|(_, issi, _)| *issi == r), "nothing asked of the network");
+        }
+        assert!(sim.relay.private.is_empty() && sim.relay.bridges.is_empty(), "the calls stay on the station");
+    }
+    assert_eq!((handed, joined), (PAIRS, PAIRS));
+}
+
+#[test]
+fn sim_multi_cell_radio_to_radio_calls_survive_cell_changes_in_one_location_area() {
+    radio_to_radio_calls_survive_cell_changes(1);
+}
+
+#[test]
+fn sim_multi_cell_radio_to_radio_calls_survive_cell_changes_with_own_location_areas() {
+    radio_to_radio_calls_survive_cell_changes(11);
+}
+
 /// Milestone 7: within its location area a radio changes cell without registering (TS 100 392-2
 /// clause 18.3.4.7.1a), so a group call to the members of one cell of a multi-cell station runs on
 /// every cell of that cell's location area; with an own location area per cell it stays on the

@@ -9,7 +9,7 @@ use tetra_saps::{
     SapMsg, SapMsgInner,
     control::{
         brew::{BrewSubscriberAction, MmSubscriberUpdate},
-        call_control::{CallControl, NetworkRestoredCall},
+        call_control::{CallControl, HandedOffCall, NetworkRestoredCall},
     },
     tmd::TmdCircuitDataReq,
 };
@@ -281,6 +281,9 @@ struct CellToCellCall {
     priority: u8,
     circuits: HashMap<CellId, (u16, u8)>,
     last_activity: Instant,
+    /// The leg on this cell ended by uplink inactivity: its radio may be on its way to the
+    /// other cell, which joins both legs (the release is held until the deadline).
+    leg_lost: Option<(CellId, Instant)>,
 }
 
 impl CellToCellCall {
@@ -429,6 +432,9 @@ pub struct SiteSwitch {
     station_forwards: HashMap<u32, (CellId, Instant)>,
     /// Groups last sent to a cell as `SiteAreaMembers` for an ISSI (absent = none).
     area_sent: HashMap<(CellId, u32), Vec<u32>>,
+    /// Local calls asked of a cell for a radio restoring on a sibling cell (`call-handoff` within
+    /// the station): (cell asked, issi) → (asking cell, peer, asked at).
+    sibling_handoffs: HashMap<(CellId, u32), (CellId, u32, Instant)>,
 }
 
 impl SiteSwitch {
@@ -467,6 +473,7 @@ impl SiteSwitch {
             station_asks: HashMap::new(),
             station_forwards: HashMap::new(),
             area_sent: HashMap::new(),
+            sibling_handoffs: HashMap::new(),
         }
     }
 
@@ -743,9 +750,16 @@ impl SiteSwitch {
                 if self.restore_from_sibling(queue, cell, *issi, *peer) {
                     return false;
                 }
+                if self.ask_sibling_for_local_call(queue, cell, *issi, *peer) {
+                    return false;
+                }
                 // Not on another cell here: the network may hold it (another station).
                 self.restore_requests.insert(*issi, cell);
                 true
+            }
+            CallControl::IndividualCallHandoffAnswer { issi, peer, call } => {
+                self.sibling_handoff_answered(queue, cell, *issi, *peer, *call);
+                return false;
             }
             CallControl::RegisteredWithoutCall { issi } => {
                 // A plain roaming registration: the radio gave up a circuit mode call it had on
@@ -912,6 +926,7 @@ impl SiteSwitch {
                                 priority: call.priority,
                                 circuits: HashMap::new(),
                                 last_activity: Instant::now(),
+                                leg_lost: None,
                             },
                         );
                         self.deliver_cc(queue, called, cc.clone());
@@ -1071,6 +1086,86 @@ impl SiteSwitch {
         true
     }
 
+    /// A cell asks for `issi`'s call with `peer` that nobody holds as a network call, and `peer` is
+    /// a radio of a sibling cell: the call is local there (both radios were on that cell). Ask
+    /// that cell to hand it over (`IndividualCallHandoffRequest`); its answer becomes a call
+    /// between the two cells. True if asked.
+    fn ask_sibling_for_local_call(&mut self, queue: &mut MessageQueue, cell: CellId, issi: u32, peer: u32) -> bool {
+        if peer == 0 || peer == issi {
+            return false;
+        }
+        let Some(holder) = self.location(peer).filter(|c| *c != cell) else {
+            return false;
+        };
+        self.sibling_handoffs.retain(|_, (_, _, at)| at.elapsed() < STATION_HANDOVER_LIFETIME);
+        self.sibling_handoffs.insert((holder, issi), (cell, peer, Instant::now()));
+        tracing::info!("SiteSwitch: ISSI {issi} restores on {cell}, asking {holder} for its local call with {peer}");
+        self.deliver_cc(queue, holder, CallControl::IndividualCallHandoffRequest { issi, peer });
+        true
+    }
+
+    /// `holder` answered a handoff asked by `ask_sibling_for_local_call`: the call, now bridged
+    /// under `call.brew_uuid`, runs between the two cells; the asking cell restores it.
+    fn sibling_handoff_answered(&mut self, queue: &mut MessageQueue, holder: CellId, issi: u32, peer: u32, call: Option<HandedOffCall>) {
+        let pending = self.sibling_handoffs.remove(&(holder, issi)).filter(|(_, p, _)| *p == peer);
+        let Some((asker, _, _)) = pending else {
+            if let Some(call) = call {
+                // Nobody waits for it any more: end the leg the cell just bridged.
+                tracing::info!("SiteSwitch: handoff of call {} from {holder} came too late, ending it", call.brew_uuid);
+                let cause = DisconnectCause::CallRestorationOfTheOtherUserFailed.into_raw() as u8;
+                self.deliver_cc(queue, holder, CallControl::NetworkCircuitRelease { brew_uuid: call.brew_uuid, cause });
+            }
+            return;
+        };
+        let Some(call) = call else {
+            self.deliver_cc(queue, asker, CallControl::IndividualCallRestoreAnswer { issi, peer, call: None });
+            return;
+        };
+        let (caller, called, caller_issi, called_issi) = if call.calling_issi == issi {
+            (asker, holder, issi, peer)
+        } else {
+            (holder, asker, peer, issi)
+        };
+        tracing::info!("SiteSwitch: local call of {peer} on {holder} handed over, ISSI {issi} restores it on {asker} (call {})", call.brew_uuid);
+        self.cell_calls.insert(
+            call.brew_uuid,
+            CellToCellCall {
+                caller,
+                called,
+                caller_issi,
+                called_issi,
+                simplex_duplex: call.simplex_duplex,
+                priority: call.priority,
+                circuits: HashMap::new(),
+                last_activity: Instant::now(),
+                leg_lost: None,
+            },
+        );
+        let restored = NetworkRestoredCall {
+            brew_uuid: call.brew_uuid,
+            simplex_duplex: call.simplex_duplex,
+            priority: call.priority,
+            floor_issi: call.floor_issi,
+        };
+        self.deliver_cc(queue, asker, CallControl::IndividualCallRestoreAnswer { issi, peer, call: Some(restored) });
+    }
+
+    /// Calls between two cells whose lost leg was not joined on the other cell in time end there.
+    fn expire_lost_cell_legs(&mut self, queue: &mut MessageQueue) {
+        let now = Instant::now();
+        let expired: Vec<(Uuid, CellId)> = self
+            .cell_calls
+            .iter()
+            .filter_map(|(&uuid, c)| c.leg_lost.filter(|(_, deadline)| *deadline <= now).map(|(lost, _)| (uuid, c.peer(lost))))
+            .collect();
+        for (uuid, peer) in expired {
+            tracing::info!("SiteSwitch: call {uuid} was not restored on {peer}, releasing it there");
+            self.cell_calls.remove(&uuid);
+            let cause = DisconnectCause::CallRestorationOfTheOtherUserFailed.into_raw() as u8;
+            self.deliver_cc(queue, peer, CallControl::NetworkCircuitRelease { brew_uuid: uuid, cause });
+        }
+    }
+
     /// `issi` registered on another cell than `old`: its individual calls with the network on
     /// `old` lose their leg there (as brew-server does between stations) and wait for the radio's
     /// restore on the new cell.
@@ -1225,7 +1320,11 @@ impl SiteSwitch {
         let mover_ind: Option<(Uuid, u32, bool, u8)> = self
             .cell_calls
             .iter()
-            .find(|(_, c)| c.cell_of_issi(issi) == Some(from) && c.peer_issi(issi).is_some())
+            .find(|(_, c)| {
+                // To the peer's own cell the legs are joined on arrival (`call-handoff`), no
+                // second leg is needed.
+                c.cell_of_issi(issi) == Some(from) && c.peer_issi(issi).is_some_and(|p| c.cell_of_issi(p) != Some(target))
+            })
             .map(|(&uuid, c)| (uuid, c.peer_issi(issi).unwrap(), c.simplex_duplex, c.priority));
         if let Some((uuid, peer_issi, simplex_duplex, priority)) = mover_ind {
             tracing::info!("SiteHandover: ISSI {issi} in individual call {uuid} (peer {peer_issi}) {from} → {target}; pre-provisioning restoring leg");
@@ -1282,9 +1381,24 @@ impl SiteSwitch {
             CallControl::NetworkCircuitMediaReady { carrier_num, ts, .. } => {
                 call.circuits.insert(cell, (*carrier_num, *ts));
             }
+            CallControl::NetworkCircuitRelease { cause, .. }
+                if *cause == DisconnectCause::ExpiryOfTimer.into_raw() as u8 && call.leg_lost.is_none() =>
+            {
+                // Uplink inactivity on this cell's leg: its radio may restore the call on the
+                // other cell, which then joins both legs. Hold the release until then.
+                tracing::info!(
+                    "SiteSwitch: leg of call {uuid} on {cell} lost its uplink, holding the call {}s for a restore on {peer}",
+                    CIRCUIT_RESTORE_WINDOW.as_secs()
+                );
+                call.circuits.remove(&cell);
+                call.leg_lost = Some((cell, Instant::now() + CIRCUIT_RESTORE_WINDOW));
+            }
             CallControl::NetworkCircuitRelease { .. } | CallControl::NetworkCircuitSetupReject { .. } => {
+                let lost = call.leg_lost.map(|(c, _)| c);
                 self.cell_calls.remove(&uuid);
-                self.deliver_cc(queue, peer, cc.clone());
+                if lost != Some(peer) {
+                    self.deliver_cc(queue, peer, cc.clone());
+                }
             }
             _ => self.deliver_cc(queue, peer, cc.clone()),
         }
@@ -1548,6 +1662,7 @@ impl TetraEntityTrait for SiteSwitch {
         self.purge_idle();
         self.expire_handovers(queue);
         self.expire_circuit_restores(queue);
+        self.expire_lost_cell_legs(queue);
         let incoming: Vec<(CellId, SapMsg)> = self.ports.from_cells.try_iter().collect();
         for (cell, message) in incoming {
             self.handle_from_cell(queue, cell, message);
@@ -2273,7 +2388,7 @@ main_carrier = 1525
     }
 
     #[test]
-    fn individual_call_handover_preprovisions_restoring_leg_on_target() {
+    fn individual_call_handover_to_the_peers_cell_preprovisions_no_leg() {
         let mut site = Site::new();
         site.member(0, 100, 91);
         site.member(1, 200, 91);
@@ -2299,16 +2414,15 @@ main_carrier = 1525
         site.from_cell(1, cc(CallControl::NetworkCircuitSetupRequest { brew_uuid: uuid, call }));
         site.tick();
 
-        // ISSI 100 (on cell 0) reselects to cell 1: the switch pre-provisions a restoring leg for
-        // 100 on the target cell, carrying the peer (200) and the call parameters.
+        // ISSI 100 (on cell 0) reselects to cell 1, where its peer 200 is: the target cell joins
+        // the two legs locally when 100 restores there, so no second leg is pre-provisioned (it
+        // would be a second call of the same pair on that cell).
         site.from_cell(0, cc(CallControl::SiteHandoverPrepare { issi: 100, target_carrier: C1 }));
         let (_, c1) = site.tick();
         assert!(
-            c1.iter().any(|m| matches!(m,
-                SapMsgInner::CmceCallControl(CallControl::SiteHandoverIndividualCall {
-                    issi: 100, peer_issi: 200, simplex_duplex: true, priority: 3, brew_uuid
-                }) if *brew_uuid == uuid)),
-            "target cell receives a SiteHandoverIndividualCall pre-provision for the moving private call"
+            !c1.iter().any(|m| matches!(m,
+                SapMsgInner::CmceCallControl(CallControl::SiteHandoverIndividualCall { brew_uuid, .. }) if *brew_uuid == uuid)),
+            "no pre-provisioned leg on the peer's own cell"
         );
     }
 
@@ -2985,5 +3099,158 @@ main_carrier = 1525
         site.from_net(SapMsgInner::MmSubscriberUpdate(MmSubscriberUpdate { issi: 777, groups: vec![], action: BrewSubscriberAction::Deregister }));
         let (c0, c1) = site.tick();
         assert!(c0.iter().chain(c1.iter()).filter(|m| matches!(m, SapMsgInner::MmSubscriberUpdate(u) if u.issi == 777)).count() == 2);
+    }
+
+    // ── Calls between two radios of the station across a change of cell ─────────────────────
+
+    const MTH: u32 = 2320973;
+
+    fn handoff_request(msgs: &[SapMsgInner]) -> Option<(u32, u32)> {
+        msgs.iter().find_map(|m| match m {
+            SapMsgInner::CmceCallControl(CallControl::IndividualCallHandoffRequest { issi, peer }) => Some((*issi, *peer)),
+            _ => None,
+        })
+    }
+
+    fn handed(uuid: Uuid, calling_issi: u32, duplex: bool, floor_issi: Option<u32>) -> HandedOffCall {
+        HandedOffCall {
+            brew_uuid: uuid,
+            calling_issi,
+            simplex_duplex: duplex,
+            priority: 0,
+            floor_issi,
+        }
+    }
+
+    /// Both radios registered on cell 0.
+    fn both_on_cell0(site: &mut Site) {
+        site.from_cell(0, register(RADIO));
+        site.from_cell(0, register(MTH));
+        site.tick();
+        site.net_got();
+    }
+
+    #[test]
+    fn a_local_call_follows_its_radio_to_a_sibling_cell() {
+        let mut site = Site::new();
+        both_on_cell0(&mut site);
+
+        // RADIO, in a local duplex call it set up to MTH on cell 0, restores on cell 1.
+        site.from_cell(1, restore_request(RADIO, MTH));
+        let (c0, c1) = site.tick();
+        assert_eq!(handoff_request(&c0), Some((RADIO, MTH)), "the cell holding MTH is asked");
+        assert!(restore_answer(&c1).is_none(), "no answer before the holder's");
+
+        let uuid = Uuid::from_u128(90);
+        site.from_cell(0, cc(CallControl::IndividualCallHandoffAnswer { issi: RADIO, peer: MTH, call: Some(handed(uuid, RADIO, true, None)) }));
+        site.from_cell(0, media(uuid, 4, C0));
+        let (_, c1) = site.tick();
+        let (peer, call) = restore_answer(&c1).expect("cell 1 gets the answer");
+        let call = call.expect("handed over");
+        assert_eq!((peer, call.brew_uuid, call.simplex_duplex), (MTH, uuid, true));
+        let c = &site.switch.cell_calls[&uuid];
+        assert_eq!((c.caller, c.caller_issi, c.called_issi), (CellId(1), RADIO, MTH), "the caller restored on cell 1");
+
+        // Voice both ways between the two cells, nothing on the network.
+        site.from_cell(1, media(uuid, 6, C1));
+        site.tick();
+        for _ in 0..PLAYOUT_FILL {
+            site.from_cell(0, uplink(C0));
+            site.from_cell(1, uplink(C1));
+        }
+        site.tick();
+        let (c0, c1) = site.tick();
+        assert!(voice_on(&c1, C1) && voice_on(&c0, C0), "voice both ways");
+        assert!(!site.net_got().iter().any(|m| matches!(m, SapMsgInner::CmceCallControl(_))), "the call stays on site");
+    }
+
+    #[test]
+    fn a_handoff_without_a_local_call_rejects_the_restore() {
+        let mut site = Site::new();
+        both_on_cell0(&mut site);
+        site.from_cell(1, restore_request(RADIO, MTH));
+        site.tick();
+        site.from_cell(0, cc(CallControl::IndividualCallHandoffAnswer { issi: RADIO, peer: MTH, call: None }));
+        let (_, c1) = site.tick();
+        assert_eq!(restore_answer(&c1), Some((MTH, None)));
+        assert!(site.switch.cell_calls.is_empty());
+    }
+
+    #[test]
+    fn a_handoff_nobody_waits_for_is_ended_on_its_cell() {
+        let mut site = Site::new();
+        both_on_cell0(&mut site);
+        let uuid = Uuid::from_u128(91);
+        site.from_cell(0, cc(CallControl::IndividualCallHandoffAnswer { issi: RADIO, peer: MTH, call: Some(handed(uuid, RADIO, false, None)) }));
+        let (c0, c1) = site.tick();
+        assert_eq!(release_cause(&c0, uuid), Some(DisconnectCause::CallRestorationOfTheOtherUserFailed.into_raw() as u8));
+        assert!(restore_answer(&c1).is_none());
+    }
+
+    /// RADIO on cell 0 calls MTH on cell 1 (simplex unless `duplex`); both legs have media.
+    fn call_between_cells(site: &mut Site, duplex: bool) -> Uuid {
+        site.from_cell(0, register(RADIO));
+        site.from_cell(1, register(MTH));
+        site.tick();
+        let uuid = Uuid::from_u128(92);
+        site.from_cell(0, cc(CallControl::NetworkCircuitSetupRequest { brew_uuid: uuid, call: circuit(RADIO, MTH, duplex) }));
+        site.tick();
+        site.from_cell(1, connect_request(uuid, duplex));
+        site.tick();
+        site.from_cell(0, media(uuid, 3, C0));
+        site.from_cell(1, media(uuid, 5, C1));
+        site.tick();
+        site.net_got();
+        assert!(site.switch.cell_calls.contains_key(&uuid));
+        uuid
+    }
+
+    #[test]
+    fn a_call_between_cells_is_joined_when_a_radio_comes_to_its_peers_cell() {
+        for duplex in [true, false] {
+            let mut site = Site::new();
+            let uuid = call_between_cells(&mut site, duplex);
+
+            // RADIO leaves cell 0: its leg ends by uplink inactivity, the call is held.
+            let expiry = DisconnectCause::ExpiryOfTimer.into_raw() as u8;
+            site.from_cell(0, cc(CallControl::NetworkCircuitRelease { brew_uuid: uuid, cause: expiry }));
+            let (_, c1) = site.tick();
+            assert_eq!(release_cause(&c1, uuid), None, "MTH's leg waits for the restore");
+
+            // RADIO restores on cell 1, which joins both legs locally and lets the bridge go.
+            let joined = DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8;
+            site.from_cell(1, cc(CallControl::NetworkCircuitRelease { brew_uuid: uuid, cause: joined }));
+            let (c0, _) = site.tick();
+            assert_eq!(release_cause(&c0, uuid), None, "cell 0's leg is gone already");
+            assert!(site.switch.cell_calls.is_empty());
+            assert!(!site.net_got().iter().any(|m| matches!(m, SapMsgInner::CmceCallControl(_))));
+        }
+    }
+
+    #[test]
+    fn a_join_before_the_old_leg_noticed_releases_it() {
+        let mut site = Site::new();
+        let uuid = call_between_cells(&mut site, true);
+        let joined = DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8;
+        site.from_cell(1, cc(CallControl::NetworkCircuitRelease { brew_uuid: uuid, cause: joined }));
+        let (c0, _) = site.tick();
+        assert_eq!(release_cause(&c0, uuid), Some(joined), "the old leg ends quietly");
+        assert!(site.switch.cell_calls.is_empty());
+    }
+
+    #[test]
+    fn a_lost_cell_leg_not_joined_ends_after_the_window() {
+        let mut site = Site::new();
+        let uuid = call_between_cells(&mut site, true);
+        let expiry = DisconnectCause::ExpiryOfTimer.into_raw() as u8;
+        site.from_cell(0, cc(CallControl::NetworkCircuitRelease { brew_uuid: uuid, cause: expiry }));
+        site.tick();
+
+        // Window over (wound forward instead of waiting 8 s).
+        site.switch.cell_calls.get_mut(&uuid).unwrap().leg_lost = Some((CellId(0), Instant::now()));
+        let (c0, c1) = site.tick();
+        assert_eq!(release_cause(&c1, uuid), Some(DisconnectCause::CallRestorationOfTheOtherUserFailed.into_raw() as u8));
+        assert_eq!(release_cause(&c0, uuid), None);
+        assert!(site.switch.cell_calls.is_empty());
     }
 }

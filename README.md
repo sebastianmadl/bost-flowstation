@@ -267,7 +267,7 @@ The registered-radios table shows every cell's radios with a C0/C1… badge, the
 
 - The bit layout of the reselection parameters and the neighbour carrier extension follows our reading of EN 300 392-2; check a radio's field-test display if reselection misbehaves.
 - A group call spanning cells shows once per cell in the Calls list (each cell runs its own traffic channel).
-- Individual calls with a Brew party (e.g. the TetraLink app) follow the radio to another cell (U-CALL RESTORE, answered through the site switch; built on David Harcus' individual call handover, PR #30). Calls between two radios of the station do not survive a change of cell yet.
+- Individual calls with a Brew party (e.g. the TetraLink app) follow the radio to another cell (U-CALL RESTORE, answered through the site switch; built on David Harcus' individual call handover, PR #30). Calls between two radios of the station survive a change of cell too, announced or not: the cell holding both radios hands the call over through the site switch, and a radio coming to its peer's cell is joined into a local call there (no server extension needed).
 - Within one location area an individual SDS, or a call from another radio of the station, to an idle radio goes to the cell it last registered on, until its next transmission or presence check moves it.
 - CPU and USB/network bandwidth for several SDRs on one Pi are untested; start with two cells.
 
