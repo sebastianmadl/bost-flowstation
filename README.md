@@ -283,6 +283,7 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 
 - **Group calls** go on after a cell change: a listener hears the rest of the over on the new station (gap about 0.5 to 1.5 s), a talker holding PTT keeps the floor there.
 - **Individual calls** (simplex and duplex) with a Brew party are restored on the new station (U-CALL RESTORE). A call the radio gave up (link lost at the cell edge) ends for the other party at once, so they can call back.
+- **Calls between two radios** survive a station change both ways (extension `call-handoff`, single-cell stations): when both radios are on one station and one leaves, the station hands the call to the network for the new station; when they are on two stations and one comes to the other's, that station joins both legs into a local call again. The radio that stays notices nothing.
 - **The old station lets the radio go**: no stale registration, no traffic channel left open for a group nobody listens to any more.
 - **Announced changes** (U-PREPARE naming the other station's cell) are prepared on the target through the server: it registers the radio (forward registration) and joins its group call before the radio arrives. Unannounced changes and type 3 announcements work without that.
 

@@ -167,10 +167,26 @@ impl CcBsSubentity {
         // the restore. Call identifiers are per cell, so the other cell's identifier may be in use
         // here by a call the MS is not a party to. A leg pre-provisioned by the site switch's
         // announced handover (above) is the MS's own call already.
-        let party_here = self
-            .individual_calls
-            .get(&call_id)
-            .is_some_and(|c| sender.ssi == c.calling_addr.ssi || sender.ssi == c.called_addr.ssi);
+        // A party whose side of that call runs through the network is not on this station's leg
+        // (the identifier is the other station's and only collides with ours).
+        let party_here = self.individual_calls.get(&call_id).is_some_and(|c| {
+            (sender.ssi == c.calling_addr.ssi && !c.calling_over_brew) || (sender.ssi == c.called_addr.ssi && !c.called_over_brew)
+        });
+        if !group_restore
+            && !party_here
+            && self.join_network_call_locally(
+                queue,
+                sender,
+                handle,
+                link_id,
+                endpoint_id,
+                restored_call_id,
+                pdu.other_party_ssi.unwrap_or(0) as u32,
+                request_to_transmit,
+            )
+        {
+            return;
+        }
         if !group_restore && !party_here && (brew::is_site_linked(&self.config) || brew::is_active(&self.config)) {
             let peer = pdu.other_party_ssi.unwrap_or(0) as u32;
             tracing::info!(
@@ -230,7 +246,7 @@ impl CcBsSubentity {
     /// 14.5.1.2.4). `restored_call_id` is the identifier the MS sent (another cell's, possibly).
     /// Returns the transmission grant given, or `None` when the restore was rejected.
     #[allow(clippy::too_many_arguments)]
-    fn restore_individual_call(
+    pub(in crate::cmce::subentities::cc_bs) fn restore_individual_call(
         &mut self,
         queue: &mut MessageQueue,
         sender: TetraAddress,
@@ -252,6 +268,10 @@ impl CcBsSubentity {
                 return None;
             }
             call.active_timer_started = Some(self.dltime);
+            // A radio held for a handoff to another station came back here.
+            if call.handoff_hold.is_some_and(|h| h.issi == sender.ssi) {
+                call.handoff_hold = None;
+            }
             // Clause 14.5.1.2.4. Duplex: always granted ("transmission not granted" and "granted
             // to another user" are only applicable for simplex calls; a duplex MS always requests
             // to transmit). Simplex: grant only when the floor is free or the sender already holds
@@ -283,9 +303,12 @@ impl CcBsSubentity {
             // channel allocation to move it there. An ordinary same-cell restore needs none (the
             // MS never left the channel). `restoring_cross_cell` is cleared by complete_restore, so
             // capture the channel first.
-            let cross_cell_chan = call
-                .restoring_cross_cell
-                .then_some((call.calling_carrier_num, call.calling_ts, call.calling_usage));
+            let sender_chan = if sender.ssi == call.called_addr.ssi && sender.ssi != call.calling_addr.ssi {
+                (call.called_carrier_num, call.called_ts, call.called_usage)
+            } else {
+                (call.calling_carrier_num, call.calling_ts, call.calling_usage)
+            };
+            let cross_cell_chan = call.restoring_cross_cell.then_some(sender_chan);
             call.complete_restore();
             // Clause 14.5.1.2.4: a layer 2 channel allocation shall accompany D-CALL RESTORE when
             // the U-plane is switched on; the MS still has the old cell's identifier, so this
@@ -709,6 +732,7 @@ impl CcBsSubentity {
     pub(in crate::cmce::subentities::cc_bs) fn drive_deferred_restores(&mut self, queue: &mut MessageQueue) {
         self.drive_handover_reservations(queue);
         self.expire_individual_restores(queue);
+        self.expire_handoff_holds(queue);
         if self.deferred_restores.is_empty() {
             return;
         }

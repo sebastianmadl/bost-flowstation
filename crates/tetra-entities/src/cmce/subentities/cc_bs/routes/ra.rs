@@ -95,6 +95,9 @@ impl CcBsSubentity {
             CallControl::IndividualCallRestoreAnswer { issi, peer, call } => {
                 self.on_individual_call_restore_answer(queue, issi, peer, call);
             }
+            CallControl::IndividualCallHandoffRequest { issi, peer } => {
+                self.on_individual_call_handoff_request(queue, issi, peer);
+            }
             // Brew/LST-bound late-entry signals — never ingress to CMCE.
             CallControl::NetworkCallHold { .. }
             | CallControl::GroupListenersAvailable { .. }

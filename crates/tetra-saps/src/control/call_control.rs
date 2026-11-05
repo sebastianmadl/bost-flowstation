@@ -278,6 +278,17 @@ pub enum CallControl {
         peer: u32,
         call: Option<NetworkRestoredCall>,
     },
+    /// Brew → CMCE (separate stations, extension `call-handoff`): `issi` left this station during
+    /// a local individual call with `peer`, which is still here, and restores the call on another
+    /// station. Hand the call to the network: `peer`'s leg stays and is bridged to the network,
+    /// `issi`'s leg ends here. Answered with `IndividualCallHandoffAnswer`.
+    IndividualCallHandoffRequest { issi: u32, peer: u32 },
+    /// CMCE → Brew: the call handed to the network, or `None` when there is no such call here.
+    IndividualCallHandoffAnswer {
+        issi: u32,
+        peer: u32,
+        call: Option<HandedOffCall>,
+    },
     /// MM → Brew: `issi` registered here with a plain roaming location update. An MS with a
     /// circuit mode call registers with "service restoration roaming" instead (TS 100 392-2
     /// clause 16.4 a)), so it has no call to restore: the network may end an individual call that
@@ -300,6 +311,21 @@ pub enum CallControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetworkRestoredCall {
     pub brew_uuid: uuid::Uuid,
+    /// Duplex (true) or simplex
+    pub simplex_duplex: bool,
+    pub priority: u8,
+    /// The party a simplex call's floor is with, if any
+    pub floor_issi: Option<u32>,
+}
+
+/// A local individual call this station handed to the network (see
+/// `CallControl::IndividualCallHandoffAnswer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandedOffCall {
+    /// The network session the call runs under from now on
+    pub brew_uuid: uuid::Uuid,
+    /// The calling party of the call (the other one is the called party)
+    pub calling_issi: u32,
     /// Duplex (true) or simplex
     pub simplex_duplex: bool,
     pub priority: u8,

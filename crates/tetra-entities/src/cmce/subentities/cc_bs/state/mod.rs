@@ -471,6 +471,19 @@ pub(super) struct IndividualCall {
     /// there — unlike an ordinary same-cell restore, where the MS never left the channel. Set at
     /// pre-provision, cleared once the restore completes.
     pub(super) restoring_cross_cell: bool,
+    /// Separate stations (extension `call-handoff`): a duplex call between two radios of this
+    /// station whose leg of `issi` lost its uplink at `since`. The radio may have gone to another
+    /// station and restore the call there; the network then asks for the call and the other
+    /// party's leg goes on, bridged to it. Released when nothing comes within
+    /// `HANDOFF_HOLD_TS`.
+    pub(super) handoff_hold: Option<HandoffHold>,
+}
+
+/// See `IndividualCall::handoff_hold`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct HandoffHold {
+    pub(super) issi: u32,
+    pub(super) since: TdmaTime,
 }
 
 impl IndividualCall {

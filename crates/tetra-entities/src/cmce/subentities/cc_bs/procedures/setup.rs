@@ -781,6 +781,7 @@ impl CcBsSubentity {
                 queued_tx_demand: None,
                 ambience: false,
                 restoring_cross_cell: false,
+                handoff_hold: None,
             },
         ) {
             match err {
@@ -1081,6 +1082,7 @@ impl CcBsSubentity {
                 queued_tx_demand: None,
                 ambience: false,
                 restoring_cross_cell: false,
+                handoff_hold: None,
             },
         ) {
             match err {

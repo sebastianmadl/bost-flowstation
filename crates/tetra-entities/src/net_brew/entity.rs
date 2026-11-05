@@ -665,6 +665,14 @@ impl BrewEntity {
                         msg: SapMsgInner::CmceCallControl(CallControl::IndividualCallRestoreAnswer { issi, peer, call }),
                     });
                 }
+                BrewEvent::CallHandoffRequest { issi, peer } => {
+                    queue.push_back(SapMsg {
+                        sap: Sap::Control,
+                        src: TetraEntity::Brew,
+                        dest: TetraEntity::Cmce,
+                        msg: SapMsgInner::CmceCallControl(CallControl::IndividualCallHandoffRequest { issi, peer }),
+                    });
+                }
                 BrewEvent::CircuitDtmf { uuid, length_bits, data } => {
                     tracing::debug!("BrewEntity: CIRCUIT DTMF uuid={} bits={}", uuid, length_bits);
                     // DTMF from network → CMCE (CMCE can forward to local MS via U-INFO if needed)
@@ -2137,6 +2145,11 @@ impl TetraEntityTrait for BrewEntity {
                         dest: TetraEntity::Cmce,
                         msg: SapMsgInner::CmceCallControl(CallControl::IndividualCallRestoreAnswer { issi, peer, call: None }),
                     });
+                }
+            }
+            SapMsgInner::CmceCallControl(CallControl::IndividualCallHandoffAnswer { issi, peer, call }) => {
+                if self.connected {
+                    let _ = self.command_sender.send(BrewCommand::SendCallHandoff { issi, peer, call });
                 }
             }
             SapMsgInner::CmceCallControl(CallControl::RegisteredWithoutCall { issi }) => {

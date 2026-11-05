@@ -2581,6 +2581,8 @@ impl UmacBs {
             | CallControl::SiteHandoverIndividualCall { .. }
             | CallControl::IndividualCallRestoreRequest { .. }
             | CallControl::IndividualCallRestoreAnswer { .. }
+            | CallControl::IndividualCallHandoffRequest { .. }
+            | CallControl::IndividualCallHandoffAnswer { .. }
             | CallControl::RegisteredWithoutCall { .. }
             | CallControl::SiteAreaMembers { .. }
             | CallControl::SitePresenceProbe { .. } => {

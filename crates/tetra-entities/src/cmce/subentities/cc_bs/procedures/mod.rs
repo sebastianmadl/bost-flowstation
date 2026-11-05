@@ -2,6 +2,7 @@ use super::*;
 
 mod ambience;
 mod group;
+mod handoff;
 mod individual;
 mod isi;
 mod restoration;

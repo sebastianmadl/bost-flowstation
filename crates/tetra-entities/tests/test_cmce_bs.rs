@@ -4269,3 +4269,385 @@ fn test_site_area_member_makes_a_group_call_run_on_this_cell() {
         "no listener left: the call ends here"
     );
 }
+
+// ── Calls between two radios across a station change (extension `call-handoff`) ──────────────
+// Both radios on one station, one goes to another: this station keeps the call and hands the
+// leg that stays to the network, which gives it to the other station for the radio's U-CALL
+// RESTORE (TS 100 392-2 clause 14.5.1.2.4). The other way round, a radio comes to the station of
+// its peer: the station joins both legs into a local call.
+
+const HANDOFF_A: u32 = 2_320_972;
+const HANDOFF_B: u32 = 2_320_980;
+
+fn handoff_test(extensions: &[&str]) -> ComponentTest {
+    let mut test = ComponentTest::from_config(brew_test_config(), Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew, TetraEntity::Mm],
+    );
+    test.config.state_write().brew_server_extensions = extensions.iter().map(|e| e.to_string()).collect();
+    test
+}
+
+const HANDOFF_EXTENSIONS: [&str; 4] = ["bts-info", "handover-v1", "call-restore", "call-handoff"];
+
+/// A local individual call `HANDOFF_A` -> `HANDOFF_B`, connected; returns the call id and the
+/// opened circuits as (carrier, ts).
+fn local_call_for_handoff(test: &mut ComponentTest, duplex: bool) -> (u16, Vec<(u16, u8)>) {
+    test.config.state_write().subscribers.register(HANDOFF_A);
+    test.config.state_write().subscribers.register(HANDOFF_B);
+    test.submit_message(build_individual_u_setup_msg_with_mode(HANDOFF_A, HANDOFF_B, duplex));
+    test.run_stack(Some(1));
+    let call_id = first_d_setup_call_id(&test.dump_sinks(), HANDOFF_B);
+    test.submit_message(build_u_connect_msg(HANDOFF_B, call_id, duplex));
+    test.run_stack(Some(1));
+    let mut slots = opened(&test.dump_sinks());
+    slots.sort_unstable();
+    slots.dedup();
+    (call_id, slots)
+}
+
+fn opened(msgs: &[SapMsg]) -> Vec<(u16, u8)> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::CmceCallControl(CallControl::Open(c)) => Some((c.carrier_num, c.ts)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn opened_circuits(msgs: &[SapMsg]) -> Vec<tetra_saps::control::call_control::Circuit> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::CmceCallControl(CallControl::Open(c)) => Some(c.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ul_inactivity(test: &mut ComponentTest, (carrier_num, ts): (u16, u8)) {
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Umac,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::UlInactivityTimeout { carrier_num, ts }),
+    });
+}
+
+fn handoff_request(issi: u32, peer: u32) -> SapMsg {
+    SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::IndividualCallHandoffRequest { issi, peer }),
+    }
+}
+
+fn handoff_answers(msgs: &[SapMsg]) -> Vec<(u32, u32, Option<tetra_saps::control::call_control::HandedOffCall>)> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::CmceCallControl(CallControl::IndividualCallHandoffAnswer { issi, peer, call }) => Some((*issi, *peer, *call)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn media_ready(msgs: &[SapMsg]) -> Vec<(uuid::Uuid, u8)> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::CmceCallControl(CallControl::NetworkCircuitMediaReady { brew_uuid, ts, .. }) => Some((*brew_uuid, *ts)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn network_releases(msgs: &[SapMsg]) -> Vec<(uuid::Uuid, u8)> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::CmceCallControl(CallControl::NetworkCircuitRelease { brew_uuid, cause }) if m.dest == TetraEntity::Brew => {
+                Some((*brew_uuid, *cause))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn released_slots(msgs: &[SapMsg]) -> Vec<(u16, u8)> {
+    msgs.iter()
+        .filter_map(|m| match &m.msg {
+            SapMsgInner::CmceCallControl(CallControl::CloseSlot { carrier_num, ts, .. }) => Some((*carrier_num, *ts)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The slot of `issi`'s leg in a local duplex call: the one whose D-SETUP / D-CONNECT went to it.
+fn duplex_slots_of(slots: &[(u16, u8)]) -> ((u16, u8), (u16, u8)) {
+    assert_eq!(slots.len(), 2, "a local duplex call has two traffic channels: {slots:?}");
+    (slots[0], slots[1])
+}
+
+/// Direction 1, duplex: the radio that leaves loses its uplink, the call is held instead of
+/// released, and the network's handoff request bridges the leg that stays.
+#[test]
+fn test_handoff_holds_a_local_duplex_call_and_bridges_the_staying_leg() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&HANDOFF_EXTENSIONS);
+    let (call_id, slots) = local_call_for_handoff(&mut test, true);
+    let (first, second) = duplex_slots_of(&slots);
+
+    // One leg goes silent (the radio is on its way to the other station): held, not released.
+    for slot in [first, second] {
+        ul_inactivity(&mut test, slot);
+        test.run_stack(Some(1));
+        let msgs = test.dump_sinks();
+        assert!(find_lcmc_req(&msgs, HANDOFF_A, CmcePduTypeDl::DRelease).is_none(), "held, not released");
+        assert!(find_lcmc_req(&msgs, HANDOFF_B, CmcePduTypeDl::DRelease).is_none(), "held, not released");
+    }
+
+    // B restores on the other station; the network asks for the call.
+    test.submit_message(handoff_request(HANDOFF_B, HANDOFF_A));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let answers = handoff_answers(&msgs);
+    assert_eq!(answers.len(), 1);
+    let call = answers[0].2.expect("the call is handed over");
+    assert_eq!((call.calling_issi, call.simplex_duplex, call.floor_issi), (HANDOFF_A, true, None));
+    // A stays on its own channel, its downlink now from the network.
+    let reopened = opened_circuits(&msgs);
+    assert_eq!(reopened.len(), 1, "only the staying leg is reopened: {reopened:?}");
+    assert_eq!(reopened[0].dl_media_source, tetra_saps::control::call_control::CircuitDlMediaSource::SwMI);
+    assert_eq!(reopened[0].peer_ts, None);
+    let stay = (reopened[0].carrier_num, reopened[0].ts);
+    assert_eq!(media_ready(&msgs), vec![(call.brew_uuid, stay.1)]);
+    // B's channel here ends, without signalling to either radio.
+    let gone = if stay == first { second } else { first };
+    assert!(released_slots(&msgs).contains(&gone), "B's channel is closed: {:?}", released_slots(&msgs));
+    for issi in [HANDOFF_A, HANDOFF_B] {
+        assert!(find_lcmc_req(&msgs, issi, CmcePduTypeDl::DRelease).is_none());
+    }
+
+    // The hold is over: the call stays past the 8 s.
+    test.run_stack(Some(8 * 72 + 20));
+    let msgs = test.dump_sinks();
+    assert!(find_lcmc_req(&msgs, HANDOFF_A, CmcePduTypeDl::DRelease).is_none(), "the bridged call runs on");
+    let _ = call_id;
+}
+
+/// Without the server's `call-handoff` the old behaviour stays: the silent leg ends the call, and
+/// a handoff request gets no call.
+#[test]
+fn test_without_call_handoff_a_silent_duplex_leg_releases_the_call() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&["bts-info", "handover-v1", "call-restore"]);
+    let (call_id, slots) = local_call_for_handoff(&mut test, true);
+    ul_inactivity(&mut test, slots[0]);
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, HANDOFF_A, CmcePduTypeDl::DRelease).expect("released");
+    assert_eq!(DRelease::from_bitbuf(&mut sdu).unwrap().call_identifier, call_id);
+
+    let mut test = handoff_test(&["bts-info", "handover-v1", "call-restore"]);
+    local_call_for_handoff(&mut test, true);
+    test.submit_message(handoff_request(HANDOFF_B, HANDOFF_A));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert_eq!(handoff_answers(&msgs), vec![(HANDOFF_B, HANDOFF_A, None)]);
+    assert!(opened(&msgs).is_empty());
+}
+
+/// A held call nobody takes over ends after 8 s, as the silent leg would have ended it before.
+#[test]
+fn test_a_held_call_without_handoff_ends_after_the_hold() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&HANDOFF_EXTENSIONS);
+    let (call_id, slots) = local_call_for_handoff(&mut test, true);
+    ul_inactivity(&mut test, slots[1]);
+    test.run_stack(Some(7 * 72));
+    assert!(find_lcmc_req(&test.dump_sinks(), HANDOFF_A, CmcePduTypeDl::DRelease).is_none(), "still held at 7 s");
+    test.run_stack(Some(2 * 72));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, HANDOFF_A, CmcePduTypeDl::DRelease).expect("released after the hold");
+    let release = DRelease::from_bitbuf(&mut sdu).unwrap();
+    assert_eq!((release.call_identifier, release.disconnect_cause), (call_id, DisconnectCause::ExpiryOfTimer));
+}
+
+/// No such call, the wrong peer, or one party asking for itself: no call.
+#[test]
+fn test_a_handoff_request_for_another_pair_gets_no_call() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&HANDOFF_EXTENSIONS);
+    local_call_for_handoff(&mut test, true);
+    for (issi, peer) in [(HANDOFF_B, 1234), (4321, HANDOFF_A), (HANDOFF_A, HANDOFF_A)] {
+        test.submit_message(handoff_request(issi, peer));
+        test.run_stack(Some(1));
+        let msgs = test.dump_sinks();
+        assert_eq!(handoff_answers(&msgs), vec![(issi, peer, None)]);
+        assert!(opened(&msgs).is_empty() && media_ready(&msgs).is_empty());
+    }
+}
+
+/// Direction 1, simplex: the talker leaves. Its permission ended at the break (clause
+/// 14.5.1.2.4): the radio that stays is told the transmission ceased, and the call is handed over
+/// with the floor free on the one channel both used.
+#[test]
+fn test_handoff_of_a_simplex_call_ends_the_leaving_talkers_floor() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&HANDOFF_EXTENSIONS);
+    let (_call_id, slots) = local_call_for_handoff(&mut test, false);
+    assert_eq!(slots.len(), 1, "a local simplex call shares one channel");
+    // The caller has the floor after the connect (it pressed PTT to call).
+    test.submit_message(handoff_request(HANDOFF_A, HANDOFF_B));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let call = handoff_answers(&msgs)[0].2.expect("handed over");
+    assert_eq!((call.calling_issi, call.simplex_duplex, call.floor_issi), (HANDOFF_A, false, None));
+    assert!(find_lcmc_req(&msgs, HANDOFF_B, CmcePduTypeDl::DTxCeased).is_some(), "B hears the talker is gone");
+    let reopened = opened_circuits(&msgs);
+    assert_eq!(reopened.iter().map(|c| (c.carrier_num, c.ts)).collect::<Vec<_>>(), slots);
+    assert_eq!(reopened[0].dl_media_source, tetra_saps::control::call_control::CircuitDlMediaSource::SwMI);
+    assert!(released_slots(&msgs).is_empty(), "the channel stays for B");
+    assert_eq!(media_ready(&msgs), vec![(call.brew_uuid, slots[0].1)]);
+}
+
+/// A call over Brew from `remote` (another station) to `HANDOFF_B` here, connected.
+fn network_call_for_join(test: &mut ComponentTest, remote: u32, duplex: bool) -> (u16, uuid::Uuid, (u16, u8)) {
+    test.config.state_write().subscribers.register(HANDOFF_B);
+    let brew_uuid = uuid::Uuid::parse_str("0b5f1d2e-9a47-4c1e-8c55-3e1f00c0ffee").unwrap();
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::NetworkCircuitSetupRequest {
+            brew_uuid,
+            call: NetworkCircuitCall {
+                source_issi: remote,
+                destination: HANDOFF_B,
+                number: String::new(),
+                priority: 0,
+                service: 0,
+                mode: 0,
+                duplex: duplex as u8,
+                method: 0,
+                communication: 0,
+                grant: TransmissionGrant::NotGranted.into_raw() as u8,
+                permission: 0,
+                timeout: 0,
+                ownership: 0,
+                queued: 0,
+            },
+        }),
+    });
+    test.run_stack(Some(1));
+    let setup = test.dump_sinks();
+    let call_id = first_d_setup_call_id(&setup, HANDOFF_B);
+    let mut slots = opened(&setup);
+    test.submit_message(build_u_connect_msg(HANDOFF_B, call_id, duplex));
+    test.run_stack(Some(1));
+    slots.extend(opened(&test.dump_sinks()));
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::CmceCallControl(CallControl::NetworkCircuitConnectConfirm {
+            brew_uuid,
+            grant: TransmissionGrant::Granted.into_raw() as u8,
+            permission: 0,
+        }),
+    });
+    test.run_stack(Some(1));
+    slots.extend(opened(&test.dump_sinks()));
+    (call_id, brew_uuid, *slots.first().expect("B's channel"))
+}
+
+/// U-CALL RESTORE of a point-to-point call from `issi` with `peer` (clause 14.5.1.2.4).
+fn p2p_restore(issi: u32, call_identifier: u16, peer: u32, other_may_transmit: bool) -> SapMsg {
+    let pdu = UCallRestore {
+        call_identifier,
+        request_to_transmit_send_data: other_may_transmit,
+        other_party_type_identifier: 1,
+        other_party_short_number_address: None,
+        other_party_ssi: Some(peer as u64),
+        other_party_extension: None,
+        basic_service_information: Some(BasicServiceInformation {
+            circuit_mode_type: CircuitModeType::TchS,
+            encryption_flag: false,
+            communication_type: CommunicationType::P2p,
+            slots_per_frame: None,
+            speech_service: Some(0),
+        }),
+        facility: None,
+        dm_ms_address: None,
+        proprietary: None,
+    };
+    let mut sdu = BitBuffer::new_autoexpand(80);
+    pdu.to_bitbuf(&mut sdu).unwrap();
+    sdu.seek(0);
+    lcmc_ind(issi, sdu)
+}
+
+/// Direction 2, duplex: the radio on the other station comes here, to its peer, and restores the
+/// call. Both legs are joined into a local call: the radio gets its own channel cross-routed with
+/// B's, and the network call ends with "SwMI requested disconnection".
+#[test]
+fn test_a_radio_coming_to_its_peer_is_joined_into_a_local_duplex_call() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&HANDOFF_EXTENSIONS);
+    let (call_id, brew_uuid, b_slot) = network_call_for_join(&mut test, HANDOFF_A, true);
+    test.config.state_write().subscribers.register(HANDOFF_A);
+
+    test.submit_message(p2p_restore(HANDOFF_A, 77, HANDOFF_B, false));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(restore_requests(&msgs).is_empty(), "nothing to ask the network");
+    let (restore, chan) = d_call_restore_to(&msgs, HANDOFF_A).expect("D-CALL RESTORE");
+    assert_eq!(restore.call_identifier, 77);
+    assert_eq!(restore.new_call_identifier, Some(call_id as u64), "the radio adopts this station's call id");
+    assert_eq!(restore.transmission_grant, TransmissionGrant::Granted.into_raw() as u8, "duplex: always granted");
+    let (_, a_ts) = chan.expect("a channel of its own");
+    assert_ne!(a_ts as u8, b_slot.1, "duplex: its own channel");
+    // Both channels cross-routed locally.
+    let circuits = opened_circuits(&msgs);
+    let loopback = tetra_saps::control::call_control::CircuitDlMediaSource::LocalLoopback;
+    let a = circuits.iter().find(|c| c.ts == a_ts as u8).expect("A's channel opened");
+    let b = circuits.iter().find(|c| (c.carrier_num, c.ts) == b_slot).expect("B's channel reopened");
+    assert_eq!((a.dl_media_source, a.peer_ts), (loopback, Some(b.ts)));
+    assert_eq!((b.dl_media_source, b.peer_ts), (loopback, Some(a.ts)));
+    assert_eq!(network_releases(&msgs), vec![(brew_uuid, DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8)]);
+    assert!(find_lcmc_req(&msgs, HANDOFF_B, CmcePduTypeDl::DRelease).is_none(), "B notices nothing");
+}
+
+/// Direction 2, simplex: both legs share B's channel; the arriving radio that asks to talk gets
+/// the floor there.
+#[test]
+fn test_a_radio_coming_to_its_peer_is_joined_into_a_local_simplex_call() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&HANDOFF_EXTENSIONS);
+    let (call_id, brew_uuid, b_slot) = network_call_for_join(&mut test, HANDOFF_A, false);
+    test.config.state_write().subscribers.register(HANDOFF_A);
+
+    test.submit_message(p2p_restore(HANDOFF_A, 77, HANDOFF_B, false));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (restore, chan) = d_call_restore_to(&msgs, HANDOFF_A).expect("D-CALL RESTORE");
+    assert_eq!(restore.new_call_identifier, Some(call_id as u64));
+    assert_eq!(chan.map(|(_, ts)| ts as u8), Some(b_slot.1), "simplex: B's channel");
+    let circuits = opened_circuits(&msgs);
+    assert_eq!(circuits.len(), 1);
+    assert_eq!(circuits[0].dl_media_source, tetra_saps::control::call_control::CircuitDlMediaSource::LocalLoopback);
+    assert_eq!(network_releases(&msgs), vec![(brew_uuid, DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8)]);
+}
+
+/// Without `call-handoff` the arriving radio's restore goes to the network as before.
+#[test]
+fn test_without_call_handoff_a_radio_coming_to_its_peer_asks_the_network() {
+    debug::setup_logging_verbose();
+    let mut test = handoff_test(&["bts-info", "handover-v1", "call-restore"]);
+    network_call_for_join(&mut test, HANDOFF_A, true);
+    test.config.state_write().subscribers.register(HANDOFF_A);
+    test.submit_message(p2p_restore(HANDOFF_A, 77, HANDOFF_B, false));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert_eq!(restore_requests(&msgs), vec![(HANDOFF_A, HANDOFF_B)]);
+    assert!(network_releases(&msgs).is_empty());
+}

@@ -1,7 +1,7 @@
 //! Brew protocol binary message parsing and serialization (2-byte [kind, type] prefix, little-endian)
 
 use tetra_config::bluestation::{BrewDirectoryCell, BrewDirectoryNeighbour};
-use tetra_saps::control::call_control::{CellReselection, NetworkRestoredCall};
+use tetra_saps::control::call_control::{CellReselection, HandedOffCall, NetworkRestoredCall};
 use uuid::Uuid;
 
 // ─── Message classes ───────────────────────────────────────────────
@@ -990,6 +990,58 @@ pub fn parse_call_restore_answer(json_data: &str) -> Result<(u32, u32, Option<Ne
     Ok((issi, peer, call))
 }
 
+/// Service type for an individual call between two radios of one station when one of them goes
+/// to another station (brew-server). The call ran on the station alone, so the server does not
+/// hold it:
+///
+/// - The station the radio went to asks for it with [`BREW_SERVICE_CALL_RESTORE`] as for any
+///   call; the server, holding none, asks the station where `peer` is registered
+///   `{"issi":2320972,"peer":2320997}`. That station bridges `peer`'s leg to the network and
+///   answers with the call (`uuid`, `calling`: the calling party's ISSI, `duplex`, `priority`,
+///   `floor`: ISSI holding a simplex floor or 0) or without `uuid` when it has no such call. The
+///   server records it as a call between the two stations and answers the restore request.
+/// - The other way round, a radio that comes to the station its peer is on: the server releases
+///   the leg on the station it left (`CALL_RELEASE`, "SwMI requested disconnection"), the new
+///   station joins the two legs locally and ends the network call (`CALL_RELEASE`, same cause).
+///
+/// The radios see the call restoration of TS 100 392-2 clause 14.5.1.2.4 only.
+pub const BREW_SERVICE_CALL_HANDOFF: u8 = 0x1E;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it takes over local individual
+/// calls and hands calls back to one station ([`BREW_SERVICE_CALL_HANDOFF`]); the station then
+/// names it in its `SERVICE_BTS_INFO` capabilities
+pub const BREW_EXT_CALL_HANDOFF: &str = "call-handoff";
+
+/// Parse a [`BREW_SERVICE_CALL_HANDOFF`] request from the server: (issi, peer).
+pub fn parse_call_handoff_request(json_data: &str) -> Result<(u32, u32), String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    Ok((json_uint(&json, "issi", 0xff_ffff)? as u32, json_uint(&json, "peer", 0xff_ffff)? as u32))
+}
+
+/// Build a Service (0xf4) [`BREW_SERVICE_CALL_HANDOFF`] answer, NULL-terminated JSON: the call
+/// handed to the network, or the request back without `uuid`.
+pub fn build_service_call_handoff(issi: u32, peer: u32, call: Option<&HandedOffCall>) -> Vec<u8> {
+    let json = match call {
+        Some(c) => serde_json::json!({
+            "issi": issi,
+            "peer": peer,
+            "uuid": c.brew_uuid.to_string(),
+            "calling": c.calling_issi,
+            "duplex": c.simplex_duplex,
+            "priority": c.priority,
+            "floor": c.floor_issi.unwrap_or(0),
+        }),
+        None => serde_json::json!({ "issi": issi, "peer": peer }),
+    }
+    .to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(BREW_SERVICE_CALL_HANDOFF);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
+}
+
 /// Service type a station sends a server that offered [`BREW_EXT_CALL_RESTORE`] when a radio
 /// registered with a plain roaming location update (`{"issi":2320972}`): an MS with a circuit
 /// mode call registers with "service restoration roaming" (TS 100 392-2 clause 16.4 a)), so it
@@ -1276,6 +1328,37 @@ pub fn build_query_subscribers(issis: &[u32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Call handoff (extension `call-handoff`) ──
+
+    #[test]
+    fn call_handoff_request_and_answers() {
+        assert_eq!(parse_call_handoff_request(r#"{"issi":2320972,"peer":2320997}"#), Ok((2320972, 2320997)));
+        assert!(parse_call_handoff_request(r#"{"issi":2320972}"#).is_err(), "peer is mandatory");
+        assert!(parse_call_handoff_request(r#"{"issi":16777216,"peer":1}"#).is_err(), "24-bit SSI");
+
+        let none = build_service_call_handoff(2320972, 2320997, None);
+        assert_eq!((none[0], none[1], *none.last().unwrap()), (BREW_CLASS_SERVICE, BREW_SERVICE_CALL_HANDOFF, 0));
+        let json: serde_json::Value = serde_json::from_slice(&none[2..none.len() - 1]).unwrap();
+        assert_eq!(json, serde_json::json!({"issi": 2320972, "peer": 2320997}));
+
+        let call = HandedOffCall {
+            brew_uuid: Uuid::from_u128(7),
+            calling_issi: 2320997,
+            simplex_duplex: false,
+            priority: 3,
+            floor_issi: Some(2320997),
+        };
+        let some = build_service_call_handoff(2320972, 2320997, Some(&call));
+        let json: serde_json::Value = serde_json::from_slice(&some[2..some.len() - 1]).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"issi": 2320972, "peer": 2320997, "uuid": Uuid::from_u128(7).to_string(), "calling": 2320997, "duplex": false, "priority": 3, "floor": 2320997})
+        );
+        let free = build_service_call_handoff(1, 2, Some(&HandedOffCall { floor_issi: None, ..call }));
+        let json: serde_json::Value = serde_json::from_slice(&free[2..free.len() - 1]).unwrap();
+        assert_eq!(json["floor"], 0, "no floor holder is 0");
+    }
 
     // ── Handover messages (docs/protocol.md of the handover project) ──
 

@@ -265,6 +265,7 @@ impl CcBsSubentity {
                 queued_tx_demand: None,
                 ambience,
                 restoring_cross_cell: false,
+                handoff_hold: None,
             },
         ) {
             match err {
@@ -441,6 +442,7 @@ impl CcBsSubentity {
             queued_tx_demand: None,
             ambience: false,
             restoring_cross_cell: true,
+            handoff_hold: None,
         };
         self.individual_calls.insert(call_id, call);
         Some(call_id)

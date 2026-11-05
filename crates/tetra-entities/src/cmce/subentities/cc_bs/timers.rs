@@ -658,6 +658,9 @@ impl CcBsSubentity {
         active: bool,
     ) {
         self.ul_slot_hot.insert((carrier_num, ts), active);
+        if active {
+            self.end_handoff_hold_on_activity(carrier_num, ts);
+        }
         if !active {
             // Keep preempted_issi for soft-restart targeting until slot goes cold for good.
         }
@@ -812,6 +815,9 @@ impl CcBsSubentity {
             });
 
             if let Some((call_id, failed_addr)) = duplex_individual {
+                if self.hold_for_handoff(call_id, failed_addr.ssi) {
+                    return;
+                }
                 tracing::warn!(
                     "UL inactivity timeout on carrier={} ts={}, releasing duplex individual call_id={} after hard failure from ISSI {}",
                     carrier_num,

@@ -25,13 +25,14 @@ use tetra_entities::net_brew::entity::BrewEntity;
 use tetra_entities::net_brew::protocol::*;
 use tetra_entities::net_site::{SharedDirectory, SiteSwitch, site_links};
 use tetra_entities::network::transports::{NetworkAddress, NetworkError, NetworkMessage, NetworkTransport};
+use tetra_pdus::cmce::enums::disconnect_cause::DisconnectCause;
 use tetra_pdus::cmce::enums::{
     cmce_pdu_type_dl::CmcePduTypeDl, party_type_identifier::PartyTypeIdentifier, transmission_grant::TransmissionGrant,
 };
 use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation;
 use tetra_pdus::cmce::pdus::{
     d_call_restore::DCallRestore, d_connect::DConnect, d_info::DInfo, d_setup::DSetup, u_call_restore::UCallRestore, u_connect::UConnect,
-    u_setup::USetup, u_tx_ceased::UTxCeased,
+    u_disconnect::UDisconnect, u_setup::USetup, u_tx_ceased::UTxCeased,
 };
 use tetra_pdus::mle::enums::mle_protocol_discriminator::MleProtocolDiscriminator;
 use tetra_pdus::mle::pdus::{u_prepare::UPrepare, u_restore::URestore};
@@ -176,6 +177,13 @@ struct Relay {
     not_restored: Vec<(usize, u32)>,
     /// Voice frames the stations sent: (station, call)
     voice_up: Vec<(usize, Uuid)>,
+    /// Calls between two radios on two stations (brew-server private calls made by
+    /// `call-handoff`): call -> each party as (station, radio)
+    bridges: HashMap<Uuid, Vec<(usize, u32)>>,
+    /// Handoffs asked and not answered yet: (station asked, issi) -> (station that asked, peer)
+    handoffs: HashMap<(usize, u32), (usize, u32)>,
+    /// Every SERVICE_CALL_HANDOFF answer: (station, issi, call)
+    handoff_answers: Vec<(usize, u32, Option<Uuid>)>,
 }
 
 impl Relay {
@@ -193,6 +201,7 @@ impl Relay {
                     let prepared = self.prepared.remove(&sub.number);
                     if let Some(left) = old.filter(|o| *o != from) {
                         self.move_calls(sub.number, left, from, &send);
+                        self.join_calls(sub.number, left, from, &send);
                     }
                     if let Some(left) = old.filter(|o| *o != from && !prepared) {
                         self.radio_moved(sub.number, left, from, &send);
@@ -252,10 +261,26 @@ impl Relay {
                 }
                 BrewCallPayload::Cause(cause) if cc.call_state == CALL_STATE_CALL_RELEASE => {
                     self.call_releases.push((from, cc.identifier, cause));
+                    if self.bridges.get(&cc.identifier).is_some_and(|b| b.iter().any(|(st, _)| *st == from)) {
+                        for (st, _) in self.bridges.remove(&cc.identifier).unwrap() {
+                            if st != from {
+                                send(st, data);
+                            }
+                        }
+                    }
                     // brew-server: control from a station that is not in the call is ignored.
                     if self.private.get(&cc.identifier).is_some_and(|c| c.owner == from) {
                         self.private.remove(&cc.identifier);
                         self.restoring.remove(&cc.identifier);
+                    }
+                }
+                _ if (cc.call_state == CALL_STATE_SIMPLEX_GRANTED || cc.call_state == CALL_STATE_SIMPLEX_IDLE)
+                    && self.bridges.contains_key(&cc.identifier) =>
+                {
+                    for (st, _) in &self.bridges[&cc.identifier] {
+                        if *st != from {
+                            send(*st, data);
+                        }
                     }
                 }
                 _ if cc.call_state == CALL_STATE_GROUP_IDLE => {
@@ -270,6 +295,14 @@ impl Relay {
             Ok(BrewMessage::Frame(frame)) => {
                 if self.private.get(&frame.identifier).is_some_and(|c| c.owner == from) {
                     self.voice_up.push((from, frame.identifier));
+                }
+                if let Some(bridge) = self.bridges.get(&frame.identifier).filter(|b| b.iter().any(|(st, _)| *st == from)) {
+                    self.voice_up.push((from, frame.identifier));
+                    for (st, _) in bridge {
+                        if *st != from {
+                            send(*st, data);
+                        }
+                    }
                 }
                 if let Some(call) = self.calls.get(&frame.identifier) {
                     for p in &call.peers {
@@ -295,6 +328,21 @@ impl Relay {
                         .iter()
                         .find(|(id, c)| c.radio == issi && c.app == peer && c.owner == from && self.restoring.contains(*id))
                         .map(|(id, c)| (*id, c.duplex));
+                    // brew-server: no such call, but the peer is on a station with `call-handoff`:
+                    // ask that one for its local call and answer when it hands it over.
+                    let holder = self
+                        .location
+                        .get(&peer)
+                        .copied()
+                        .filter(|st| *st != from && self.cells.get(st).is_some_and(|(_, c)| c.iter().any(|c| c == BREW_EXT_CALL_HANDOFF)));
+                    if let (None, Some(holder)) = (found, holder) {
+                        self.handoffs.insert((holder, issi), (from, peer));
+                        let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_CALL_HANDOFF];
+                        msg.extend_from_slice(serde_json::json!({"issi": issi, "peer": peer}).to_string().as_bytes());
+                        msg.push(0);
+                        send(holder, &msg);
+                        return;
+                    }
                     let answer = match found {
                         Some((id, duplex)) => {
                             self.restoring.remove(&id);
@@ -306,6 +354,27 @@ impl Relay {
                     msg.extend_from_slice(answer.to_string().as_bytes());
                     msg.push(0);
                     send(from, &msg);
+                }
+                BREW_SERVICE_CALL_HANDOFF => {
+                    // brew-server `call_restore::handle_handoff`: the local call, bridged now,
+                    // becomes a call between the two stations and answers the restore request.
+                    let json: serde_json::Value = serde_json::from_str(&svc.json_data).unwrap();
+                    let (issi, peer) = (json["issi"].as_u64().unwrap() as u32, json["peer"].as_u64().unwrap() as u32);
+                    let id = json["uuid"].as_str().map(|u| Uuid::parse_str(u).unwrap());
+                    self.handoff_answers.push((from, issi, id));
+                    let Some((asker, _)) = self.handoffs.remove(&(from, issi)) else { return };
+                    let answer = match id {
+                        Some(id) => {
+                            self.bridges.insert(id, vec![(from, peer), (asker, issi)]);
+                            serde_json::json!({"issi": issi, "peer": peer, "uuid": id.to_string(), "duplex": json["duplex"],
+                                "priority": 0, "floor": json["floor"]})
+                        }
+                        None => serde_json::json!({"issi": issi, "peer": peer}),
+                    };
+                    let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_CALL_RESTORE];
+                    msg.extend_from_slice(answer.to_string().as_bytes());
+                    msg.push(0);
+                    send(asker, &msg);
                 }
                 BREW_SERVICE_CALL_NOT_RESTORED => {
                     // brew-server `call_restore::handle_not_restored`: the moved call ends at once.
@@ -401,6 +470,24 @@ impl Relay {
             call.owner = to;
             self.restoring.insert(*id);
             send(left, &build_call_release(id, 14));
+        }
+    }
+
+    /// brew-server `call_restore::move_calls`, join case: a radio of a call between two stations
+    /// registers on its peer's station, which announced `call-handoff`: the station it left lets
+    /// its leg go, and the peer's station joins both legs itself.
+    fn join_calls(&mut self, issi: u32, left: usize, to: usize, send: &impl Fn(usize, &[u8])) {
+        if !self.cells.get(&to).is_some_and(|(_, c)| c.iter().any(|c| c == BREW_EXT_CALL_HANDOFF)) {
+            return;
+        }
+        for (id, parties) in self.bridges.iter_mut() {
+            let joins = parties.contains(&(left, issi)) && parties.iter().any(|(st, r)| *st == to && *r != issi);
+            if joins {
+                for p in parties.iter_mut().filter(|p| **p == (left, issi)) {
+                    p.0 = to;
+                }
+                send(left, &build_call_release(id, 14));
+            }
         }
     }
 
@@ -633,6 +720,44 @@ fn u_setup(issi: u32, gssi: u32) -> SapMsg {
         external_subscriber_number: None,
         facility: None,
         dm_ms_address: None,
+        proprietary: None,
+    };
+    uplink(issi, MleProtocolDiscriminator::Cmce, |b| pdu.to_bitbuf(b).unwrap())
+}
+
+/// U-SETUP of an individual call from `issi` to radio `called` (TS 100 392-2 clause 14.7.2.1).
+fn u_setup_individual(issi: u32, called: u32, duplex: bool) -> SapMsg {
+    let pdu = USetup {
+        area_selection: 0,
+        hook_method_selection: true,
+        simplex_duplex_selection: duplex,
+        basic_service_information: BasicServiceInformation {
+            circuit_mode_type: CircuitModeType::TchS,
+            encryption_flag: false,
+            communication_type: CommunicationType::P2p,
+            slots_per_frame: None,
+            speech_service: Some(0),
+        },
+        request_to_transmit_send_data: false,
+        call_priority: 0,
+        clir_control: 0,
+        called_party_type_identifier: PartyTypeIdentifier::Ssi,
+        called_party_ssi: Some(called as u64),
+        called_party_short_number_address: None,
+        called_party_extension: None,
+        external_subscriber_number: None,
+        facility: None,
+        dm_ms_address: None,
+        proprietary: None,
+    };
+    uplink(issi, MleProtocolDiscriminator::Cmce, |b| pdu.to_bitbuf(b).unwrap())
+}
+
+fn u_disconnect(issi: u32, call_id: u16) -> SapMsg {
+    let pdu = UDisconnect {
+        call_identifier: call_id,
+        disconnect_cause: DisconnectCause::UserRequestedDisconnection,
+        facility: None,
         proprietary: None,
     };
     uplink(issi, MleProtocolDiscriminator::Cmce, |b| pdu.to_bitbuf(b).unwrap())
@@ -2160,6 +2285,114 @@ fn sim_individual_calls_follow_their_radios_to_another_station() {
     assert!(restored >= 25, "{restored} restored");
     assert_eq!(not_restored, 5);
     assert!(new_ids.contains(&true), "some restores ran on a call identifier of the new station's own");
+}
+
+/// Uplink voice of the radio on `station`'s traffic channel `ts`, as UMAC hands it to Brew.
+fn uplink_voice(carrier_num: u16, ts: u8) -> SapMsg {
+    SapMsg {
+        sap: Sap::TmdSap,
+        src: TetraEntity::Umac,
+        dest: TetraEntity::Brew,
+        msg: SapMsgInner::TmdCircuitDataInd(TmdCircuitDataInd {
+            carrier_num,
+            ts,
+            data: vec![0u8; 35],
+        }),
+    }
+}
+
+/// Calls between two radios across station changes (extension `call-handoff`). Ten stations, 26
+/// radios in 13 pairs. Each pair starts a local call on its home station; the caller moves to
+/// another station and restores the call there (the home station hands the call to the network,
+/// TS 100 392-2 clause 14.5.1.2.4); voice runs between the stations; then the caller comes back to
+/// its peer's station and restores again, and the home station joins both legs into a local call.
+/// Duplex and simplex alternate.
+#[test]
+fn sim_radio_to_radio_calls_survive_station_changes_both_ways() {
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let extensions = ["bts-info", "handover-v1", "ms-cell", BREW_EXT_MS_MOVED, BREW_EXT_CALL_RESTORE, BREW_EXT_CALL_HANDOFF];
+    let mut sim = Sim::new(&las, &extensions);
+    assert!(
+        sim.relay.cells.values().all(|(_, caps)| caps.iter().any(|c| c == BREW_EXT_CALL_HANDOFF)),
+        "stations announce call-handoff where the server offers it"
+    );
+    const PAIRS: u32 = 13;
+    let pairs: Vec<(u32, u32, usize)> = (0..PAIRS).map(|k| (FIRST_ISSI + 2 * k, FIRST_ISSI + 2 * k + 1, k as usize % STATIONS)).collect();
+    for &(a, b, home) in &pairs {
+        sim.register(home, a, LocationUpdateType::RoamingLocationUpdating, &[]);
+        sim.register(home, b, LocationUpdateType::RoamingLocationUpdating, &[]);
+    }
+
+    let (mut handed, mut joined) = (0, 0);
+    for (k, &(a, b, home)) in pairs.iter().enumerate() {
+        sim.clear_air();
+        let duplex = k % 2 == 0;
+        let away = (home + 3) % STATIONS;
+
+        // A calls B on their home station: a local call, the network knows nothing of it.
+        sim.submit(home, u_setup_individual(a, b, duplex));
+        sim.run_until(&format!("station {home} pages ISSI {b}"), |s| individual_setup_call_id(&s.stations[home].air, b).is_some());
+        let home_id = individual_setup_call_id(&sim.stations[home].air, b).unwrap();
+        sim.submit(home, u_connect(b, home_id, duplex));
+        sim.run_until(&format!("ISSI {a} hears the call is connected"), |s| {
+            cmce_pdu_to(&s.stations[home].air, a, CmcePduTypeDl::DConnect)
+        });
+        sim.steps(10);
+        assert!(sim.relay.private.is_empty() && sim.relay.bridges.is_empty(), "a local call stays off the network");
+
+        // Direction 1: A goes to another station and restores the call there.
+        sim.register(away, a, LocationUpdateType::ServiceRestorationRoamingLocationUpdating, &[]);
+        sim.submit(away, u_restore_individual(a, home_id, b, duplex, las[home] as u64));
+        sim.run_until(&format!("ISSI {a} is restored on station {away}"), |s| call_restore_to(&s.stations[away].air, a).is_some());
+        let (pdu, a_ts) = call_restore_to(&sim.stations[away].air, a).unwrap();
+        assert_eq!(pdu.call_identifier, home_id, "D-CALL RESTORE names the call the radio restored");
+        if duplex {
+            assert_eq!(pdu.transmission_grant, TransmissionGrant::Granted.into_raw() as u8, "duplex: always granted");
+        }
+        assert_eq!(sim.relay.handoff_answers.last().map(|(st, issi, id)| (*st, *issi, id.is_some())), Some((home, a, true)));
+        let id = *sim.relay.bridges.keys().next().expect("the call runs between the two stations now");
+        assert!(!cmce_pdu_to(&sim.stations[home].air, b, CmcePduTypeDl::DRelease), "B keeps its call");
+        handed += 1;
+
+        // Voice from A on the away station reaches B on the home station.
+        let away_carrier = sim.stations[away].carrier;
+        sim.stations[home].voice_down.clear();
+        for _ in 0..8 {
+            sim.submit(away, uplink_voice(away_carrier, a_ts));
+        }
+        sim.run_until(&format!("station {home} plays ISSI {a}'s voice to ISSI {b}"), |s| !s.stations[home].voice_down.is_empty());
+        assert!(sim.relay.voice_up.contains(&(away, id)));
+
+        // Direction 2: A comes back to B's station and restores the call there; the home station
+        // joins both legs, the network call ends.
+        sim.clear_air();
+        let away_id = pdu.new_call_identifier.map_or(pdu.call_identifier, |n| n as u16);
+        sim.register(home, a, LocationUpdateType::ServiceRestorationRoamingLocationUpdating, &[]);
+        sim.run_until(&format!("station {away} lets ISSI {a}'s leg go"), |s| {
+            cmce_pdu_to(&s.stations[away].air, a, CmcePduTypeDl::DRelease)
+        });
+        sim.submit(home, u_restore_individual(a, away_id, b, duplex, las[away] as u64));
+        sim.run_until(&format!("ISSI {a} is restored on station {home}"), |s| call_restore_to(&s.stations[home].air, a).is_some());
+        let (back, back_ts) = call_restore_to(&sim.stations[home].air, a).unwrap();
+        assert_eq!(back.call_identifier, away_id);
+        assert_eq!(back.new_call_identifier.map_or(back.call_identifier, |n| n as u16), home_id, "the home station's own call again");
+        sim.run_until(&format!("station {home} ends the network call of pair {k}"), |s| {
+            s.relay.call_releases.iter().any(|(st, c, cause)| *st == home && *c == id && *cause == 14)
+        });
+        assert!(sim.relay.bridges.is_empty(), "the call is local again");
+        assert!(!sim.relay.restore_requests.iter().any(|(st, issi, _)| *st == home && *issi == a), "nothing asked of the network");
+        assert!(!cmce_pdu_to(&sim.stations[home].air, b, CmcePduTypeDl::DRelease), "B keeps its call");
+        let _ = back_ts;
+        joined += 1;
+
+        // B hangs up; both radios are released on the home station.
+        sim.submit(home, u_disconnect(b, home_id));
+        sim.run_until(&format!("ISSI {a} is released on station {home}"), |s| {
+            cmce_pdu_to(&s.stations[home].air, a, CmcePduTypeDl::DRelease)
+        });
+        sim.steps(20);
+    }
+    assert_eq!((handed, joined), (PAIRS, PAIRS));
 }
 
 // ─── Multi-cell station (milestone 7) ───────────────────────────────────────────────────────────
