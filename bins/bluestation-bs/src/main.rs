@@ -730,14 +730,20 @@ fn main() {
             // Propagate SharedConfig so the dashboard can read live SDS queue state.
             dashboard.set_shared_config(cfg.clone());
 
-            // Create a control link so dashboard can send commands to CMCE
-            let dash_cmd_tx = {
-                use tetra_core::tetra_entities::TetraEntity;
-                cdispatchers.get(&TetraEntity::Cmce).map(|d| d.clone_sender())
-            };
+            // Dashboard commands are sent directly to their owning entity's control channel.
+            // CMCE handles SDS/call/emergency commands; MM handles DGNA and SCK OTAR.
+            let dash_cmce_cmd_tx = cdispatchers
+                .get(&TetraEntity::Cmce)
+                .map(|dispatcher| dispatcher.clone_sender());
+            let dash_mm_cmd_tx = cdispatchers
+                .get(&TetraEntity::Mm)
+                .map(|dispatcher| dispatcher.clone_sender());
 
-            if let Some(tx) = dash_cmd_tx {
+            if let Some(tx) = dash_cmce_cmd_tx {
                 dashboard.set_cmd_sender(tx);
+            }
+            if let Some(tx) = dash_mm_cmd_tx {
+                dashboard.set_mm_cmd_sender(tx);
             }
 
             if let Some(ref h) = lst_handle {

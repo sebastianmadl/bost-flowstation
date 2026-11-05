@@ -1932,7 +1932,10 @@ pub struct DashboardServer {
     config_path: String,
     /// Shared stack config — used to read live_sds_queue from StackState.
     shared_config: Option<tetra_config::bluestation::SharedConfig>,
+    /// Direct command channel to CMCE for SDS/call/emergency operations.
     cmd_tx: Option<CmdSender>,
+    /// Direct command channel to MM for mobility/security operations (DGNA and SCK OTAR).
+    mm_cmd_tx: Option<CmdSender>,
     update_state: SharedUpdateState,
     /// Optional override for the OTA update source directory.
     /// If None, the update routine auto-detects.
@@ -1969,6 +1972,7 @@ impl DashboardServer {
             config_path,
             shared_config: None,
             cmd_tx: None,
+            mm_cmd_tx: None,
             update_state: Arc::new(Mutex::new(UpdateState::new())),
             source_dir_override: None,
             auth: Arc::new(RwLock::new(None)),
@@ -1983,6 +1987,11 @@ impl DashboardServer {
 
     pub fn set_cmd_sender(&mut self, tx: CmdSender) {
         self.cmd_tx = Some(tx);
+    }
+
+    /// Provide the MM command channel for dashboard commands owned by Mobility Management.
+    pub fn set_mm_cmd_sender(&mut self, tx: CmdSender) {
+        self.mm_cmd_tx = Some(tx);
     }
 
     pub fn set_lst_handle(&mut self, handle: crate::net_lst_dispatch::LstDispatchHandle) {
@@ -2030,6 +2039,7 @@ impl DashboardServer {
         let clients = Arc::clone(&self.clients);
         let config_path = self.config_path.clone();
         let cmd_tx: Arc<Mutex<Option<CmdSender>>> = Arc::new(Mutex::new(self.cmd_tx.take()));
+        let mm_cmd_tx: Arc<Mutex<Option<CmdSender>>> = Arc::new(Mutex::new(self.mm_cmd_tx.take()));
         let update_state = Arc::clone(&self.update_state);
         let source_dir_override = self.source_dir_override.clone();
         let auth: SharedAuth = Arc::clone(&self.auth);
@@ -2048,6 +2058,7 @@ impl DashboardServer {
         let https_clients = Arc::clone(&clients);
         let https_config_path = config_path.clone();
         let https_cmd_tx = Arc::clone(&cmd_tx);
+        let https_mm_cmd_tx = Arc::clone(&mm_cmd_tx);
         let https_update_state = Arc::clone(&update_state);
         let https_source_dir_override = source_dir_override.clone();
         let https_auth: SharedAuth = Arc::clone(&auth);
@@ -2111,6 +2122,7 @@ impl DashboardServer {
                         let clients = Arc::clone(&clients);
                         let config_path = config_path.clone();
                         let cmd_tx = Arc::clone(&cmd_tx);
+                        let mm_cmd_tx = Arc::clone(&mm_cmd_tx);
                         let update_state = Arc::clone(&update_state);
                         let source_dir_override = source_dir_override.clone();
                         let auth = Arc::clone(&auth);
@@ -2128,6 +2140,7 @@ impl DashboardServer {
                                     clients,
                                     config_path,
                                     cmd_tx,
+                                    mm_cmd_tx,
                                     update_state,
                                     source_dir_override,
                                     auth,
@@ -2206,6 +2219,7 @@ impl DashboardServer {
                         let clients = Arc::clone(&clients);
                         let config_path = config_path.clone();
                         let cmd_tx = Arc::clone(&cmd_tx);
+                        let mm_cmd_tx = Arc::clone(&https_mm_cmd_tx);
                         let update_state = Arc::clone(&update_state);
                         let source_dir_override = source_dir_override.clone();
                         let auth = Arc::clone(&auth);
@@ -2231,6 +2245,7 @@ impl DashboardServer {
                                     clients,
                                     config_path,
                                     cmd_tx,
+                                    mm_cmd_tx,
                                     update_state,
                                     source_dir_override,
                                     auth,
@@ -3200,6 +3215,7 @@ fn handle_connection(
     clients: WsClients,
     config_path: String,
     cmd_tx: Arc<Mutex<Option<CmdSender>>>,
+    mm_cmd_tx: Arc<Mutex<Option<CmdSender>>>,
     update_state: SharedUpdateState,
     source_dir_override: Option<String>,
     auth: SharedAuth,
@@ -3517,7 +3533,17 @@ fn handle_connection(
         } else {
             None
         };
-        handle_ws(stream, state, clients, cmd_tx, update_state, shared_config.clone(), lst_handle, private_http_session);
+        handle_ws(
+            stream,
+            state,
+            clients,
+            cmd_tx,
+            mm_cmd_tx,
+            update_state,
+            shared_config.clone(),
+            lst_handle,
+            private_http_session,
+        );
     } else if req_line.contains("GET /api/service/status") {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -4836,6 +4862,7 @@ fn handle_ws(
     state: DashboardState,
     clients: WsClients,
     cmd_tx: Arc<Mutex<Option<CmdSender>>>,
+    mm_cmd_tx: Arc<Mutex<Option<CmdSender>>>,
     update_state: SharedUpdateState,
     shared_config: Option<tetra_config::bluestation::SharedConfig>,
     lst_handle: Option<crate::net_lst_dispatch::LstDispatchHandle>,
@@ -4990,7 +5017,16 @@ fn handle_ws(
                     let _ = ws.close(None);
                     return;
                 }
-                handle_ws_command(&text, &state, &cmd_tx, &update_state, &shared_config, &lst_handle, private_http_session.as_ref());
+                handle_ws_command(
+                    &text,
+                    &state,
+                    &cmd_tx,
+                    &mm_cmd_tx,
+                    &update_state,
+                    &shared_config,
+                    &lst_handle,
+                    private_http_session.as_ref(),
+                );
             }
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(data)) => {
@@ -5008,6 +5044,7 @@ fn handle_ws_command(
     text: &str,
     state: &DashboardState,
     cmd_tx: &Arc<Mutex<Option<CmdSender>>>,
+    mm_cmd_tx: &Arc<Mutex<Option<CmdSender>>>,
     update_state: &SharedUpdateState,
     shared_config: &Option<tetra_config::bluestation::SharedConfig>,
     lst_handle: &Option<crate::net_lst_dispatch::LstDispatchHandle>,
@@ -5020,19 +5057,30 @@ fn handle_ws_command(
     let cmd_type = v.get("type").and_then(|t| t.as_str());
 
     let send_cmd = |cmd: ControlCommand| -> bool {
+        // Dashboard commands enter the entity's own control channel directly. Keep this in
+        // lockstep with ControlWorker routing: SCK OTAR and DGNA belong to MM; other current
+        // dashboard commands belong to CMCE.
+        let target_tx = match cmd.target_entity() {
+            tetra_core::tetra_entities::TetraEntity::Mm => mm_cmd_tx,
+            tetra_core::tetra_entities::TetraEntity::Cmce => cmd_tx,
+            other => {
+                tracing::warn!("Dashboard: no command channel wired for {:?}", other);
+                return false;
+            }
+        };
         if let Some(session) = private_http_session {
             // Only the nonblocking enqueue is inside the auth/session critical section. Parsing,
             // state/log updates and dispatcher execution must never run with these locks held.
             let mut sent = false;
             return session.with_authorization(|| {
-                if let Ok(guard) = cmd_tx.lock() {
+                if let Ok(guard) = target_tx.lock() {
                     if let Some(ref tx) = *guard {
                         sent = tx.try_send(cmd).is_ok();
                     }
                 }
             }) && sent;
         }
-        if let Ok(guard) = cmd_tx.lock() {
+        if let Ok(guard) = target_tx.lock() {
             if let Some(ref tx) = *guard {
                 return tx.send(cmd).is_ok();
             }
@@ -9479,6 +9527,7 @@ mod tests {
                 let clients = Arc::clone(&self.server.clients);
                 let config_path = self.server.config_path.clone();
                 let cmd_tx = Arc::new(Mutex::new(self.server.cmd_tx.clone()));
+                let mm_cmd_tx = Arc::new(Mutex::new(self.server.mm_cmd_tx.clone()));
                 let update_state = Arc::clone(&self.server.update_state);
                 let auth = Arc::clone(&self.server.auth);
                 let shared_config = self.server.shared_config.clone();
@@ -9501,6 +9550,7 @@ mod tests {
                         clients,
                         config_path,
                         cmd_tx,
+                        mm_cmd_tx,
                         update_state,
                         None,
                         auth,
@@ -10246,14 +10296,30 @@ enabled = true
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Drive `handle_ws_command` with a real command channel and report what reached CMCE.
-    fn run_ws_command(json: &str) -> Vec<ControlCommand> {
-        let (tx, rx) = crossbeam_channel::unbounded();
+    /// Drive `handle_ws_command` with real CMCE and MM channels and report both routes.
+    fn run_ws_command_routed(json: &str) -> (Vec<ControlCommand>, Vec<ControlCommand>) {
+        let (cmce_tx, cmce_rx) = crossbeam_channel::unbounded();
+        let (mm_tx, mm_rx) = crossbeam_channel::unbounded();
         let state = Arc::new(RwLock::new(DashboardStateInner::new("/tmp/fs_ws_cmd_test.toml".to_string())));
-        let cmd_tx = Arc::new(Mutex::new(Some(tx)));
+        let cmd_tx = Arc::new(Mutex::new(Some(cmce_tx)));
+        let mm_cmd_tx = Arc::new(Mutex::new(Some(mm_tx)));
         let update_state = Arc::new(Mutex::new(UpdateState::new()));
-        handle_ws_command(json, &state, &cmd_tx, &update_state, &None, &None, None);
-        rx.try_iter().collect()
+        handle_ws_command(
+            json,
+            &state,
+            &cmd_tx,
+            &mm_cmd_tx,
+            &update_state,
+            &None,
+            &None,
+            None,
+        );
+        (cmce_rx.try_iter().collect(), mm_rx.try_iter().collect())
+    }
+
+    /// Compatibility helper for tests whose expected destination is CMCE.
+    fn run_ws_command(json: &str) -> Vec<ControlCommand> {
+        run_ws_command_routed(json).0
     }
 
     /// SHIP-BLOCKER regression: a TETRA SSI is 24 bits and the PDU serializers assert that range,
@@ -10286,22 +10352,38 @@ enabled = true
         }
     }
 
+    #[test]
+    fn ws_otar_sck_routes_to_mm_not_cmce() {
+        let (cmce, mm) = run_ws_command_routed(r#"{"type":"otar_sck","issi":200}"#);
+        assert!(cmce.is_empty(), "OTAR must not reach CMCE: {cmce:?}");
+        assert!(matches!(mm.as_slice(), [ControlCommand::OtarSck { issi: 200 }]));
+    }
+
     /// The same 24-bit guard on the other privileged WS commands — each one addresses a radio or a
     /// group and ends up in a serializer with the same assertion.
     #[test]
     fn ws_kick_and_dgna_reject_out_of_range_ssi() {
         let over = MAX_TETRA_SSI as u64 + 1;
         assert!(run_ws_command(&format!(r#"{{"type":"kick","issi":{over}}}"#)).is_empty());
-        assert!(run_ws_command(&format!(r#"{{"type":"dgna","issi":{over},"gssi":1000}}"#)).is_empty());
-        assert!(run_ws_command(&format!(r#"{{"type":"dgna","issi":1000,"gssi":{over}}}"#)).is_empty());
-        assert!(run_ws_command(&format!(r#"{{"type":"dgna_bulk","gssi":{over},"targets":[1000]}}"#)).is_empty());
+        for json in [
+            format!(r#"{{"type":"dgna","issi":{over},"gssi":1000}}"#),
+            format!(r#"{{"type":"dgna","issi":1000,"gssi":{over}}}"#),
+            format!(r#"{{"type":"dgna_bulk","gssi":{over},"targets":[1000]}}"#),
+        ] {
+            let (cmce, mm) = run_ws_command_routed(&json);
+            assert!(
+                cmce.is_empty() && mm.is_empty(),
+                "invalid DGNA must not reach either entity: CMCE={cmce:?}, MM={mm:?}"
+            );
+        }
         // Out-of-range entries are dropped from a bulk target list; the valid ones still go.
-        let sent = run_ws_command(&format!(r#"{{"type":"dgna_bulk","gssi":1000,"targets":[{over},4242]}}"#));
-        match sent.as_slice() {
+        let (cmce, mm) = run_ws_command_routed(&format!(r#"{{"type":"dgna_bulk","gssi":1000,"targets":[{over},4242]}}"#));
+        assert!(cmce.is_empty(), "DGNA must not be sent to CMCE: {cmce:?}");
+        match mm.as_slice() {
             [ControlCommand::Dgna { issi, gssi, .. }] => {
                 assert_eq!((*issi, *gssi), (4242, 1000), "only the in-range target is regrouped");
             }
-            other => panic!("expected one Dgna for the single valid target, got {other:?}"),
+            other => panic!("expected one Dgna on MM for the single valid target, got {other:?}"),
         }
     }
 
