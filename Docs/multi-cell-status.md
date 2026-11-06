@@ -1,6 +1,6 @@
 # Multi-cell — status
 
-_Last updated: 2026-09-30, release v0.5.0 (branch `bost`)._
+_Last updated: 2026-11-06, release v0.5.6 (milestone 7 work on branch `handover` of the fork)._
 
 ## Done (in code, with unit/integration tests)
 
@@ -20,6 +20,12 @@ _Last updated: 2026-09-30, release v0.5.0 (branch `bost`)._
 | Reselection | Types = 3, carrier extension, max power, `[cell_info.cell_reselect]` | `268bf79` |
 | Release | README, CHANGELOG, version 0.5.0 | `6079855`, `c980acf`, `fcb0b7e` |
 | Dashboard | BTS Details shows every cell + carrier (timeslots from `/api/cells`); RF page Cells card. Not yet in CHANGELOG / no version bump | `5df20cd` |
+| Individual calls (PR #30) | Individual call handover by David Harcus: leg pre-provisioned on an announced change, matched by ISSI pair | `0b053a4` (upstream) |
+| Network calls across cells | Calls with a Brew party follow the radio to the other cell (`restore_from_sibling`), announced or not | `c7630d7` |
+| Location areas | Shared or own LA per cell, paging on every cell of the LA, presence check on all of them, LA field | `881e64d` |
+| Roaming page | Page "Roaming / Cells", neighbours per cell, server cell list (`cell-directory`) | `52d1171`, `9779d99`, `2e6b19c` |
+| Roaming with stations | A multi-cell station takes part in roaming between stations over Brew (type 2) | `543c2a8` |
+| Radio ↔ radio across cells | Calls between two radios survive a change of cell: hand over through the switch, join on the peer's cell | `55a0881` |
 
 ## Not validated — next step is an on-air test
 
@@ -55,7 +61,7 @@ the native codec). Suggested test with two Pluto+ and Brew enabled, in this orde
 ## Known limits (by design, documented)
 
 - Linking needs Brew or LST; without them each cell runs alone (Asterisk then primary-only).
-- Individual calls between two radios of the station don't survive a change of cell yet; calls with a Brew party do (the switch answers the new cell's `IndividualCallRestoreRequest`, see `net_site/switch.rs` `restore_from_sibling`).
+- Individual calls survive a change of cell, announced or not. With a Brew party the switch answers the new cell's `IndividualCallRestoreRequest` (`net_site/switch.rs` `restore_from_sibling`). Between two radios of the station the switch asks the cell holding the local call to hand it over (`ask_sibling_for_local_call`), and a radio coming to its peer's cell is joined there (CMCE `join_network_call_locally`). With three or more cells, a leg pre-provisioned by PR #30 that is never used keeps its timeslot until the call timeout.
 - A group call spanning cells shows once per cell in the Calls list.
 - Cells sharing a location area: group calls run on every cell of a member's area (`SiteAreaMembers` to the sibling CMCEs) and presence checks are repeated there (`SitePresenceProbe` → `MmRequestLocationUpdate`); network individual call setups are paged on every cell of the area (`CircuitCall.paging`, first cell to alert/connect wins, the others get a silent release); an individual SDS or a radio-to-radio call to an idle radio still goes to the cell it last registered on until it transmits or answers a presence check.
 - Extra cells may have their own neighbour list (`[[cells.cell_info.neighbor_cells_ca]]`); without one they advertise only the siblings. Dashboard page Roaming (`net_dashboard/roaming.rs`, `/api/roaming`).
