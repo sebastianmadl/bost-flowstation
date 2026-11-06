@@ -1,6 +1,6 @@
 //! Brew protocol binary message parsing and serialization (2-byte [kind, type] prefix, little-endian)
 
-use tetra_config::bluestation::{BrewDirectoryCell, BrewDirectoryNeighbour};
+use tetra_config::bluestation::{BrewDirectoryCell, BrewDirectoryNeighbour, BrewGroupAccess};
 use tetra_saps::control::call_control::{CellReselection, HandedOffCall, NetworkRestoredCall};
 use uuid::Uuid;
 
@@ -876,6 +876,54 @@ pub fn parse_cell_directory(json_data: &str) -> Result<Vec<BrewDirectoryCell>, S
         cells.push(cell);
     }
     Ok(cells)
+}
+
+/// Service type the server sends with who may use which group: `{"groups":[{"gssi":2321,
+/// "mode":"allow"|"block","issis":[..],"rx_only":true,"rx_only_issis":[..]}]}`, the whole table
+/// each time (brew-server)
+pub const BREW_SERVICE_GROUP_ACCESS: u8 = 0x1F;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it sends
+/// [`BREW_SERVICE_GROUP_ACCESS`]; the station then names it in its `SERVICE_BTS_INFO`
+/// capabilities to get it
+pub const BREW_EXT_GROUP_ACCESS: &str = "group-access";
+
+/// Most groups kept from one [`BREW_SERVICE_GROUP_ACCESS`]
+pub const MAX_GROUP_ACCESS_GROUPS: usize = 4096;
+
+/// Parse a [`BREW_SERVICE_GROUP_ACCESS`] payload into GSSI -> rule. A group entry that does not
+/// parse or holds an identity out of range (1 to 16777215) is left out (logged), so that group
+/// stays open; an unknown `mode` is an allow list.
+pub fn parse_group_access(json_data: &str) -> Result<std::collections::BTreeMap<u32, BrewGroupAccess>, String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    let list = json.get("groups").and_then(|g| g.as_array()).ok_or("missing: groups")?;
+    let ssi = |v: &serde_json::Value| v.as_u64().filter(|n| (1..=0xFF_FFFF).contains(n)).map(|n| n as u32);
+    let ssis = |v: Option<&serde_json::Value>| -> Option<Vec<u32>> {
+        match v {
+            None | Some(serde_json::Value::Null) => Some(Vec::new()),
+            Some(serde_json::Value::Array(a)) => a.iter().map(ssi).collect(),
+            Some(_) => None,
+        }
+    };
+    let mut out = std::collections::BTreeMap::new();
+    for v in list.iter().take(MAX_GROUP_ACCESS_GROUPS) {
+        let entry = (|| {
+            Some(BrewGroupAccess {
+                gssi: ssi(v.get("gssi")?)?,
+                block: v.get("mode").and_then(|m| m.as_str()) == Some("block"),
+                issis: ssis(v.get("issis"))?,
+                rx_only: v.get("rx_only").and_then(|r| r.as_bool()).unwrap_or(false),
+                rx_only_issis: ssis(v.get("rx_only_issis"))?,
+            })
+        })();
+        match entry {
+            Some(e) => {
+                out.insert(e.gssi, e);
+            }
+            None => tracing::warn!("BrewWorker: group access entry ignored (malformed or out of range): {}", v),
+        }
+    }
+    Ok(out)
 }
 
 /// Service type reporting the cell (carrier) a radio registered on (brew-server)

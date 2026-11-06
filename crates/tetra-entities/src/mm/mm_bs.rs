@@ -53,6 +53,9 @@ use tetra_security::auth::{MsChallenge, answer_ms_challenge, derive_dck, random_
 use tetra_security::keys::AuthKey;
 use tetra_security::taa1::{ta41, ta51};
 
+/// Group identity detachment downlink "Temporary 1 detachment" (TS 100 392-2 table 16.52).
+const GROUP_DETACHMENT_TEMPORARY_1: u8 = 1;
+
 /// A challenge in flight (EN 300 392-7 clause 4.1.2).
 struct PendingAuth {
     challenge: MsChallenge,
@@ -874,6 +877,12 @@ impl MmBs {
             gild.group_identity_uplink = gild
                 .group_identity_uplink
                 .map(|giu| self.aie_filter_group_attach(issi, ciphering.is_some(), giu));
+            let mut refused_gid = Vec::new();
+            if let Some(giu) = gild.group_identity_uplink.take() {
+                let (admitted, refused) = self.group_access_split(issi, giu);
+                gild.group_identity_uplink = Some(admitted);
+                refused_gid = refused;
+            }
             // ETSI Table 16.49 (clause 16.10.17): mode=1 means "detach all currently
             // attached group identities and attach group identities defined in the
             // group identity uplink element."
@@ -892,14 +901,19 @@ impl MmBs {
             }
 
             // Try to attach to requested groups, then build GroupIdentityLocationAccept element
-            let accepted_groups = if let Some(giu) = &gild.group_identity_uplink {
+            let mut accepted_groups = if let Some(giu) = &gild.group_identity_uplink {
                 Some(self.try_attach_detach_groups(queue, issi, &giu))
             } else {
                 None
             };
             self.deaffiliate_groups_left_after_detach_all(queue, issi, detached_prior);
+            // Refused by the group-access rules: listed with their reason (clauses 16.8.2, 16.10.23).
+            let any_refused = !refused_gid.is_empty();
+            if any_refused {
+                accepted_groups.get_or_insert_with(Vec::new).extend(refused_gid);
+            }
             let gila = GroupIdentityLocationAccept {
-                group_identity_accept_reject: 0, // Accept
+                group_identity_accept_reject: u8::from(any_refused),
                 group_identity_downlink: accepted_groups,
             };
 
@@ -1323,6 +1337,37 @@ impl MmBs {
             .collect()
     }
 
+    /// Who may attach which group (Brew server rules, `group-access`): splits the requested
+    /// attachments into the admitted ones (and every detachment) and, for each group the radio
+    /// may not attach, a refusal entry for the acknowledgement. ETSI TS 100 392-2 clause 16.8.2:
+    /// the acknowledgement "shall indicate those group identities which were not accepted with a
+    /// rejection reason in the group identity detachment downlink"; the reason is "Temporary 1
+    /// detachment" (table 16.52, values network dependent), not "Permanent": the rules can change
+    /// and an MS should not retry a permanently detached group.
+    fn group_access_split(&self, issi: u32, giu: Vec<GroupIdentityUplink>) -> (Vec<GroupIdentityUplink>, Vec<GroupIdentityDownlink>) {
+        let state = self.config.state_read();
+        let mut refused = Vec::new();
+        let admitted = giu
+            .into_iter()
+            .filter(|g| {
+                let Some(gssi) = g.gssi else { return true };
+                if g.group_identity_detachment_uplink.is_some() || state.group_may_join(gssi, issi) {
+                    return true;
+                }
+                tracing::info!("MM: ISSI {} may not attach GSSI {} (group-access), refused", issi, gssi);
+                refused.push(GroupIdentityDownlink {
+                    group_identity_attachment: None,
+                    group_identity_detachment_uplink: Some(GROUP_DETACHMENT_TEMPORARY_1),
+                    gssi: Some(gssi),
+                    address_extension: None,
+                    vgssi: None,
+                });
+                false
+            })
+            .collect();
+        (admitted, refused)
+    }
+
     fn rx_u_attach_detach_group_identity(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_u_attach_detach_group_identity");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
@@ -1456,6 +1501,7 @@ impl MmBs {
         };
         let encrypted = self.config.state_read().subscribers.encrypted(issi).unwrap_or(false);
         let giu = self.aie_filter_group_attach(issi, encrypted, giu);
+        let (giu, refused_gid) = self.group_access_split(issi, giu);
         let requested_n = giu.len();
         let (giu_clamped, dropped_giu) = if requested_n > MAX_GROUPS_PER_ATTACH {
             let (head, tail) = giu.split_at(MAX_GROUPS_PER_ATTACH);
@@ -1508,15 +1554,19 @@ impl MmBs {
         }
 
         // Try to attach to requested groups, and retrieve list of accepted GroupIdentityDownlink elements
-        let accepted_gid = self.try_attach_detach_groups(queue, issi, &giu_clamped);
+        let mut accepted_gid = self.try_attach_detach_groups(queue, issi, &giu_clamped);
         self.deaffiliate_groups_left_after_detach_all(queue, issi, detached_prior);
+        // Groups refused by the group-access rules: listed with their reason (clause 16.8.2) and
+        // "at least one attachment/detachment rejected" (table 16.44).
+        let any_refused = !refused_gid.is_empty();
+        accepted_gid.extend(refused_gid);
 
         // Group affiliations changed — persist for restart recovery (debounced).
         self.recovery_mark_dirty();
 
         // Build reply PDU
         let pdu_response = DAttachDetachGroupIdentityAcknowledgement {
-            group_identity_accept_reject: 0, // Accept
+            group_identity_accept_reject: u8::from(any_refused),
             reserved: false,                 // TODO FIXME Guessed proper value of reserved field
             proprietary: None,
             group_identity_downlink: Some(accepted_gid),

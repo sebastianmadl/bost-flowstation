@@ -303,6 +303,11 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
     if directory {
         capabilities.push(BREW_EXT_CELL_DIRECTORY);
     }
+    // Who may use which group: the station refuses attachments and requests to talk itself. The
+    // rules are shared by all cells of the station.
+    if server_extensions.iter().any(|e| e == BREW_EXT_GROUP_ACCESS) {
+        capabilities.push(BREW_EXT_GROUP_ACCESS);
+    }
     if handles_handover(config, server_extensions) {
         capabilities.push(BREW_EXT_HANDOVER);
         if server_extensions.iter().any(|e| e == BREW_EXT_MS_MOVED) {
@@ -489,6 +494,8 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         state.brew_server_extensions = self.transport.server_brew_extensions().to_vec();
                         // A new list comes after the announcement, if the server offers one.
                         state.brew_cell_directory = None;
+                        // Likewise the group rules (a server without `group-access`: all open).
+                        state.brew_group_access.clear();
                     }
                     self.send_event(BrewEvent::Connected { server_version });
                     self.announce_cells();
@@ -1006,6 +1013,15 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         self.config.state_write().brew_cell_directory = Some(cells);
                     }
                     Err(e) => tracing::warn!("BrewWorker: malformed cell directory: {}", e),
+                }
+            }
+            BREW_SERVICE_GROUP_ACCESS if self.transport.server_brew_extensions().iter().any(|e| e == BREW_EXT_GROUP_ACCESS) => {
+                match parse_group_access(&svc.json_data) {
+                    Ok(groups) => {
+                        tracing::info!("BrewWorker: group access rules from the server: {} groups limited", groups.len());
+                        self.config.state_write().brew_group_access = groups;
+                    }
+                    Err(e) => tracing::warn!("BrewWorker: malformed group access message: {}", e),
                 }
             }
             _ => tracing::debug!("BrewWorker: service type={}: {}", svc.service_type, svc.json_data),
@@ -1569,6 +1585,53 @@ password = "x"
         plain.transport.connect().unwrap();
         plain.handle_incoming_binary(&cell_directory(DIRECTORY));
         assert!(plain.config.state_read().brew_cell_directory.is_none());
+    }
+
+    // ── Group access (group-access) ──
+
+    fn group_access(json: &str) -> Vec<u8> {
+        let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_GROUP_ACCESS];
+        msg.extend_from_slice(json.as_bytes());
+        msg.push(0);
+        msg
+    }
+
+    const ACCESS: &str = r#"{"groups":[
+        {"gssi":2321,"mode":"allow","issis":[2320972],"rx_only":false,"rx_only_issis":[]},
+        {"gssi":2322,"mode":"block","issis":[4013],"rx_only":true,"rx_only_issis":[2320972]},
+        {"gssi":0,"mode":"allow","issis":[1]},
+        {"gssi":2323,"issis":[16777216]}
+    ]}"#;
+
+    #[test]
+    fn group_access_is_announced_and_stored_only_where_offered() {
+        let offered = ["bts-info".to_string(), BREW_EXT_GROUP_ACCESS.to_string()];
+        let msg = json_of(&bts_info_message(&config("").config(), &offered).unwrap());
+        assert_eq!(msg["capabilities"], serde_json::json!(["group-access"]));
+        let plain = json_of(&bts_info_message(&config("").config(), &["bts-info".to_string()]).unwrap());
+        assert_eq!(plain["capabilities"], serde_json::json!([]));
+
+        let mut w = worker(MockTransport::new().with_brew_extensions(&["bts-info", BREW_EXT_GROUP_ACCESS]));
+        w.transport.connect().unwrap();
+        w.handle_incoming_binary(&group_access(ACCESS));
+        {
+            let state = w.config.state_read();
+            assert_eq!(state.brew_group_access.keys().copied().collect::<Vec<_>>(), [2321, 2322], "bad entries stay open");
+            assert!(state.group_may_join(2321, 2320972) && !state.group_may_join(2321, 4013));
+            assert!(state.group_may_talk(2321, 2320972));
+            assert!(!state.group_may_join(2322, 4013) && state.group_may_join(2322, 2320972));
+            assert!(!state.group_may_talk(2322, 2320972) && state.group_may_talk(2322, 5), "listen only for the listed one");
+            assert!(state.group_may_join(2323, 4013) && state.group_may_talk(9999, 4013), "no rule = open");
+        }
+        w.handle_incoming_binary(&group_access("not json"));
+        assert_eq!(w.config.state_read().brew_group_access.len(), 2, "a broken message keeps the last table");
+        w.handle_incoming_binary(&group_access(r#"{"groups":[]}"#));
+        assert!(w.config.state_read().brew_group_access.is_empty(), "an empty table opens every group");
+
+        let mut plain = worker(MockTransport::new().with_brew_extensions(&["bts-info"]));
+        plain.transport.connect().unwrap();
+        plain.handle_incoming_binary(&group_access(ACCESS));
+        assert!(plain.config.state_read().brew_group_access.is_empty(), "not offered: ignored");
     }
 
     // ── Handover messages (target side) ──

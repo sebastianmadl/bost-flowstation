@@ -318,6 +318,16 @@ Two or more separate stations on the same Brew server can keep a radio's calls w
 
   Without `bs_service_details` the neighbour is broadcast without registration and voice, and radios will not use it. How the thresholds work: [`Docs/cell-reselection.md`](Docs/cell-reselection.md).
 
+### Who may use a group (`group-access`)
+
+With a brew-server that offers the `group-access` extension the station gets, live and again after every reconnect, which radios may use which group: an allow list (only these ISSIs) or a block list (everyone but these), and "RX only" (every radio, or only the listed ones, listens but may not talk). The station enforces it on air:
+
+- A radio the group does not admit cannot attach: the registration or attach acknowledgement lists the group as refused with "Temporary 1 detachment" (ETSI TS 100 392-2 clause 16.8.2, table 16.52), so the radio may try again after the rules change.
+- An RX-only radio joins running calls to listen; its D-CONNECT says "not allowed to request for transmission" (clause 14.8.43) and a PTT is answered "transmission not granted" (clause 14.5.2.2.1 b)). It cannot start a call on the group (D-RELEASE, cause "Requested service not available"; ETSI does not name a cause for this case).
+- Emergency calls always pass. A group without rules, or a server without the extension, stays open as before.
+
+The lists are edited on the server (dashboard Directory page); the rules apply to all cells of the station.
+
 ### Known limits
 
 - Most radios change cells unannounced (a listener always, clause 18.3.4.7.1), so a short break stays. The MTP6650 never announced with a target cell in the field test (its background scan of the neighbour needs synchronized cells), so announced types 1 and 2 are covered by tests only.

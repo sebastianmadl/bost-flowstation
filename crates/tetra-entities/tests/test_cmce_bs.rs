@@ -4651,3 +4651,137 @@ fn test_without_call_handoff_a_radio_coming_to_its_peer_asks_the_network() {
     assert_eq!(restore_requests(&msgs), vec![(HANDOFF_A, HANDOFF_B)]);
     assert!(network_releases(&msgs).is_empty());
 }
+
+// ── Group access (Brew server `group-access` rules) ─────────────────────────────────────────────
+
+fn limit_group(test: &mut ComponentTest, rule: tetra_config::bluestation::BrewGroupAccess) {
+    test.config.state_write().brew_group_access.insert(rule.gssi, rule);
+}
+
+fn group_access_test() -> ComponentTest {
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+    test.populate_entities(vec![TetraEntity::Cmce], vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew]);
+    test
+}
+
+fn d_release_cause_to(msgs: &[SapMsg], issi: u32) -> Option<DisconnectCause> {
+    let (mut sdu, _) = find_lcmc_req(msgs, issi, CmcePduTypeDl::DRelease)?;
+    Some(DRelease::from_bitbuf(&mut sdu).expect("Failed to parse DRelease").disconnect_cause)
+}
+
+/// A radio the group does not admit, or a listener-only one, cannot start a call on it: the
+/// U-SETUP is answered with D-RELEASE (clause 14.5.1.1; cause value "Requested service not
+/// available", table 14.55, chosen by us) and no call is set up. An emergency call passes.
+#[test]
+fn test_group_access_refuses_setup_from_radios_that_may_not_talk() {
+    debug::setup_logging_verbose();
+    use tetra_config::bluestation::BrewGroupAccess;
+    const OUTSIDER: u32 = TEST_ISSI + 1;
+    const LISTENER: u32 = TEST_ISSI + 2;
+    let mut test = group_access_test();
+    for issi in [TEST_ISSI, OUTSIDER, LISTENER] {
+        register_subscriber(&mut test, issi, TEST_GSSI);
+    }
+    limit_group(&mut test, BrewGroupAccess { gssi: TEST_GSSI, block: true, issis: vec![OUTSIDER], rx_only: true, rx_only_issis: vec![LISTENER] });
+
+    for issi in [OUTSIDER, LISTENER] {
+        test.submit_message(build_u_setup_msg(issi, TEST_GSSI));
+        test.run_stack(Some(1));
+        let msgs = test.dump_sinks();
+        assert_eq!(d_release_cause_to(&msgs, issi), Some(DisconnectCause::RequestedServiceNotAvailable), "{issi}");
+        assert_eq!(count_d_setups(&msgs), 0, "no call for {issi}");
+    }
+
+    // An emergency call is never limited.
+    test.submit_message(build_u_setup_msg_prio(LISTENER, TEST_GSSI, 15));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(d_release_cause_to(&msgs, LISTENER).is_none());
+    assert!(find_lcmc_req(&msgs, TEST_GSSI, CmcePduTypeDl::DSetup).is_some(), "emergency call set up");
+}
+
+/// A listener-only radio joining a running call listens: its individually addressed D-CONNECT
+/// says "not allowed to request for transmission" (clause 14.8.43, table 14.81) and does not
+/// grant it the floor, even in hangtime. A radio the group does not admit is refused.
+#[test]
+fn test_group_access_listener_joins_running_call_without_the_floor() {
+    debug::setup_logging_verbose();
+    use tetra_config::bluestation::BrewGroupAccess;
+    const LISTENER: u32 = TEST_ISSI + 1;
+    const TALKER: u32 = TEST_ISSI + 2;
+    const OUTSIDER: u32 = TEST_ISSI + 3;
+    let mut test = group_access_test();
+    for issi in [TEST_ISSI, LISTENER, TALKER, OUTSIDER] {
+        register_subscriber(&mut test, issi, TEST_GSSI);
+    }
+    limit_group(&mut test, BrewGroupAccess { gssi: TEST_GSSI, block: true, issis: vec![OUTSIDER], rx_only: true, rx_only_issis: vec![LISTENER] });
+
+    test.submit_message(build_u_setup_msg(TEST_ISSI, TEST_GSSI));
+    test.run_stack(Some(1));
+    let call_id = first_d_setup_call_id(&test.dump_sinks(), TEST_GSSI);
+
+    let joined = |test: &mut ComponentTest, issi: u32| -> DConnect {
+        test.submit_message(build_u_setup_msg(issi, TEST_GSSI));
+        test.run_stack(Some(1));
+        let (mut sdu, _) = find_lcmc_req(&test.dump_sinks(), issi, CmcePduTypeDl::DConnect).expect("D-CONNECT to the joiner");
+        DConnect::from_bitbuf(&mut sdu).expect("Failed to parse DConnect")
+    };
+    let listener = joined(&mut test, LISTENER);
+    assert_eq!(listener.call_identifier, call_id);
+    assert_eq!(listener.transmission_grant, TransmissionGrant::GrantedToOtherUser);
+    assert!(listener.transmission_request_permission, "not allowed to request for transmission");
+
+    test.submit_message(build_u_setup_msg(OUTSIDER, TEST_GSSI));
+    test.run_stack(Some(1));
+    assert_eq!(d_release_cause_to(&test.dump_sinks(), OUTSIDER), Some(DisconnectCause::RequestedServiceNotAvailable));
+
+    // Hangtime: a talker joining gets the floor as before, a listener does not.
+    test.submit_message(build_u_tx_ceased_msg(TEST_ISSI, call_id));
+    test.run_stack(Some(1));
+    test.dump_sinks();
+    let listener = joined(&mut test, LISTENER);
+    assert_eq!(listener.transmission_grant, TransmissionGrant::NotGranted);
+    assert!(listener.transmission_request_permission);
+    let talker = joined(&mut test, TALKER);
+    assert_eq!(talker.transmission_grant, TransmissionGrant::Granted);
+    assert!(!talker.transmission_request_permission);
+}
+
+/// A U-TX DEMAND from a radio that may not talk is answered "transmission not granted" to that
+/// radio alone and the call goes on (clause 14.5.2.2.1 b), table 14.80); nobody else hears of
+/// it. With the rules lifted the same radio gets the floor.
+#[test]
+fn test_group_access_tx_demand_from_listener_is_not_granted() {
+    debug::setup_logging_verbose();
+    use tetra_config::bluestation::BrewGroupAccess;
+    const LISTENER: u32 = TEST_ISSI + 1;
+    let mut test = group_access_test();
+    for issi in [TEST_ISSI, LISTENER] {
+        register_subscriber(&mut test, issi, TEST_GSSI);
+    }
+    // RX only without a list: every radio listens only. The call was set up before the rule.
+    test.submit_message(build_u_setup_msg(TEST_ISSI, TEST_GSSI));
+    test.run_stack(Some(1));
+    let call_id = first_d_setup_call_id(&test.dump_sinks(), TEST_GSSI);
+    test.submit_message(build_u_tx_ceased_msg(TEST_ISSI, call_id));
+    test.run_stack(Some(1));
+    test.dump_sinks();
+    limit_group(&mut test, BrewGroupAccess { gssi: TEST_GSSI, rx_only: true, ..Default::default() });
+
+    test.submit_message(build_u_tx_demand_msg(LISTENER, call_id));
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    let (mut sdu, _) = find_lcmc_req(&msgs, LISTENER, CmcePduTypeDl::DTxGranted).expect("D-TX GRANTED to the radio");
+    let answer = DTxGranted::from_bitbuf(&mut sdu).expect("Failed to parse DTxGranted");
+    assert_eq!(answer.call_identifier, call_id);
+    assert_eq!(answer.transmission_grant, TransmissionGrant::NotGranted.into_raw() as u8);
+    assert!(find_lcmc_req(&msgs, TEST_GSSI, CmcePduTypeDl::DTxGranted).is_none(), "no group grant");
+    assert!(find_lcmc_req(&msgs, TEST_GSSI, CmcePduTypeDl::DRelease).is_none(), "the call goes on");
+    assert!(!msgs.iter().any(|m| matches!(&m.msg, SapMsgInner::CmceCallControl(CallControl::FloorGranted { .. }))));
+
+    test.config.state_write().brew_group_access.clear();
+    test.submit_message(build_u_tx_demand_msg(LISTENER, call_id));
+    test.run_stack(Some(1));
+    let (mut sdu, _) = find_lcmc_req(&test.dump_sinks(), LISTENER, CmcePduTypeDl::DTxGranted).expect("D-TX GRANTED");
+    assert_eq!(DTxGranted::from_bitbuf(&mut sdu).unwrap().transmission_grant, TransmissionGrant::Granted.into_raw() as u8);
+}

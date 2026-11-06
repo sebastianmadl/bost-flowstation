@@ -10,6 +10,8 @@ use tetra_pdus::cmce::ss_dgna::ss_dgna_pdu::SsDgnaPdu;
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
 use tetra_pdus::mm::pdus::d_attach_detach_group_identity::DAttachDetachGroupIdentity;
+use tetra_pdus::mm::pdus::d_attach_detach_group_identity_acknowledgement::DAttachDetachGroupIdentityAcknowledgement;
+use tetra_pdus::mm::pdus::d_location_update_accept::DLocationUpdateAccept;
 use tetra_pdus::mm::pdus::d_mm_status::DMmStatus;
 use tetra_pdus::mm::pdus::u_itsi_detach::UItsiDetach;
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
@@ -1501,4 +1503,88 @@ fn test_uplink_from_known_unavailable_radio_requests_registration_and_location_u
         registered_event |= matches!(event, tetra_entities::net_telemetry::TelemetryEvent::MsRegistration { issi: RADIO });
     }
     assert!(registered_event);
+}
+
+// ── Group access (Brew server `group-access` rules) ──────────────────────────────────────────
+
+/// The first MM downlink PDU of `pdu_type` (its SDU from the start).
+fn mm_downlink(msgs: &[SapMsg], pdu_type: MmPduTypeDl) -> Option<BitBuffer> {
+    msgs.iter().find_map(|m| {
+        let SapMsgInner::LmmMleUnitdataReq(ref req) = m.msg else {
+            return None;
+        };
+        let sdu = BitBuffer::from_bitstr(&req.sdu.to_bitstr());
+        (sdu.peek_bits(4) == Some(pdu_type.into_raw())).then_some(sdu)
+    })
+}
+
+/// (GSSI, detachment reason) of the refused entries, and the accepted GSSIs.
+fn split_downlink(gid: &[tetra_pdus::mm::fields::group_identity_downlink::GroupIdentityDownlink]) -> (Vec<(u32, u8)>, Vec<u32>) {
+    let refused = gid.iter().filter_map(|g| Some((g.gssi?, g.group_identity_detachment_uplink?))).collect();
+    let accepted = gid.iter().filter(|g| g.group_identity_attachment.is_some()).filter_map(|g| g.gssi).collect();
+    (refused, accepted)
+}
+
+fn limit_group(test: &mut ComponentTest, gssi: u32, block: bool, issis: &[u32]) {
+    test.config.state_write().brew_group_access.insert(
+        gssi,
+        tetra_config::bluestation::BrewGroupAccess { gssi, block, issis: issis.to_vec(), ..Default::default() },
+    );
+}
+
+/// A group the server's rules do not admit is refused in the acknowledgement with a reason
+/// (TS 100 392-2 clause 16.8.2; "Temporary 1 detachment", table 16.52) and "at least one
+/// attachment/detachment rejected" (table 16.44); the others attach as before and the refused
+/// one is neither attached nor affiliated.
+#[test]
+fn test_group_access_refuses_attachment_in_the_acknowledgement() {
+    debug::setup_logging_verbose();
+    const ISSI: u32 = 2320972;
+    let mut test = mm_with_cmce_sink();
+    limit_group(&mut test, 10, false, &[ISSI + 1]); // allow list without this radio
+    limit_group(&mut test, 11, true, &[ISSI + 1]); // block list without this radio
+    submit_location_update_with_groups(&mut test, ISSI, LocationUpdateType::RoamingLocationUpdating, false, &[9]);
+    test.dump_sinks();
+
+    submit_attach_detach_all(&mut test, ISSI, &[9, 10, 11]);
+    let msgs = test.dump_sinks();
+    let mut sdu = mm_downlink(&msgs, MmPduTypeDl::DAttachDetachGroupIdentityAcknowledgement).expect("acknowledgement");
+    let ack = DAttachDetachGroupIdentityAcknowledgement::from_bitbuf(&mut sdu).expect("parses");
+    assert_eq!(ack.group_identity_accept_reject, 1);
+    let (refused, accepted) = split_downlink(ack.group_identity_downlink.as_deref().unwrap_or_default());
+    assert_eq!(refused, vec![(10, 1)]);
+    assert!(accepted.contains(&9) && accepted.contains(&11), "{accepted:?}");
+    let attached = test.config.state_read().subscribers.attached_groups_of(ISSI);
+    assert!(attached.contains(&9) && attached.contains(&11) && !attached.contains(&10));
+    let updates = subscriber_updates(&msgs);
+    assert!(!updates.iter().any(|(a, g)| *a == BrewSubscriberAction::Affiliate && g.contains(&10)), "{updates:?}");
+
+    // No rules: everything accepted as before.
+    test.config.state_write().brew_group_access.clear();
+    submit_attach_detach_all(&mut test, ISSI, &[9, 10]);
+    let mut sdu = mm_downlink(&test.dump_sinks(), MmPduTypeDl::DAttachDetachGroupIdentityAcknowledgement).expect("acknowledgement");
+    let ack = DAttachDetachGroupIdentityAcknowledgement::from_bitbuf(&mut sdu).expect("parses");
+    assert_eq!(ack.group_identity_accept_reject, 0);
+    assert!(test.config.state_read().subscribers.attached_groups_of(ISSI).contains(&10));
+}
+
+/// Same in a location update: the refused group is in the group identity location accept with
+/// its reason (clause 16.10.23).
+#[test]
+fn test_group_access_refuses_attachment_in_the_location_update_accept() {
+    debug::setup_logging_verbose();
+    const ISSI: u32 = 2320972;
+    let mut test = mm_with_cmce_sink();
+    limit_group(&mut test, 10, true, &[ISSI]);
+    submit_location_update_with_groups(&mut test, ISSI, LocationUpdateType::RoamingLocationUpdating, false, &[9, 10]);
+    let msgs = test.dump_sinks();
+    let mut sdu = mm_downlink(&msgs, MmPduTypeDl::DLocationUpdateAccept).expect("accept");
+    let accept = DLocationUpdateAccept::from_bitbuf(&mut sdu).expect("parses");
+    let gila = accept.group_identity_location_accept.expect("group identity location accept");
+    assert_eq!(gila.group_identity_accept_reject, 1);
+    let (refused, accepted) = split_downlink(gila.group_identity_downlink.as_deref().unwrap_or_default());
+    assert_eq!(refused, vec![(10, 1)]);
+    assert_eq!(accepted, vec![9]);
+    let attached = test.config.state_read().subscribers.attached_groups_of(ISSI);
+    assert!(attached.contains(&9) && !attached.contains(&10));
 }

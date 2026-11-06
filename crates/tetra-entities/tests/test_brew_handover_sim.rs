@@ -699,6 +699,10 @@ fn u_attach_detach_all(issi: u32, groups: &[u32]) -> SapMsg {
 }
 
 fn u_setup(issi: u32, gssi: u32) -> SapMsg {
+    u_setup_prio(issi, gssi, 0)
+}
+
+fn u_setup_prio(issi: u32, gssi: u32, call_priority: u8) -> SapMsg {
     let pdu = USetup {
         area_selection: 0,
         hook_method_selection: false,
@@ -711,7 +715,7 @@ fn u_setup(issi: u32, gssi: u32) -> SapMsg {
             speech_service: Some(0),
         },
         request_to_transmit_send_data: true,
-        call_priority: 0,
+        call_priority,
         clir_control: 0,
         called_party_type_identifier: PartyTypeIdentifier::Ssi,
         called_party_ssi: Some(gssi as u64),
@@ -2964,4 +2968,121 @@ fn sim_multi_cell_station_roams_with_other_stations() {
         left += 1;
     }
     assert_eq!((arrived, restored_away, restored_here, left), (26, 26, 13, 13));
+}
+
+// ─── Group access (brew-server `group-access`) ──────────────────────────────────────────────────
+
+/// The server sends who may use which group to every station that announced `group-access`.
+fn send_group_access(sim: &mut Sim, json: &str, groups: usize) {
+    let mut msg = vec![BREW_CLASS_SERVICE, BREW_SERVICE_GROUP_ACCESS];
+    msg.extend_from_slice(json.as_bytes());
+    msg.push(0);
+    for (i, wire) in sim.wires.iter().enumerate() {
+        if sim.relay.cells[&i].1.iter().any(|c| c == BREW_EXT_GROUP_ACCESS) {
+            wire.lock().unwrap().to_station.push_back(msg.clone());
+        }
+    }
+    sim.run_until("every station has the group rules", |s| {
+        s.stations.iter().all(|st| st.test.config.state_read().brew_group_access.len() == groups)
+    });
+}
+
+/// The CMCE PDU of `pdu` type a station last sent to `ssi`, parsed.
+fn last_cmce_to<T>(air: &[SapMsg], ssi: u32, pdu: CmcePduTypeDl, parse: fn(&mut BitBuffer) -> Option<T>) -> Option<T> {
+    air_to(air, ssi).iter().rev().find_map(|bits| {
+        let mut b = BitBuffer::from_bitstr(bits.strip_prefix(PD_CMCE)?);
+        (b.peek_bits(5) == Some(pdu.into_raw())).then_some(())?;
+        parse(&mut b)
+    })
+}
+
+/// Ten stations, thirty radios on five groups, rules from the server: 2001 admits four radios,
+/// 2002 is listen-only for everyone, 2003 blocks one radio and makes two listen-only. Stations
+/// refuse the attachment (clause 16.8.2, in the D-LOCATION UPDATE ACCEPT, clause 16.10.23), a
+/// call set-up from a radio that may not talk (D-RELEASE), the request to talk in a running call
+/// (D-TX GRANTED "not granted", clause 14.5.2.2.1 b)) and let listener-only radios join a call
+/// without the right to ask for the floor (clause 14.8.43). Emergency calls pass, and a changed
+/// table applies at once.
+#[test]
+fn sim_ten_stations_thirty_radios_group_access() {
+    use tetra_pdus::mm::pdus::d_location_update_accept::DLocationUpdateAccept;
+    use tetra_pdus::cmce::pdus::{d_release::DRelease, d_tx_granted::DTxGranted, u_tx_demand::UTxDemand};
+    let issi = |r: u32| FIRST_ISSI + r;
+    let mut extensions = EXTENSIONS.to_vec();
+    extensions.push(BREW_EXT_GROUP_ACCESS);
+    let las: Vec<u16> = (1..=STATIONS as u16).collect();
+    let mut sim = Sim::new(&las, &extensions);
+    assert!(sim.relay.cells.values().all(|(_, caps)| caps.iter().any(|c| c == BREW_EXT_GROUP_ACCESS)));
+
+    let rules = format!(
+        r#"{{"groups":[
+            {{"gssi":2001,"mode":"allow","issis":[{},{},{},{}]}},
+            {{"gssi":2002,"mode":"allow","issis":[],"rx_only":true,"rx_only_issis":[]}},
+            {{"gssi":2003,"mode":"block","issis":[{}],"rx_only":true,"rx_only_issis":[{},{}]}}]}}"#,
+        issi(0), issi(5), issi(10), issi(15), issi(27), issi(7), issi(12)
+    );
+    send_group_access(&mut sim, &rules, 3);
+
+    // Radio r sits on station r % 10, member of group r % 5.
+    for r in 0..RADIOS {
+        sim.register(r as usize % STATIONS, issi(r), LocationUpdateType::RoamingLocationUpdating, &[GROUPS[r as usize % 5]]);
+    }
+    sim.steps(10);
+    for r in 0..RADIOS {
+        let (st, gssi) = (r as usize % STATIONS, GROUPS[r as usize % 5]);
+        let refused = [20, 25, 27].contains(&r);
+        let accept = {
+            let prefix = mm_pdu(MmPduTypeDl::DLocationUpdateAccept);
+            let bits = air_to(&sim.stations[st].air, issi(r)).into_iter().rev().find(|b| b.starts_with(&prefix)).expect("accepted");
+            DLocationUpdateAccept::from_bitbuf(&mut BitBuffer::from_bitstr(&bits[3..])).expect("parses")
+        };
+        let gila = accept.group_identity_location_accept.expect("group identity location accept");
+        assert_eq!(gila.group_identity_accept_reject, u8::from(refused), "radio {r}");
+        let reason = gila.group_identity_downlink.unwrap_or_default().iter().find(|g| g.gssi == Some(gssi)).and_then(|g| g.group_identity_detachment_uplink);
+        assert_eq!(reason, refused.then_some(1), "radio {r}: temporary 1 detachment");
+        assert_eq!(sim.relay.groups[&issi(r)].contains(&gssi), !refused, "radio {r} affiliated on the network");
+        assert_eq!(sim.stations[st].test.config.state_read().subscribers.attached_groups_of(issi(r)).contains(&gssi), !refused);
+    }
+
+    // 2002 is listen-only: a call set-up is refused, nothing reaches the network.
+    sim.clear_air();
+    sim.submit(1, u_setup(issi(1), 2002));
+    sim.steps(20);
+    let release = last_cmce_to(&sim.stations[1].air, issi(1), CmcePduTypeDl::DRelease, |b| DRelease::from_bitbuf(b).ok()).expect("D-RELEASE");
+    assert_eq!(release.disconnect_cause, DisconnectCause::RequestedServiceNotAvailable);
+    assert!(!sim.relay.calls.values().any(|c| c.gssi == 2002));
+
+    // 2003: radio 2 talks; on station 7, radio 7 (listen-only) and 17 (may talk) join, radio 27
+    // (blocked) is refused, and radio 7's request to talk is not granted.
+    let session = sim.start_call(2, issi(2), 2003);
+    sim.run_until("station 7 has the call on 2003", |s| s.local_call_id(7, 2003).is_some());
+    let call_id = sim.local_call_id(7, 2003).unwrap();
+    let joined = |sim: &mut Sim, r: u32| -> DConnect {
+        sim.submit(7, u_setup(issi(r), 2003));
+        sim.steps(10);
+        last_cmce_to(&sim.stations[7].air, issi(r), CmcePduTypeDl::DConnect, |b| DConnect::from_bitbuf(b).ok()).expect("D-CONNECT")
+    };
+    let listener = joined(&mut sim, 7);
+    assert_eq!((listener.call_identifier, listener.transmission_grant, listener.transmission_request_permission), (call_id, TransmissionGrant::GrantedToOtherUser, true));
+    let talker = joined(&mut sim, 17);
+    assert_eq!((talker.transmission_grant, talker.transmission_request_permission), (TransmissionGrant::GrantedToOtherUser, false));
+    sim.submit(7, u_setup(issi(27), 2003));
+    sim.steps(10);
+    assert!(last_cmce_to(&sim.stations[7].air, issi(27), CmcePduTypeDl::DRelease, |b| DRelease::from_bitbuf(b).ok()).is_some());
+    let demand = UTxDemand { call_identifier: call_id, tx_demand_priority: 0, encryption_control: false, reserved: false, facility: None, dm_ms_address: None, proprietary: None };
+    sim.submit(7, uplink(issi(7), MleProtocolDiscriminator::Cmce, |b| demand.to_bitbuf(b).unwrap()));
+    sim.steps(10);
+    let answer = last_cmce_to(&sim.stations[7].air, issi(7), CmcePduTypeDl::DTxGranted, |b| DTxGranted::from_bitbuf(b).ok()).expect("D-TX GRANTED");
+    assert_eq!(answer.transmission_grant, TransmissionGrant::NotGranted.into_raw() as u8);
+    assert_eq!(sim.relay.calls[&session].talker, issi(2), "the talker keeps the floor");
+    sim.end_call(2, issi(2), 2003, session);
+
+    // Emergency on the listen-only group passes.
+    sim.submit(6, u_setup_prio(issi(6), 2002, 15));
+    sim.run_until("the emergency call on 2002 reached the network", |s| s.relay.calls.values().any(|c| c.gssi == 2002 && c.owner == 6));
+
+    // The server opens every group: radio 20 attaches 2001 now.
+    send_group_access(&mut sim, r#"{"groups":[]}"#, 0);
+    sim.register(0, issi(20), LocationUpdateType::PeriodicLocationUpdating, &[2001]);
+    sim.run_until("radio 20 is affiliated to 2001", |s| s.relay.groups[&issi(20)].contains(&2001));
 }

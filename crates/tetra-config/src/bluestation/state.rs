@@ -568,6 +568,35 @@ pub struct BrewDirectoryNeighbour {
     pub location_area: Option<u16>,
 }
 
+/// Who may use one group, as the Brew server sends it (`SERVICE_GROUP_ACCESS`, brew-server
+/// extension `group-access`). `issis` is an allow list (`block = false`: only these may attach and
+/// talk) or a block list (`block = true`: these may not); empty = everyone. `rx_only` makes
+/// radios listeners: all of them when `rx_only_issis` is empty, else the listed ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrewGroupAccess {
+    pub gssi: u32,
+    #[serde(default)]
+    pub block: bool,
+    #[serde(default)]
+    pub issis: Vec<u32>,
+    #[serde(default)]
+    pub rx_only: bool,
+    #[serde(default)]
+    pub rx_only_issis: Vec<u32>,
+}
+
+impl BrewGroupAccess {
+    /// May `issi` attach to (and listen on) the group?
+    pub fn may_join(&self, issi: u32) -> bool {
+        self.issis.is_empty() || self.issis.contains(&issi) != self.block
+    }
+
+    /// May `issi` talk on the group (admitted and not a listener only)?
+    pub fn may_talk(&self, issi: u32) -> bool {
+        self.may_join(issi) && !(self.rx_only && (self.rx_only_issis.is_empty() || self.rx_only_issis.contains(&issi)))
+    }
+}
+
 /// Mutable, stack-editable state (mutex-protected).
 #[derive(Debug, Clone)]
 pub struct StackState {
@@ -582,6 +611,10 @@ pub struct StackState {
     /// The Brew server's cell directory as last received (`None` until one arrives on this
     /// connection, or when the server does not offer `cell-directory`).
     pub brew_cell_directory: Option<Vec<BrewDirectoryCell>>,
+    /// Who may use which group, as the Brew server last sent it (GSSI -> rule). Empty when the
+    /// server does not offer `group-access` or sent no rules: every group is open. Cleared on
+    /// reconnect (the server sends the table again after the announcement).
+    pub brew_group_access: BTreeMap<u32, BrewGroupAccess>,
     /// After a real Brew disconnect→reconnect, CMCE may request a selective SwMI-initiated
     /// location update for an ISSI whose Brew-routed setup fails (TIP/ETSI interrogation, not
     /// a mass kick). `None` or a past Instant means the soft-recovery window is closed.
@@ -788,6 +821,18 @@ mod tests {
     }
 }
 
+impl StackState {
+    /// May `issi` attach to `gssi` (Brew server's `group-access` rules; no rule = yes)?
+    pub fn group_may_join(&self, gssi: u32, issi: u32) -> bool {
+        self.brew_group_access.get(&gssi).is_none_or(|a| a.may_join(issi))
+    }
+
+    /// May `issi` talk on `gssi` (Brew server's `group-access` rules; no rule = yes)?
+    pub fn group_may_talk(&self, gssi: u32, issi: u32) -> bool {
+        self.brew_group_access.get(&gssi).is_none_or(|a| a.may_talk(issi))
+    }
+}
+
 impl Default for StackState {
     fn default() -> Self {
         Self {
@@ -796,6 +841,7 @@ impl Default for StackState {
             brew_link_up: false,
             brew_server_extensions: Vec::new(),
             brew_cell_directory: None,
+            brew_group_access: BTreeMap::new(),
             brew_soft_recovery_until: None,
             subscribers: SubscriberRegistry::new(),
             live_sds_queue: VecDeque::new(),
