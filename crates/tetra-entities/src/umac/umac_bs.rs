@@ -14,7 +14,6 @@ use tetra_pdus::umac::fields::channel_allocation::ChanAllocElement;
 use tetra_pdus::umac::fields::sysinfo_default_def_for_access_code_a::SysinfoDefaultDefForAccessCodeA;
 use tetra_pdus::umac::pdus::mac_access::MacAccess;
 use tetra_pdus::umac::pdus::mac_data::MacData;
-use tetra_pdus::umac::pdus::mac_end_dl::MacEndDl;
 use tetra_pdus::umac::pdus::mac_end_hu::MacEndHu;
 use tetra_pdus::umac::pdus::mac_end_ul::MacEndUl;
 use tetra_pdus::umac::pdus::mac_frag_ul::MacFragUl;
@@ -459,71 +458,13 @@ impl UmacBs {
         })
     }
 
-    /// Builds the downlink STCH block(s) for one stolen slot (TS 100 392-2 clause 23.8.4.2.1):
-    /// a MAC-RESOURCE in the first half slot, or, when the PDU does not fit there, a MAC-RESOURCE
-    /// with "Length indication" 111111 (second half slot stolen, start of fragmentation) and the
-    /// final fragment in a MAC-END in the second half slot. A channel allocation goes in the
-    /// MAC-END when the message is fragmented (clause 23.5.4.1). Returns None when the PDU does
-    /// not fit one slot, since fragmentation on the STCH is only permitted within one slot
-    /// (clause 23.4.2.1.7).
+    /// The clear STCH block(s) for one stolen slot, see [`crate::umac::subcomp::bs_sched::build_stch`].
     fn build_stch(
         mac_pdu: MacResource,
         sdu: &mut BitBuffer,
         chan_alloc: Option<ChanAllocElement>,
     ) -> Option<(BitBuffer, Option<BitBuffer>)> {
-        const STCH_CAP: usize = 124;
-        let sdu_len = sdu.get_len();
-
-        let mut single = mac_pdu.clone();
-        single.chan_alloc_element = chan_alloc.clone();
-        let single_len = single.compute_header_len() + sdu_len;
-        if single_len.div_ceil(8) * 8 <= STCH_CAP {
-            let num_fill_bits = single.update_len_and_fill_ind(sdu_len);
-            let mut block = BitBuffer::new(STCH_CAP);
-            single.to_bitbuf(&mut block);
-            sdu.seek(0);
-            block.copy_bits(sdu, sdu_len);
-            fillbits::addition::write(&mut block, Some(num_fill_bits));
-            return Some((block, None));
-        }
-
-        let mut first = mac_pdu;
-        first.chan_alloc_element = None;
-        first.length_ind = 0b111111;
-        let first_hdr = first.compute_header_len();
-        if first_hdr >= STCH_CAP || sdu_len < 2 {
-            return None;
-        }
-        // Keep at least one bit for the final fragment
-        let first_bits = (STCH_CAP - first_hdr).min(sdu_len - 1);
-        let rest = sdu_len - first_bits;
-        let end_hdr = 2 + 1 + 1 + 1 + 6 + 1 + 1 + chan_alloc.as_ref().map_or(0, |ca| ca.compute_len());
-        let end_len = end_hdr + rest;
-        let end_len_bytes = end_len.div_ceil(8);
-        if end_len_bytes * 8 > STCH_CAP {
-            return None;
-        }
-
-        first.fill_bits = first_hdr + first_bits < STCH_CAP;
-        let mut block1 = BitBuffer::new(STCH_CAP);
-        first.to_bitbuf(&mut block1);
-        sdu.seek(0);
-        block1.copy_bits(sdu, first_bits);
-        fillbits::addition::write(&mut block1, None);
-
-        let num_fill_bits = end_len_bytes * 8 - end_len;
-        let end = MacEndDl {
-            fill_bits: num_fill_bits > 0,
-            pos_of_grant: 0,
-            length_ind: end_len_bytes as u8,
-            slot_granting_element: None,
-            chan_alloc_element: chan_alloc,
-        };
-        let mut block2 = BitBuffer::new(STCH_CAP);
-        end.to_bitbuf(&mut block2);
-        block2.copy_bits(sdu, rest);
-        fillbits::addition::write(&mut block2, Some(num_fill_bits));
-        Some((block1, Some(block2)))
+        crate::umac::subcomp::bs_sched::build_stch(mac_pdu, sdu, chan_alloc, None)
     }
 
     /// Convenience function to send a TMA-REPORT.ind
@@ -1638,10 +1579,13 @@ impl UmacBs {
                     // response by default. Only propagate the flag when we are actually
                     // carrying a pending RA acknowledgement on this same timeslot.
                     let is_random_access_response = has_pending_ra;
+                    // Encrypted like any other PDU to this address (lx-dxb): the STCH carries
+                    // C-plane MAC-RESOURCE, encrypted per TS 100 392-7 clause 6.7.1.2.
+                    let encryption_mode = self.dl_encryption_mode(prim.main_address);
                     let mac_pdu = MacResource {
                         fill_bits: false,
                         pos_of_grant: 0,
-                        encryption_mode: 0,
+                        encryption_mode,
                         random_access_flag: is_random_access_response,
                         length_ind: 0,
                         addr: Some(prim.main_address),
@@ -1659,7 +1603,21 @@ impl UmacBs {
                     let sdu_len = sdu.get_len();
                     let hdr_len = mac_pdu.compute_header_len();
 
-                    if hdr_len + sdu_len <= STCH_CAP {
+                    if encryption_mode != 0 {
+                        // Built and encrypted in the slot it goes out in. It must fit one stolen
+                        // slot (clause 23.4.2.1.7); otherwise it goes on the control channel.
+                        let fits = Self::build_stch(mac_pdu.clone(), &mut sdu.clone(), None).is_some();
+                        sdu.seek(0);
+                        if fits {
+                            self.channel_scheduler.dl_enqueue_stealing_ciphered(ts, mac_pdu, sdu, None, prim.tx_reporter);
+                            return;
+                        }
+                        tracing::warn!(
+                            "rx_ul_tma_unitdata_req: encrypted FACCH PDU ({} bits) for {} does not fit one stolen slot, using the MCCH",
+                            sdu_len,
+                            prim.main_address
+                        );
+                    } else if hdr_len + sdu_len <= STCH_CAP {
                         // Fits in a single stolen half-slot — one STCH block (unchanged path,
                         // used by small control PDUs and short status/SDS messages).
                         let mut mac_pdu = mac_pdu;
@@ -1679,6 +1637,7 @@ impl UmacBs {
                         );
 
                         self.channel_scheduler.dl_enqueue_stealing(ts, stch_block, prim.tx_reporter);
+                        return;
                     } else {
                         // Larger than one stolen half-slot: fragment across consecutive stolen
                         // half-slots (panic-safe — a fixed 124-bit buffer used to overflow here and
@@ -1697,9 +1656,9 @@ impl UmacBs {
                                 break;
                             }
                         }
+                        return;
                     }
-
-                    return;
+                    // An encrypted PDU too long for one stolen slot: on to the MCCH below.
                 } // end circuit_is_active guard
             } else {
                 tracing::warn!("rx_ul_tma_unitdata_req: stealing requested but no active DL circuit, falling back to MCCH");
@@ -1808,10 +1767,11 @@ impl UmacBs {
                         },
                         None => (None, None),
                     };
+                    let encryption_mode = self.dl_encryption_mode(prim.main_address);
                     let mac_pdu = MacResource {
                         fill_bits: false,
                         pos_of_grant: 0,
-                        encryption_mode: 0,
+                        encryption_mode,
                         random_access_flag: has_pending_ra,
                         length_ind: 0,
                         addr: Some(prim.main_address),
@@ -1822,6 +1782,14 @@ impl UmacBs {
                         chan_alloc_element: None,
                     };
 
+                    sdu.seek(0);
+                    if encryption_mode != 0 && Self::build_stch(mac_pdu.clone(), &mut sdu.clone(), chan_alloc_element.clone()).is_some() {
+                        // Built and encrypted in the slot it goes out in (lx-dxb).
+                        sdu.seek(0);
+                        self.scheduler_for_mut(requested_carrier)
+                            .dl_enqueue_stealing_ciphered(ts, mac_pdu, sdu, chan_alloc_element, prim.tx_reporter);
+                        return;
+                    }
                     sdu.seek(0);
                     match Self::build_stch(mac_pdu, &mut sdu, chan_alloc_element) {
                         Some((first, None)) => {

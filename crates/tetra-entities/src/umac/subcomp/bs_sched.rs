@@ -14,10 +14,11 @@ use tetra_pdus::{
             basic_slotgrant_cap_alloc::BasicSlotgrantCapAlloc, basic_slotgrant_granting_delay::BasicSlotgrantGrantingDelay,
             reservation_requirement::ReservationRequirement,
         },
-        fields::basic_slotgrant::BasicSlotgrant,
+        fields::{basic_slotgrant::BasicSlotgrant, channel_allocation::ChanAllocElement},
         pdus::{
             access_assign::{AccessAssign, AccessField},
             access_assign_fr18::AccessAssignFr18,
+            mac_end_dl::MacEndDl,
             mac_resource::MacResource,
             mac_sync::MacSync,
             mac_sysinfo::MacSysinfo,
@@ -27,7 +28,7 @@ use tetra_pdus::{
 
 use crate::{
     lmac::components::scrambler,
-    umac::subcomp::{bs_frag::BsFragger, circuit_mgr::CircuitMgr},
+    umac::subcomp::{bs_frag::BsFragger, circuit_mgr::CircuitMgr, fillbits},
 };
 
 /// We submit this many TX timeslots ahead of the current time
@@ -181,7 +182,118 @@ pub enum DlSchedElem {
     /// Delivers time-critical signaling (D-TX CEASED, D-TX GRANTED) per EN 300 392-2, clause 23.5.
     /// The optional second block steals the second half slot too (clause 23.8.4.2.1): it then
     /// holds the MAC-END of a message fragmented over the two halves of the slot.
-    Stealing(BitBuffer, Option<BitBuffer>, Option<TxReporter>),
+    Stealing(StchItem),
+}
+
+/// What a FACCH/stealing entry carries.
+#[derive(Debug)]
+pub enum StchItem {
+    /// Clear STCH block(s), built when queued.
+    Ready(BitBuffer, Option<BitBuffer>, Option<TxReporter>),
+    /// An encrypted PDU, kept structured until the downlink slot it goes out in is known: the
+    /// key stream depends on that slot (TS 100 392-7 clause 6.4.1, table 6.4: STCH KSS(0 to 123),
+    /// a second stolen half slot KSS(216 to 339)) and the address is replaced by its ESI.
+    Ciphered {
+        pdu: MacResource,
+        sdu: BitBuffer,
+        chan_alloc: Option<ChanAllocElement>,
+        tx_reporter: Option<TxReporter>,
+    },
+}
+
+/// Builds the downlink STCH block(s) for one stolen slot (TS 100 392-2 clause 23.8.4.2.1):
+/// a MAC-RESOURCE in the first half slot, or, when the PDU does not fit there, a MAC-RESOURCE
+/// with "Length indication" 111111 (second half slot stolen, start of fragmentation) and the
+/// final fragment in a MAC-END in the second half slot. A channel allocation goes in the
+/// MAC-END when the message is fragmented (clause 23.5.4.1). Returns None when the PDU does
+/// not fit one slot, since fragmentation on the STCH is only permitted within one slot
+/// (clause 23.4.2.1.7).
+///
+/// With `cipher` (the cell cipher and the key stream of the slot it goes out in) the PDU is sent
+/// encrypted (TS 100 392-7): the address becomes its ESI (clause 4.2.6), the encryption mode is
+/// set, and in the MAC-RESOURCE and the MAC-END everything after the channel allocation flag is
+/// XORed with the key stream (clause 6.7.1.2), from KSS(0) in the first half slot and KSS(216)
+/// in the second (clause 6.4.1, table 6.4 "STCH+STCH"). Fill bits stay clear (clause 6.4.0).
+/// Encrypted and clear blocks have the same length.
+pub fn build_stch(
+    mac_pdu: MacResource,
+    sdu: &mut BitBuffer,
+    chan_alloc: Option<ChanAllocElement>,
+    cipher: Option<(&crate::aie::cipher::CellCipher, &crate::aie::cipher::Kss)>,
+) -> Option<(BitBuffer, Option<BitBuffer>)> {
+    const STCH_CAP: usize = 124;
+    let sdu_len = sdu.get_len();
+    let ca_len = chan_alloc.as_ref().map_or(0, |ca| ca.compute_len());
+
+    let mut mac_pdu = mac_pdu;
+    if let Some((c, _)) = cipher {
+        if let Some(addr) = mac_pdu.addr.as_mut()
+            && matches!(addr.ssi_type, SsiType::Ssi | SsiType::Issi | SsiType::Gssi)
+        {
+            addr.ssi = c.esi(addr.ssi);
+        }
+        mac_pdu.encryption_mode = c.encryption_mode();
+    }
+    let encrypt = |block: &mut BitBuffer, start: usize, len: usize, kss_offset: usize| {
+        if let Some((_, kss)) = cipher {
+            kss.apply(block, start, len, kss_offset);
+        }
+    };
+
+    let mut single = mac_pdu.clone();
+    single.chan_alloc_element = chan_alloc.clone();
+    let single_len = single.compute_header_len() + sdu_len;
+    if single_len.div_ceil(8) * 8 <= STCH_CAP {
+        let num_fill_bits = single.update_len_and_fill_ind(sdu_len);
+        let hdr_len = single.compute_header_len();
+        let mut block = BitBuffer::new(STCH_CAP);
+        single.to_bitbuf(&mut block);
+        sdu.seek(0);
+        block.copy_bits(sdu, sdu_len);
+        encrypt(&mut block, hdr_len - ca_len, ca_len + sdu_len, 0);
+        fillbits::addition::write(&mut block, Some(num_fill_bits));
+        return Some((block, None));
+    }
+
+    let mut first = mac_pdu;
+    first.chan_alloc_element = None;
+    first.length_ind = 0b111111;
+    let first_hdr = first.compute_header_len();
+    if first_hdr >= STCH_CAP || sdu_len < 2 {
+        return None;
+    }
+    // Keep at least one bit for the final fragment
+    let first_bits = (STCH_CAP - first_hdr).min(sdu_len - 1);
+    let rest = sdu_len - first_bits;
+    let end_hdr = 2 + 1 + 1 + 1 + 6 + 1 + 1 + ca_len;
+    let end_len = end_hdr + rest;
+    let end_len_bytes = end_len.div_ceil(8);
+    if end_len_bytes * 8 > STCH_CAP {
+        return None;
+    }
+
+    first.fill_bits = first_hdr + first_bits < STCH_CAP;
+    let mut block1 = BitBuffer::new(STCH_CAP);
+    first.to_bitbuf(&mut block1);
+    sdu.seek(0);
+    block1.copy_bits(sdu, first_bits);
+    encrypt(&mut block1, first_hdr, first_bits, 0);
+    fillbits::addition::write(&mut block1, None);
+
+    let num_fill_bits = end_len_bytes * 8 - end_len;
+    let end = MacEndDl {
+        fill_bits: num_fill_bits > 0,
+        pos_of_grant: 0,
+        length_ind: end_len_bytes as u8,
+        slot_granting_element: None,
+        chan_alloc_element: chan_alloc,
+    };
+    let mut block2 = BitBuffer::new(STCH_CAP);
+    end.to_bitbuf(&mut block2);
+    block2.copy_bits(sdu, rest);
+    encrypt(&mut block2, end_hdr - ca_len, ca_len + rest, crate::aie::cipher::SECOND_HALF_SLOT_KSS_OFFSET);
+    fillbits::addition::write(&mut block2, Some(num_fill_bits));
+    Some((block1, Some(block2)))
 }
 
 const EMPTY_SCHED_ELEM: TimeslotSchedule = TimeslotSchedule {
@@ -913,7 +1025,7 @@ impl BsChannelScheduler {
     /// The block must be 124 type1 bits containing MAC-U-SIGNAL header + TM-SDU.
     pub fn dl_enqueue_stealing(&mut self, ts: u8, block: BitBuffer, tx_reporter: Option<TxReporter>) {
         tracing::info!("dl_enqueue_stealing: ts {} enqueueing STCH block ({} bits)", ts, block.get_len());
-        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(block, None, tx_reporter));
+        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(StchItem::Ready(block, None, tx_reporter)));
     }
 
     /// Enqueues a full stolen slot: `first` goes in the first half slot, `second` in the second
@@ -925,7 +1037,22 @@ impl BsChannelScheduler {
             first.get_len(),
             second.get_len()
         );
-        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(first, Some(second), tx_reporter));
+        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(StchItem::Ready(first, Some(second), tx_reporter)));
+    }
+
+    /// Enqueue an encrypted PDU for FACCH/stealing on a traffic timeslot. Its STCH block(s) are
+    /// built and encrypted only when the slot it goes out in is known (see [`build_stch`]); the
+    /// caller has checked that it fits one stolen slot.
+    pub fn dl_enqueue_stealing_ciphered(
+        &mut self,
+        ts: u8,
+        pdu: MacResource,
+        sdu: BitBuffer,
+        chan_alloc: Option<ChanAllocElement>,
+        tx_reporter: Option<TxReporter>,
+    ) {
+        tracing::info!("dl_enqueue_stealing_ciphered: ts {} enqueueing encrypted FACCH PDU ({} SDU bits)", ts, sdu.get_len());
+        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(StchItem::Ciphered { pdu, sdu, chan_alloc, tx_reporter }));
     }
 
     fn dl_enqueue_tma_frag_next_frame(&mut self, fragger: BsFragger) {
@@ -1275,7 +1402,10 @@ impl BsChannelScheduler {
                             buf_opt = Some(buf);
                         }
 
-                        DlSchedElem::Stealing(_, _, tx_reporter) => {
+                        DlSchedElem::Stealing(item) => {
+                            let tx_reporter = match item {
+                                StchItem::Ready(_, _, tx_reporter) | StchItem::Ciphered { tx_reporter, .. } => tx_reporter,
+                            };
                             // Stealing items should only appear on traffic timeslots; discard if found here
                             tracing::warn!(
                                 "dl_build_block_from_signalling_schedule: Stealing item found on non-traffic ts {}, discarding",
@@ -1350,7 +1480,26 @@ impl BsChannelScheduler {
             let q = &mut self.dltx_queues[ts.t as usize - 1];
             if let Some(i) = q.iter().position(|e| matches!(e, DlSchedElem::Stealing(..))) {
                 match q.remove(i) {
-                    DlSchedElem::Stealing(buf, second, tx_reporter) => (Some(buf), second, tx_reporter),
+                    DlSchedElem::Stealing(StchItem::Ready(buf, second, tx_reporter)) => (Some(buf), second, tx_reporter),
+                    DlSchedElem::Stealing(StchItem::Ciphered { pdu, mut sdu, chan_alloc, tx_reporter }) => {
+                        // Built and encrypted now, with the key stream of this very slot.
+                        let cipher = self.cipher.clone();
+                        let built = cipher.as_deref().and_then(|c| {
+                            let kss = c.kss(self.carrier_num, ts, false);
+                            build_stch(pdu, &mut sdu, chan_alloc, Some((c, &kss)))
+                        });
+                        match built {
+                            Some((first, second)) => (Some(first), second, tx_reporter),
+                            None => {
+                                // Never sent in clear: without a cipher (or if it no longer fits) it is dropped.
+                                tracing::error!("dl_build_traffic_block: encrypted FACCH PDU on ts {} could not be built, discarding", ts.t);
+                                if let Some(tx_reporter) = tx_reporter {
+                                    tx_reporter.mark_discarded();
+                                }
+                                (None, None, None)
+                            }
+                        }
+                    }
                     _ => unreachable!(),
                 }
             } else {
@@ -1997,6 +2146,100 @@ mod tests {
         assert!(sched.tch_kss(3, t, false).is_none());
         sched.set_tch_encrypted(2, false);
         assert!(sched.tch_kss(2, t, false).is_none());
+    }
+
+    fn test_aie() -> tetra_config::bluestation::CfgAie {
+        tetra_config::bluestation::CfgAie {
+            enabled: true,
+            ksg: 1,
+            sckn: 1,
+            sck: tetra_config::bluestation::CipherKey([7; 10]),
+            sck_vn: 0,
+            clear_groups: vec![],
+        }
+    }
+
+    fn facch_pdu(encryption_mode: u8) -> MacResource {
+        MacResource {
+            fill_bits: false,
+            pos_of_grant: 0,
+            encryption_mode,
+            random_access_flag: false,
+            length_ind: 0,
+            addr: Some(TetraAddress::issi(2320972)),
+            event_label: None,
+            usage_marker: None,
+            power_control_element: None,
+            slot_granting_element: None,
+            chan_alloc_element: None,
+        }
+    }
+
+    fn pattern_sdu(len: usize) -> BitBuffer {
+        let mut sdu = BitBuffer::new(len);
+        for i in 0..len {
+            sdu.write_bit(((i * 7 + 3) % 5 < 2) as u8);
+        }
+        sdu.seek(0);
+        sdu
+    }
+
+    /// FACCH to an encrypted radio (lx-dxb, TS 100 392-7): built in the slot it goes out in, the
+    /// address replaced by its ESI (clause 4.2.6), the TM-SDU XORed with that slot's key stream
+    /// from KSS(0), and for a PDU over both halves the MAC-END from KSS(216) (clause 6.4.1,
+    /// table 6.4 "STCH+STCH"); header and fill bits clear (clauses 6.4.0, 6.7.1.2).
+    #[test]
+    fn ciphered_facch_uses_the_key_stream_of_its_slot() {
+        let mut sched = get_testing_slotter();
+        let cipher = std::sync::Arc::new(crate::aie::cipher::CellCipher::new(&test_aie(), &[sched.carrier_num()], 1, 1));
+        sched.set_cipher(Some(cipher.clone()));
+        let t = TdmaTime { t: 2, f: 3, m: 5, h: 0 };
+        let kss = cipher.kss(sched.carrier_num(), t, false);
+        let mode = cipher.encryption_mode();
+
+        for (sdu_len, two_blocks) in [(40, false), (150, true)] {
+            let (clear1, clear2) = build_stch(facch_pdu(mode), &mut pattern_sdu(sdu_len), None, None).expect("fits one slot");
+            assert_eq!(clear2.is_some(), two_blocks);
+            sched.dl_enqueue_stealing_ciphered(2, facch_pdu(mode), pattern_sdu(sdu_len), None, None);
+            let (_, stch1, stch2) = sched.dl_build_traffic_block(t);
+            let (enc1, enc2) = (stch1.expect("block 1"), stch2);
+            assert_eq!(enc2.is_some(), two_blocks);
+
+            let mut b = BitBuffer::from_bitstr(&enc1.to_bitstr());
+            let hdr = MacResource::from_bitbuf(&mut b).expect("MAC-RESOURCE parses");
+            assert_eq!(hdr.addr.unwrap().ssi, cipher.esi(2320972), "ESI instead of the ISSI");
+            assert_eq!(hdr.encryption_mode, mode);
+            let hdr_len = b.get_pos();
+            let payload = if two_blocks { 124 - hdr_len } else { sdu_len };
+            let enc_str = enc1.to_bitstr();
+            assert_ne!(enc_str[hdr_len..hdr_len + payload], clear1.to_bitstr()[hdr_len..hdr_len + payload], "encrypted");
+            let mut dec = BitBuffer::from_bitstr(&enc_str);
+            kss.apply(&mut dec, hdr_len, payload, 0);
+            assert_eq!(dec.to_bitstr()[hdr_len..hdr_len + payload], clear1.to_bitstr()[hdr_len..hdr_len + payload]);
+            assert_eq!(enc_str[hdr_len + payload..], clear1.to_bitstr()[hdr_len + payload..], "fill bits clear");
+
+            if let (Some(enc2), Some(clear2)) = (enc2, clear2) {
+                const END_HDR: usize = 13;
+                let rest = sdu_len - payload;
+                assert_eq!(enc2.to_bitstr()[..END_HDR], clear2.to_bitstr()[..END_HDR], "MAC-END header clear");
+                let mut dec2 = BitBuffer::from_bitstr(&enc2.to_bitstr());
+                kss.apply(&mut dec2, END_HDR, rest, crate::aie::cipher::SECOND_HALF_SLOT_KSS_OFFSET);
+                assert_eq!(dec2.to_bitstr(), clear2.to_bitstr(), "second half slot from KSS(216)");
+                let mut wrong = BitBuffer::from_bitstr(&enc2.to_bitstr());
+                kss.apply(&mut wrong, END_HDR, rest, 0);
+                assert_ne!(wrong.to_bitstr(), clear2.to_bitstr());
+            }
+        }
+    }
+
+    /// An encrypted FACCH PDU is never sent in clear: without a cipher it is dropped.
+    #[test]
+    fn ciphered_facch_without_a_cipher_is_not_sent() {
+        let mut sched = get_testing_slotter();
+        sched.dl_enqueue_stealing_ciphered(2, facch_pdu(0b10), pattern_sdu(40), None, None);
+        let (_, stch1, stch2) = sched.dl_build_traffic_block(TdmaTime { t: 2, f: 3, m: 5, h: 0 });
+        assert!(stch1.is_none() && stch2.is_none());
+        assert!(sched.dltx_queues[1].is_empty());
     }
 
     #[test]

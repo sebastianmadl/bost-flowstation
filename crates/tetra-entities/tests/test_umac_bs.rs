@@ -1776,3 +1776,103 @@ fn test_unacknowledged_channel_change_gets_no_grant() {
     let pdu = mcch_resource_with_chan_alloc("00100101100001110000000000100010001110000000000100001011000");
     assert!(pdu.slot_granting_element.is_none());
 }
+
+/// FACCH/STCH to a radio registered encrypted (lx-dxb, FACCH/STCH AIE fix): the MAC-RESOURCE on
+/// the stolen half slot carries the ESI and a non-zero encryption mode, and its TM-SDU is
+/// encrypted with the key stream of the slot it goes out in, from KSS(0) (TS 100 392-7 clause
+/// 6.4.1, table 6.4; clause 6.7.1.2). A PDU over both halves of the slot has its MAC-END
+/// encrypted from KSS(216). The same PDU to a clear radio stays clear.
+#[test]
+fn test_facch_to_encrypted_radio_is_encrypted_in_its_slot() {
+    use tetra_config::bluestation::{CfgAie, CipherKey};
+    use tetra_entities::aie::cipher::CellCipher;
+
+    debug::setup_logging_verbose();
+    let encrypted_issi = 2200711;
+    let clear_issi = 2200712;
+    // Both FACCH paths: the slot named by the request (`stealing_slot`) and the slot taken from
+    // the channel allocation hint.
+    for (sdu_len, ts, hint) in [(40usize, 2u8, false), (150, 3, false), (40, 2, true)] {
+        let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime { h: 0, m: 1, f: 1, t: 1 }));
+        let cfg = test.get_shared_config();
+        {
+            let mut state = cfg.state_write();
+            for issi in [encrypted_issi, clear_issi] {
+                state.subscribers.register(issi);
+            }
+            state.subscribers.set_encrypted(encrypted_issi, true);
+        }
+        let c = cfg.config();
+        let aie = CfgAie {
+            enabled: true,
+            ksg: 1,
+            sckn: 1,
+            sck: CipherKey([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23]),
+            sck_vn: 1,
+            clear_groups: vec![],
+        };
+        let cipher = std::sync::Arc::new(CellCipher::new(&aie, &[c.cell.main_carrier], c.cell.location_area, c.cell.colour_code));
+        let carrier = c.cell.main_carrier;
+        drop(c);
+        let mut umac = UmacBs::new(cfg, None);
+        umac.set_cipher(Some(cipher.clone()));
+        test.register_entity(umac);
+        test.populate_entities(vec![], vec![TetraEntity::Lmac]);
+        test.submit_message(open_shared_voice_circuit(ts));
+        test.run_stack(Some(1));
+        test.dump_sinks();
+
+        let sdu = sdu_bits(sdu_len);
+        for issi in [encrypted_issi, clear_issi] {
+            let hint_alloc = CmceChanAllocReq {
+                usage: Some(4),
+                carrier: Some(MAIN_CARRIER),
+                timeslots: std::array::from_fn(|i| i + 1 == ts as usize),
+                alloc_type: ChanAllocType::Replace,
+                ul_dl_assigned: UlDlAssignment::Both,
+                cell_change: false,
+            };
+            let req = if hint {
+                stealing_req(TetraAddress::issi(issi), &sdu, None, Some(hint_alloc), None)
+            } else {
+                stealing_req(TetraAddress::issi(issi), &sdu, Some((MAIN_CARRIER, ts)), None, None)
+            };
+            test.submit_message(req);
+            test.run_stack(Some(8));
+            let slots = stch_slots(test.dump_sinks(), ts);
+            assert_eq!(slots.len(), 1, "one stolen slot for {issi}, {sdu_len} bits");
+            let slot = &slots[0];
+            let mut first = slot.blk1.as_ref().unwrap().mac_block.clone();
+            first.seek(0);
+            let res = MacResource::from_bitbuf(&mut first).unwrap();
+            let hdr_len = first.get_pos();
+            let first_bits = if sdu_len > 124 - hdr_len { 124 - hdr_len } else { sdu_len };
+            let kss = cipher.kss(carrier, slot.ts, false);
+            let mut dec1 = slot.blk1.as_ref().unwrap().mac_block.clone();
+            if issi == encrypted_issi {
+                assert_eq!(res.addr.unwrap().ssi, cipher.esi(issi), "ESI");
+                assert_ne!(res.encryption_mode, 0);
+                kss.apply(&mut dec1, hdr_len, first_bits, 0);
+            } else {
+                assert_eq!((res.addr.unwrap().ssi, res.encryption_mode), (issi, 0), "clear radio stays clear");
+            }
+            dec1.seek(hdr_len);
+            let mut got = read_bits(&mut dec1, first_bits);
+            if sdu_len > first_bits {
+                let second = slot.blk2.as_ref().expect("second half slot");
+                assert_eq!(second.logical_channel, LogicalChannel::Stch);
+                let mut b = second.mac_block.clone();
+                b.seek(0);
+                MacEndDl::from_bitbuf(&mut b).unwrap();
+                let end_hdr = b.get_pos();
+                let mut dec2 = second.mac_block.clone();
+                if issi == encrypted_issi {
+                    kss.apply(&mut dec2, end_hdr, sdu_len - first_bits, 216);
+                }
+                dec2.seek(end_hdr);
+                got.push_str(&read_bits(&mut dec2, sdu_len - first_bits));
+            }
+            assert_eq!(got, sdu, "TM-SDU of {issi} after decryption");
+        }
+    }
+}
