@@ -28,6 +28,7 @@ cargo check -p bluestation-bs --features asterisk   # Asterisk code only compile
 - **Do not run `cargo fmt --all`**: the repo is not rustfmt-clean and it rewrites ~45 unrelated
   files. Format only what you touch, by hand, matching the surrounding style.
 - `Cargo.lock` is committed and in sync; a build should not modify it.
+- New Brew extension: add it to `HANDOVER_EXTENSIONS` in `crates/tetra-entities/src/net_dashboard/roaming.rs` and give it a category in `roamRenderBrew` (`html.rs`, Roaming / Cells page "Server features"), with the label in `LANGS.en` and `LANGS.es`.
 - Dashboard JS lives inside `crates/tetra-entities/src/net_dashboard/html.rs` (a `r#"…"#` raw
   string — never write `"#` inside it). Syntax-check by extracting the `<script>` blocks and running
   `node --check`. UI strings go in `LANGS.en` and `LANGS.es` (other languages fall back to EN).
