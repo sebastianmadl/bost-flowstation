@@ -10,8 +10,8 @@ use tetra_config::bluestation::{SharedConfig, parsing};
 use tetra_core::CellId;
 use toml::{Table, Value as TomlValue};
 
-/// Brew extensions the roaming features need (FlowStation ↔ brew-server, opt-in).
-const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "cell-directory"];
+/// Brew extensions this station uses (FlowStation ↔ brew-server, opt-in), shown as server features.
+const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "call-handoff", "cell-directory", "group-access"];
 
 /// Integer neighbour keys with their maximum (field widths, TS 100 392-2 table 18.64).
 const NEIGHBOUR_INT_KEYS: &[(&str, i64)] = &[
@@ -448,6 +448,7 @@ main_carrier = 1525
         assert_eq!(v["cells"][0]["carrier_ext"], 264);
         assert_eq!(v["cells"][0]["rxlev_access_min_dbm"], -110, "effective value");
         assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "cell-directory"));
+        assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "group-access"), "shown as a server feature");
 
         shared.state_write().brew_cell_directory = Some(vec![tetra_config::bluestation::BrewDirectoryCell {
             id: "1000002/0".into(),
