@@ -4,7 +4,7 @@ use tetra_core::CellId;
 use tetra_core::freqs::FreqInfo;
 
 use crate::bluestation::{
-    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgExtraCell, CfgGeoalarm, CfgHealth, CfgNetInfo, CfgPhyIo, CfgRecovery,
+    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgExtraCell, CfgGeoalarm, CfgHealth, CfgMultiNetwork, CfgNetInfo, CfgPhyIo, CfgRecovery,
     CfgSecurity, CfgSnomNotify, CfgSoapySdr, CfgTpg2200Action, CfgWxService, PhyBackend, StackState, rxlev_access_min_code,
 };
 
@@ -140,6 +140,9 @@ pub struct StackConfig {
     /// Emergency-state handling. Always present (defaults: LOCAL-only — no Brew forward,
     /// telegram_alert ON, clear_timeout_secs 30). See [`CfgEmergency`].
     pub emergency: CfgEmergency,
+
+    /// Multi Network: radios of other networks by migration (clause 16.4.1.1 b)). Default off.
+    pub multi_network: CfgMultiNetwork,
 }
 
 /// "Cell re-selection types supported" advertised for sibling cells, table 18.22: forward
@@ -503,6 +506,8 @@ impl StackConfig {
         }
 
         validate_neighbours(&self.cell)?;
+
+        self.multi_network.validate()?;
 
         // Restart recovery: an explicit allowlist must not exceed the cache cap (the numeric
         // ranges are already clamped in apply_recovery_patch). Only meaningful when enabled.

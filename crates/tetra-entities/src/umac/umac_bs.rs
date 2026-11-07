@@ -958,8 +958,10 @@ impl UmacBs {
         }
 
         // Notify MM of RSSI for this MS so it can be stored per-subscriber.
-        // Only sent when RSSI is a finite value (i.e. demodulator calculated it).
-        if prim.rssi_dbfs.is_finite() {
+        // Only sent when RSSI is a finite value (i.e. demodulator calculated it). Not for a USSI:
+        // that is a migrating radio's home ISSI, not an SSI of this network (TS 100 392-2 clause
+        // 23.4.1.2.5), and must not be taken for one of its radios.
+        if prim.rssi_dbfs.is_finite() && addr.ssi_type != SsiType::Ussi {
             queue.push_back(SapMsg {
                 sap: Sap::Control,
                 src: TetraEntity::Umac,

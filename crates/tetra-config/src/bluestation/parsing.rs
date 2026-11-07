@@ -19,6 +19,7 @@ use super::sec_emergency::{CfgEmergencyDto, apply_emergency_patch};
 use super::sec_geoalarm::{CfgGeoalarmDto, apply_geoalarm_patch};
 use super::sec_health::{CfgHealthDto, apply_health_patch};
 use super::sec_lst_dispatch::{CfgLstDispatchDto, apply_lst_dispatch_patch};
+use super::sec_multi_network::{CfgMultiNetworkDto, apply_multi_network_patch};
 use super::sec_recovery::{CfgRecoveryDto, apply_recovery_patch};
 use super::sec_security::{CfgSecurityDto, apply_security_patch};
 use super::sec_snom_notify::{CfgSnomNotifyDto, apply_snom_notify_patch};
@@ -197,6 +198,12 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         return Err(format!("Unrecognized fields in recovery config: {:?}", sorted_keys(&recovery.extra)).into());
     }
 
+    if let Some(ref mn) = root.multi_network
+        && !mn.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in multi_network config: {:?}", sorted_keys(&mn.extra)).into());
+    }
+
     // Optional health section — reject typos so a mis-spelled watchdog/threshold key is caught.
     if let Some(ref health) = root.health
         && !health.extra.is_empty()
@@ -267,6 +274,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         telegram: None,
         health: apply_health_patch(root.health.unwrap_or_default()),
         emergency: apply_emergency_patch(root.emergency.unwrap_or_default()),
+        multi_network: apply_multi_network_patch(root.multi_network.unwrap_or_default()),
     };
 
     if let Some(brew) = root.brew {
@@ -350,6 +358,7 @@ struct TomlConfigRoot {
     telegram_alerts: Option<CfgTelegramDto>,
     health: Option<CfgHealthDto>,
     emergency: Option<CfgEmergencyDto>,
+    multi_network: Option<CfgMultiNetworkDto>,
 
     #[serde(flatten)]
     extra: HashMap<String, Value>,
