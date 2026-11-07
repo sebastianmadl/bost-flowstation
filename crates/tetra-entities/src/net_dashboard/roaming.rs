@@ -10,8 +10,8 @@ use tetra_config::bluestation::{SharedConfig, parsing};
 use tetra_core::CellId;
 use toml::{Table, Value as TomlValue};
 
-/// Brew extensions shown as server features: the ones this station uses (FlowStation ↔ brew-server, opt-in), plus `issi-check`, which a brew-server answers for another server's Multi Network link.
-const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "call-handoff", "cell-directory", "group-access", "issi-check"];
+/// Brew extensions shown as server features: the ones this station uses (FlowStation ↔ brew-server, opt-in), plus `issi-check` (a brew-server answers it for another server's Multi Network link) and `mni` (Multi Network visitors; this station does not use it yet).
+const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "call-handoff", "cell-directory", "group-access", "issi-check", "mni"];
 
 /// Integer neighbour keys with their maximum (field widths, TS 100 392-2 table 18.64).
 const NEIGHBOUR_INT_KEYS: &[(&str, i64)] = &[
@@ -450,6 +450,7 @@ main_carrier = 1525
         assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "cell-directory"));
         assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "group-access"), "shown as a server feature");
         assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "issi-check"), "Multi Network ISSI check shown too");
+        assert!(v["brew"]["extensions"].as_array().unwrap().iter().any(|e| e["name"] == "mni"), "Multi Network visitors shown too");
 
         shared.state_write().brew_cell_directory = Some(vec![tetra_config::bluestation::BrewDirectoryCell {
             id: "1000002/0".into(),
