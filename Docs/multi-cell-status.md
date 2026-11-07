@@ -23,7 +23,7 @@ _Last updated: 2026-11-06, release v0.5.6 (milestone 7 work on branch `handover`
 | Individual calls (PR #30) | Individual call handover by David Harcus: leg pre-provisioned on an announced change, matched by ISSI pair | `0b053a4` (upstream) |
 | Network calls across cells | Calls with a Brew party follow the radio to the other cell (`restore_from_sibling`), announced or not | `c7630d7` |
 | Location areas | Shared or own LA per cell, paging on every cell of the LA, presence check on all of them, LA field | `881e64d` |
-| Roaming page | Page "Roaming / Cells", neighbours per cell, server cell list (`cell-directory`) | `52d1171`, `9779d99`, `2e6b19c` |
+| Roaming page | Page "Infrastructure" (formerly "Roaming / Cells"), neighbours per cell, server cell list (`cell-directory`) | `52d1171`, `9779d99`, `2e6b19c` |
 | Roaming with stations | A multi-cell station takes part in roaming between stations over Brew (type 2) | `543c2a8` |
 | Radio ↔ radio across cells | Calls between two radios survive a change of cell: hand over through the switch, join on the peer's cell | `55a0881` |
 
