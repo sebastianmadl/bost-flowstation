@@ -4,7 +4,7 @@ use tetra_core::CellId;
 use tetra_core::freqs::FreqInfo;
 
 use crate::bluestation::{
-    CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgExtraCell, CfgGeoalarm, CfgHealth, CfgMultiNetwork, CfgNetInfo, CfgPhyIo, CfgRecovery,
+    CfgAprsWx, CfgAsterisk, CfgCellInfo, CfgControl, CfgDapnet, CfgEmergency, CfgExtraCell, CfgGeoalarm, CfgHealth, CfgMultiNetwork, CfgNetInfo, CfgPhyIo, CfgRecovery,
     CfgSecurity, CfgSnomNotify, CfgSoapySdr, CfgTpg2200Action, CfgWxService, PhyBackend, StackState, rxlev_access_min_code,
 };
 
@@ -137,6 +137,9 @@ pub struct StackConfig {
 
     /// Built-in WX/METAR SDS service configuration
     pub wx_service: CfgWxService,
+
+    /// APRS weather-station SDS service via aprs.fi (extension of the WX service)
+    pub aprs_wx: CfgAprsWx,
 
     /// Restart-recovery configuration (proactive cold-start re-registration). Default disabled.
     pub recovery: CfgRecovery,
