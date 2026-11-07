@@ -406,7 +406,7 @@ fn test_visitor_is_shared_with_the_brew_side_until_it_detaches() {
     }
     let detach = tetra_pdus::mm::pdus::u_itsi_detach::UItsiDetach { address_extension: None, proprietary: None };
     submit(&mut test, TetraAddress::issi(vassi), |b| detach.to_bitbuf(b).expect("serialize"));
-    assert!(test.config.state_read().multi_network.visitors.get(&vassi).is_none());
+    assert!(!test.config.state_read().multi_network.visitors.contains_key(&vassi));
 }
 
 /// A (V)ASSI this station never gave (the visitor came from another station or cell, or the
