@@ -284,7 +284,7 @@ A network can also be reached *through* the Brew server of another of the statio
 
 Two or more separate stations on the same Brew server can keep a radio's calls when it moves from one to the other. The radio decides when it changes cells (TETRA cell reselection, ETSI TS 100 392-2 clause 18.3.4); the stations and the server only make sure the call is there when it arrives.
 
-> **Status:** field-tested with two single-cell stations (Pluto+ and SX1255) and a Motorola MTP6650, October/November 2026.
+> **Status:** field-tested with two single-cell stations (Pluto+ and SX1255) and a Motorola MTP6650, October/November 2026. **Not yet validated on air:** a multi-cell station roaming with another station, and calls between two radios across stations (`call-handoff`).
 
 ### What you get
 
@@ -343,6 +343,8 @@ The lists are edited on the server (dashboard Directory page); the rules apply t
 The server side and the Brew messages are documented in brew-server: `docs/Handover.md` (operators) and `docs/Brew-Extensions.md` (protocol for other server and Basestation implementations).
 
 ## Multi Network: radios of other networks
+
+> **Status:** provisional, complete in code and tests, **not yet validated on air**.
 
 A radio whose home network (MCC/MNC) differs from the cell's can register here by migration (ETSI TS 100 392-2 clause 16.4.1.1 case b)). Turn it on with `migration = true` in `[cell_info]` and a `[multi_network]` section (see `example_config/config.toml`). The station gives the radio a (V)ASSI and its home groups a (V)GSSI (clauses 16.4.7, 16.8.7); groups of this network keep their GSSI. With a brew-server that offers the `mni` extension the visitor shows up at the server under its home ISSI, and the server takes its registration, group calls, individual calls and SDS to its home network (brew-server `docs/Multi-Network.md`); only networks the server reaches and has up are accepted. With any other server visitors work only inside this station. A radio of this network coming back from another one (case c)) registers as usual. Not yet: following a visitor to another station or cell (only the station that gave the (V)ASSI knows it; the others reject it with "ITSI/ATSI unknown" so that it registers again), temporarily disabled radios (case d)), authentication of visitors.
 
