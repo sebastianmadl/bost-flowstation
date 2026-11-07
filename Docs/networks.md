@@ -148,6 +148,13 @@ does not belong in the list of foreign networks. With "ITSI-Anschluss" the radio
 901/1638 `via` cell as a TetraPack radio (field check 2026-11-07). Other makes have equivalent
 settings; the names differ.
 
+A migrated radio that calls or sends an SDS to a bare SSI reaches a party of the cell's network,
+not of its home network: the SwMI takes the missing MNI as that of the current network (TS 100
+392-2 clause 14.2.3, note 3: a migrated MS sends the MNI also for addresses of its home network).
+So on a 901/1638 cell an SDS from a migrated 9999 radio to `200999` goes to 901/1638 (TetraPack);
+to reach the app in 9999 the radio has to dial the full TSI. Calls and SDS from the home network
+to the radio reach it on its (V)ASSI.
+
 ## Not yet
 
 - Routing by the radio's *home* network on a single carrier (a migrating radio presents its home

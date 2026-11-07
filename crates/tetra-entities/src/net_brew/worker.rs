@@ -1363,11 +1363,24 @@ impl<T: NetworkTransport> BrewWorker<T> {
         if !self.mni_on() {
             return None;
         }
-        let (note, _) = self.mni_calls_in.remove(&uuid)?;
+        // Without a note the called party is of the server's own network (the server names only
+        // other networks). On a cell of another network a migrated radio of the server's network
+        // is reached on its (V)ASSI; any other radio keeps its ISSI.
+        let server_vassi = |w: &Self| {
+            w.mni_station_network()?;
+            let state = w.config.state_read();
+            let (this, _) = state.multi_network.server.as_ref()?;
+            state.multi_network.vassi_of(*this, called)
+        };
+        let Some((note, _)) = self.mni_calls_in.remove(&uuid) else {
+            return server_vassi(self).map(Some);
+        };
         if let Some(mni) = note.calling {
             tracing::info!("BrewWorker: call {} comes from network {}", uuid, mni);
         }
-        let mni = note.called?;
+        let Some(mni) = note.called else {
+            return server_vassi(self).map(Some);
+        };
         let vassi = self.config.state_read().multi_network.vassi_of(mni, called);
         // A radio of the network this cell broadcasts keeps its ISSI.
         let vassi = vassi.or_else(|| (self.mni_station_network() == Some(mni)).then_some(called));
@@ -1933,6 +1946,41 @@ mod tests {
         let sent = run(&mut w, &tx, vec![BrewCommand::RegisterSubscriber { issi: 2320972 }]);
         let named = sent.iter().find(|m| m[0] == BREW_CLASS_SERVICE && m[1] == BREW_SERVICE_MS_NETWORK).expect("MS_NETWORK sent");
         assert_eq!(service_body(named), serde_json::json!({ "issi": 2320972, "mcc": 901, "mnc": 1638 }));
+    }
+
+    /// On a cell of another network, a call from the server without a network note is for a
+    /// radio of the server's own network: one that migrated here is reached on its (V)ASSI.
+    #[test]
+    fn call_for_a_migrated_radio_of_the_servers_network_reaches_its_vassi() {
+        let text = CONFIG.replace("[brew]", "[networks.home.brew]");
+        let text = format!(
+            "network = \"home\"\n{text}\n[networks.home]\n[networks.tp]\nmcc = 901\nmnc = 1638\nvia = \"home\"\n\
+             [[cells]]\nid = 1\nnetwork = \"tp\"\n[cells.cell_info]\nmain_carrier = 1532\n"
+        );
+        let station = tetra_config::bluestation::parsing::from_toml_str(&text).expect("test config parses");
+        let cell = station.for_extra_cell(tetra_core::CellId(1)).unwrap();
+        let (event_tx, rx) = bounded(64);
+        let (_tx, command_rx) = bounded(64);
+        let cfg = SharedConfig::from_parts(cell, None);
+        let mut w = BrewWorker::new(cfg, event_tx, command_rx, MockTransport::new().with_brew_extensions(&["bts-info", BREW_EXT_MNI]));
+        w.transport.connect().unwrap();
+        let server = Mni { mcc: 232, mnc: 5 };
+        w.handle_incoming_binary(&networks_message(server));
+        w.config.state_write().multi_network.visitors.insert(VASSI, (server, 2320972));
+        for destination in [2320972, 2320973] {
+            let c = BrewCircularCall {
+                source: 2329999, destination, number: String::new(), priority: 0, service: 0, mode: 0, duplex: 1, method: 0,
+                communication: 0, grant: 0, permission: 0, timeout: 0, ownership: 0, queued: 0, mnemonic: None,
+            };
+            w.handle_incoming_binary(&build_setup_request(&Uuid::new_v4(), &c));
+        }
+        let mut called = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let BrewEvent::CircuitSetupRequest { call, .. } = e {
+                called.push(call.destination);
+            }
+        }
+        assert_eq!(called, vec![VASSI, 2320973], "the migrated radio on its (V)ASSI, others unchanged");
     }
 
     /// From the server: the network list is kept, a group call of the visitor's home group comes
