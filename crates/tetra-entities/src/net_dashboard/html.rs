@@ -7980,7 +7980,7 @@ const LANGS={
     cfg_help_custom_duplex:'Optional duplex spacing in MHz (e.g. 7.6). Empty = use duplex spacing id. Overrides the table id when set.',
     cfg_help_freq_offset:'Fine carrier offset in Hz (±6250 / ±12500). Usually 0.',
     cfg_help_reverse:'Swap UL/DL sense of the duplex. Rare; leave off unless your plan requires reverse operation.',
-    cfg_rxlev_min:'Min. access level (dBm)',cfg_rxlev_default:'Default (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN in SYSINFO (ETSI table 21.65): radios below this level cannot use the cell, and a higher value makes them reselect a better neighbour earlier. −125 to −50 dBm in 5 dB steps; default −110. Use the same value on neighbouring stations or set it per neighbour. See Docs/cell-reselection.md.',cfg_migration:'Migration supported',cfg_help_migration:'BS service details in SYSINFO: migration is supported by this cell (ETSI 18.5.2.1), for radios of another network (other MCC/MNC). Radios of another network are accepted only when [multi_network] is on and lists their network: they get a (V)ASSI (ETSI 16.4.1.1 b, 16.4.7). Otherwise every migrating registration is rejected with cause 12 “Migration not supported”. Default off.',
+    cfg_rxlev_min:'Min. access level (dBm)',cfg_rxlev_default:'Default (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN in SYSINFO (ETSI table 21.65): radios below this level cannot use the cell, and a higher value makes them reselect a better neighbour earlier. −125 to −50 dBm in 5 dB steps; default −110. Use the same value on neighbouring stations or set it per neighbour. See Docs/cell-reselection.md.',cfg_migration:'Migration supported',cfg_help_migration:'BS service details in SYSINFO: migration is supported by this cell (ETSI 18.5.2.1), for radios of another network (other MCC/MNC). Radios of another network are accepted only when [multi_network] is on and lists their network: they get a (V)ASSI (ETSI 16.4.1.1 b, 16.4.7). Otherwise every migrating registration is rejected with cause 12 “Migration not supported”. Turned on by itself while [multi_network] is on. Default off.',cfg_migration_auto:'On by itself: [multi_network] is enabled.',
     cfg_help_hw_device:'SoapySDR device string from Setup. Change device in Setup, not here.',
     cfg_help_ppm:'Frequency correction in PPM (comma or dot). Empty/reset not used — typically 0.',
     cfg_help_rx_ant:'RX antenna port for this SDR driver. Empty = device default.',
@@ -8607,7 +8607,7 @@ const LANGS={
     cfg_help_custom_duplex:'Separación de dúplex en MHz (p. ej. 7,6). Vacío = usar el id de tabla. Si lo rellenas, manda sobre el id.',
     cfg_help_freq_offset:'Offset fino de portadora en Hz (±6250 / ±12500). Normalmente 0.',
     cfg_help_reverse:'Invierte el sentido UL/DL del dúplex. Raro; déjalo apagado salvo que tu plan lo exija.',
-    cfg_rxlev_min:'Nivel mín. de acceso (dBm)',cfg_rxlev_default:'Por defecto (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN en SYSINFO (ETSI tabla 21.65): las radios por debajo de este nivel no pueden usar la celda, y un valor más alto hace que reseleccionen antes una vecina mejor. −125 a −50 dBm en pasos de 5 dB; por defecto −110. Usa el mismo valor en las estaciones vecinas o ajústalo por vecina. Ver Docs/cell-reselection.md.',cfg_migration:'Migración admitida',cfg_help_migration:'Detalles de servicio en SYSINFO: esta celda admite migración (ETSI 18.5.2.1), para radios de otra red (otro MCC/MNC). Las radios de otra red solo se aceptan si [multi_network] está activo y lista su red: reciben una (V)ASSI (ETSI 16.4.1.1 b, 16.4.7). Si no, todo registro migrante se rechaza con la causa 12 “Migration not supported”. Apagado por defecto.',
+    cfg_rxlev_min:'Nivel mín. de acceso (dBm)',cfg_rxlev_default:'Por defecto (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN en SYSINFO (ETSI tabla 21.65): las radios por debajo de este nivel no pueden usar la celda, y un valor más alto hace que reseleccionen antes una vecina mejor. −125 a −50 dBm en pasos de 5 dB; por defecto −110. Usa el mismo valor en las estaciones vecinas o ajústalo por vecina. Ver Docs/cell-reselection.md.',cfg_migration:'Migración admitida',cfg_help_migration:'Detalles de servicio en SYSINFO: esta celda admite migración (ETSI 18.5.2.1), para radios de otra red (otro MCC/MNC). Las radios de otra red solo se aceptan si [multi_network] está activo y lista su red: reciben una (V)ASSI (ETSI 16.4.1.1 b, 16.4.7). Si no, todo registro migrante se rechaza con la causa 12 “Migration not supported”. Se activa solo mientras [multi_network] está activo. Apagado por defecto.',cfg_migration_auto:'Activa sola: [multi_network] está habilitado.',
     cfg_help_hw_device:'Cadena SoapySDR del dispositivo (viene de Setup). Cambia el SDR en Setup, no aquí.',
     cfg_help_ppm:'Corrección de frecuencia en PPM (coma o punto). Suele ser 0.',
     cfg_help_rx_ant:'Puerto de antena RX del driver. Vacío = default del dispositivo.',
@@ -18467,7 +18467,7 @@ async function loadRoaming(){
   vcSet('rm-fast-hy',String(d.reselect.fast_hysteresis_db));
   vcSet('rm-slow-hy',String(d.reselect.slow_hysteresis_db));
   vcSet('rm-rxlev',d.rxlev_access_min_dbm!=null?String(d.rxlev_access_min_dbm):'');
-  const mig=document.getElementById('rm-migration');if(mig)mig.checked=!!d.migration;
+  const mig=document.getElementById('rm-migration');if(mig){mig.checked=!!d.migration||!!d.migration_auto;mig.disabled=!!d.migration_auto;mig.title=d.migration_auto?t('cfg_migration_auto'):'';}
   vcSet('rm-presence',String(d.presence_check_secs));
   roamNetEdits=[];
   roamRenderBrew();roamRenderCells();roamRenderNetworks();
@@ -18794,7 +18794,7 @@ async function roamSave(){
   const body={
     reselect:{fast_threshold_db:num('rm-fast-th'),slow_threshold_db:num('rm-slow-th'),fast_hysteresis_db:num('rm-fast-hy'),slow_hysteresis_db:num('rm-slow-hy')},
     rxlev_access_min_dbm:num('rm-rxlev'),
-    migration:!!(document.getElementById('rm-migration')||{}).checked,
+    migration:(()=>{const m=document.getElementById('rm-migration')||{};return m.disabled?!!(roamData&&roamData.migration):!!m.checked;})(),
     presence_check_secs:num('rm-presence')||0,
     cells:roamData.cells.map(c=>{
       const e={id:c.id,location_area:num('rm-la-'+c.id),neighbours:c.primary?c.neighbours:(c.own_list?c.neighbours:null)};

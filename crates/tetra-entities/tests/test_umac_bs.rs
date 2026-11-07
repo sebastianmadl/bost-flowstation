@@ -1707,6 +1707,21 @@ fn sysinfo_carries_the_configured_rxlev_access_min() {
     assert_eq!(precomps.mac_sysinfo2.rxlev_access_min, 10);
 }
 
+#[test]
+fn sysinfo_announces_migration_while_multi_network_is_on() {
+    use tetra_config::bluestation::SharedConfig;
+    let precomps = UmacBs::generate_precomps(&SharedConfig::from_parts(common::default_stack::default_test_config_bs(), None));
+    assert!(!precomps.mle_sysinfo.bs_service_details.migration, "off by default");
+
+    // [multi_network] on without [cell_info] migration: BS service details say migration
+    // supported (TS 100 392-2 18.5.2.1), so radios of other networks may migrate (16.4.1.1 b).
+    let mut config = common::default_stack::default_test_config_bs();
+    config.cell.migration = false;
+    config.multi_network.enabled = true;
+    let precomps = UmacBs::generate_precomps(&SharedConfig::from_parts(config, None));
+    assert!(precomps.mle_sysinfo.bs_service_details.migration);
+}
+
 /// Channel allocation moving the MS to a traffic channel, sent with `sdu` on the MCCH; returns
 /// the MAC-RESOURCE that carried it.
 fn mcch_resource_with_chan_alloc(sdu: &str) -> MacResource {

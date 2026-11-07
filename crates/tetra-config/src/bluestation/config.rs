@@ -395,6 +395,13 @@ impl StackConfig {
         self.multi_network.enabled || self.network_is_via()
     }
 
+    /// Migration supported on this cell (BS service details, ETSI TS 100 392-2 18.5.2.1):
+    /// `[cell_info] migration = true`, or `[multi_network]` is on, which exists to accept radios
+    /// of other networks by migration (16.4.1.1 b) and so turns it on by itself.
+    pub fn migration_supported(&self) -> bool {
+        self.cell.migration || self.multi_network.enabled
+    }
+
     /// The cells this config's Brew connection announces (SERVICE_BTS_INFO): on the station's
     /// config the cells of the primary's network, on a per-cell config that cell.
     pub fn cells_of_station_network(&self) -> Vec<(CellId, &CfgCellInfo, Option<&CfgSoapySdr>)> {

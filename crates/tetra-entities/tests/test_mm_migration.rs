@@ -225,14 +225,19 @@ fn test_migration_stays_refused_when_multi_network_is_off_and_answers_on_the_uss
 }
 
 #[test]
-fn test_migration_is_refused_without_cell_migration_or_from_an_unlisted_network() {
+fn test_multi_network_on_supports_migration_without_cell_migration() {
     debug::setup_logging_verbose();
     let mut config = multi_network_config(0);
     config.cell.migration = false;
+    assert!(config.migration_supported(), "[multi_network] on turns migration on");
     let mut test = mm_test(config);
-    submit_demand(&mut test, ussi(1), demand(LocationUpdateType::MigratingLocationUpdating, None, Some(HOME), vec![]));
-    assert_eq!(reject_cause(&test.dump_sinks()).map(|r| r.1), Some(RejectCause::MigrationNotSupported as u8));
+    let (vassi, _) = migrate(&mut test, 2320972, vec![]);
+    assert!(test.config.state_read().subscribers.is_registered(vassi));
+}
 
+#[test]
+fn test_migration_is_refused_from_an_unlisted_network() {
+    debug::setup_logging_verbose();
     let mut test = mm_test(multi_network_config(0));
     submit_demand(&mut test, ussi(2), demand(LocationUpdateType::MigratingLocationUpdating, None, Some(OTHER), vec![]));
     assert_eq!(reject_cause(&test.dump_sinks()).map(|r| r.1), Some(RejectCause::MigrationNotSupported as u8));

@@ -122,7 +122,8 @@ main_carrier = 1532
 A radio whose home is 901/9999 that selects 901/1638 on the terminal registers on cell 1 and
 appears on the server as a radio of 901/1638. `via` must name a network with a `brew` of its own,
 and a network has either `brew` or `via`. `[multi_network]` is not needed for this (it is for radios
-of other networks registering on this network's cells by migration). Networks and the network of
+of other networks registering on this network's cells by migration, and turns migration on for
+the cells while enabled). Networks and the network of
 each cell can also be set on the dashboard page **Roaming / Cells** ("Networks" card and the
 "Network" column of the location areas card); the first network added there turns `[net_info]`
 and `[brew]` into the network `home`.

@@ -208,7 +208,7 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
             c.deregistration,
             c.priority_cell,
             c.no_minimum_mode,
-            c.migration,
+            cfg.migration_supported(),
             // Broadcast while the network link is up (site trunking otherwise).
             c.system_wide_services || cfg.has_network_link(),
             c.voice_service,
@@ -247,6 +247,8 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
         },
         "rxlev_access_min_dbm": ci.and_then(|t| t.get("rxlev_access_min_dbm")).and_then(|v| v.as_integer()),
         "migration": cfg.cell.migration,
+        // `[multi_network]` on: migration is supported whatever `migration` says.
+        "migration_auto": cfg.multi_network.enabled,
         "presence_check_secs": cfg.cell.presence_check_secs,
         "presence_response_secs": cfg.cell.presence_response_secs,
         "service_details": service_details,

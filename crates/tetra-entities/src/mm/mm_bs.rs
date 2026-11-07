@@ -2649,7 +2649,7 @@ impl MmBs {
     fn migration_case(&self, address_extension: Option<u64>) -> Migration {
         let cfg = self.config.config();
         let mn = &cfg.multi_network;
-        if !mn.enabled || !cfg.cell.migration {
+        if !mn.enabled || !cfg.migration_supported() {
             return Migration::Refused;
         }
         let Some(ext) = address_extension else {

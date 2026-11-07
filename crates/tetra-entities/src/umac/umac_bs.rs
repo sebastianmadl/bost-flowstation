@@ -285,7 +285,7 @@ impl UmacBs {
                 deregistration: c.cell.deregistration,
                 priority_cell: c.cell.priority_cell,
                 no_minimum_mode: c.cell.no_minimum_mode,
-                migration: c.cell.migration,
+                migration: c.migration_supported(),
                 system_wide_services,
                 voice_service: c.cell.voice_service,
                 circuit_mode_data_service: c.cell.circuit_mode_data_service,

@@ -343,7 +343,7 @@ fn broadcast_values(config: &StackConfig, cell: &tetra_config::bluestation::CfgC
         ("deregistration", cell.deregistration),
         ("priority_cell", cell.priority_cell),
         ("no_minimum_mode", cell.no_minimum_mode),
-        ("migration", cell.migration),
+        ("migration", cell.migration || config.multi_network.enabled),
         ("system_wide_services", cell.system_wide_services || config.has_network_link()),
         ("voice_service", cell.voice_service),
         ("circuit_mode_data_service", cell.circuit_mode_data_service),
