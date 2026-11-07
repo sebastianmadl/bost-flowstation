@@ -131,6 +131,23 @@ card also lists the networks the server reports (its own and the ones it links t
 network", and warns when a network reached `via` the server has an MCC/MNC the server does not
 reach ("Routing with this MCC/MNC not possible").
 
+## Radio configuration: ITSI attach or migration
+
+How a radio registers on a cell of another network is set in the radio, per network in its list of
+foreign networks, and decides which network the radio belongs to there:
+
+| Radio setting for the other network | What the radio sends (TS 100 392-2) | Where it lands |
+| --- | --- | --- |
+| ITSI attach | `U-LOCATION UPDATE DEMAND` type ITSI attach / demand, with that network's MNI as address extension: the radio has an identity of its own in that network | That network: on a `via` cell the brew-server registers it there (e.g. TetraPack) |
+| Migration | type migrating location updating with the radio's home MNI (clause 16.4.1.1 case b)) | Its home network: the station gives it a (V)ASSI on the air (clause 16.4.7) and names it with its home ISSI towards the brew-server, which treats it as one of its own radios (home = server's network) or registers it at its home network over a link (`mni`) |
+
+Seen on a Motorola MTP6650 (CPS, German UI): *Mobilitäts- und Systemparameter → Netzwerke*, column
+*Registrierungsmethode* per network ("ITSI-Anschluss" or "Migration"); migration also needs
+*Grundfunktionen → Migration* ticked. The home network is set under *Netzwerke → Startseite* and
+does not belong in the list of foreign networks. With "ITSI-Anschluss" the radio registered on a
+901/1638 `via` cell as a TetraPack radio (field check 2026-11-07). Other makes have equivalent
+settings; the names differ.
+
 ## Not yet
 
 - Routing by the radio's *home* network on a single carrier (a migrating radio presents its home
