@@ -1,5 +1,5 @@
 use tetra_config::bluestation::{
-    CfgAsterisk, CfgCellInfo, CfgDapnet, CfgEmergency, CfgGeoalarm, CfgHealth, CfgNetInfo, CfgPhyIo, CfgRecovery, CfgSecurity,
+    CfgAsterisk, CfgCellInfo, CfgDapnet, CfgEmergency, CfgGeoalarm, CfgHealth, CfgMultiNetwork, CfgNetInfo, CfgPhyIo, CfgRecovery, CfgSecurity,
     CfgSnomNotify, CfgTpg2200Action, CfgWxService, PhyBackend, StackConfig, StackMode,
 };
 use tetra_core::{freqs::FreqInfo, ranges::SortedDisjointSsiRanges};
@@ -25,6 +25,7 @@ pub fn default_test_config_bs() -> StackConfig {
         networks_explicit: false,
         network: tetra_config::bluestation::DEFAULT_NETWORK.to_owned(),
         site_linked: false,
+        station_carriers: Vec::new(),
         cell_id: tetra_core::CellId::PRIMARY,
         brew: None,
         lst_dispatch: None,
@@ -42,6 +43,7 @@ pub fn default_test_config_bs() -> StackConfig {
         telegram: None,
         health: CfgHealth::default(),
         emergency: CfgEmergency::default(),
+        multi_network: CfgMultiNetwork::default(),
     }
 }
 
@@ -92,6 +94,7 @@ pub fn default_cell_info(freq_info: FreqInfo) -> CfgCellInfo {
         u_plane_dtx: false,
         frame_18_ext: false,
         ms_txpwr_max_cell: 4,
+        rxlev_access_min_dbm: -110,
         local_ssi_ranges: SortedDisjointSsiRanges::from_vec_ssirange(vec![]),
         timezone: None,
         home_mode_display: None,
