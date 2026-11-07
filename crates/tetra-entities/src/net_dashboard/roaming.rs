@@ -222,6 +222,7 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
     let offered: Vec<String> = shared.map(|s| s.state_read().brew_server_extensions.clone()).unwrap_or_default();
     let link_up = shared.is_some_and(|s| s.state_read().brew_link_up);
     let directory = shared.and_then(|s| s.state_read().brew_cell_directory.clone());
+    let server_networks = shared.and_then(|s| s.state_read().multi_network.server.clone());
     Ok(json!({
         "cells": cells,
         "networks": cfg.networks.iter().map(|n| json!({
@@ -232,7 +233,15 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
             // core: own Brew link; via: through another network's Brew server (mni); local: none.
             "mode": if n.via.is_some() { "via" } else if n.brew.is_some() { "core" } else { "local" },
             "host": n.brew.as_ref().map(|b| b.host.clone()),
+            "server_check": server_check(&cfg, n, server_networks.as_ref()),
         })).collect::<Vec<_>>(),
+        // What the primary network's Brew server says it is and reaches (`SERVICE_NETWORKS`,
+        // extension `mni`), `null` until it sent that (Multi Network off, or no `mni`).
+        "server_networks": server_networks.as_ref().map(|(this, list)| json!({
+            "via": cfg.network,
+            "this": {"mcc": this.mcc, "mnc": this.mnc},
+            "networks": list.iter().map(|n| json!({"name": n.name, "mcc": n.mni.mcc, "mnc": n.mni.mnc, "up": n.up})).collect::<Vec<_>>(),
+        })),
         "networks_explicit": cfg.networks_explicit,
         "mcc": cfg.net.mcc,
         "mnc": cfg.net.mnc,
@@ -324,6 +333,35 @@ fn table_mut<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, Stri
         .or_insert_with(|| TomlValue::Table(Table::new()))
         .as_table_mut()
         .ok_or_else(|| format!("{key} is not a table"))
+}
+
+/// Whether a network's MCC/MNC fits what the primary network's Brew server reported
+/// (`SERVICE_NETWORKS`): for the primary network itself it must be the server's own network; for
+/// a network reached `via` the primary one it must be the server's own or one it links to, or the
+/// server cannot route it. `"ok"`, `"down"` (linked, link down), `"unknown"` (not on the server's
+/// list), `"not_server_network"` (primary network with another MNI than the server's), or `null`
+/// when nothing can be said (no list yet, a local network, or reached via another core).
+fn server_check(
+    cfg: &tetra_config::bluestation::StackConfig,
+    n: &tetra_config::bluestation::CfgNetwork,
+    server: Option<&(tetra_config::bluestation::Mni, Vec<tetra_config::bluestation::BrewNetwork>)>,
+) -> JsonValue {
+    let Some((this, list)) = server else { return JsonValue::Null };
+    let mni = tetra_config::bluestation::Mni { mcc: n.net.mcc, mnc: n.net.mnc };
+    if n.name == cfg.network && n.via.is_none() {
+        return json!(if mni == *this { "ok" } else { "not_server_network" });
+    }
+    if n.via.as_deref() != Some(cfg.network.as_str()) {
+        return JsonValue::Null;
+    }
+    if mni == *this {
+        return json!("ok");
+    }
+    match list.iter().find(|l| l.mni == mni) {
+        Some(l) if l.up => json!("ok"),
+        Some(_) => json!("down"),
+        None => json!("unknown"),
+    }
 }
 
 /// Apply a POST /api/roaming body to the config text. Returns the new text (validated).
@@ -654,6 +692,47 @@ main_carrier = 1525
         assert!(!cfg.multi_network.enabled && !cfg.migration_supported());
         assert_eq!(cfg.multi_network.networks.len(), 1, "networks kept");
         assert!(apply_roaming(BASE, &json!({"multi_network_enabled": 1})).is_err());
+    }
+
+    /// The networks the Brew server reported are passed to the page, and each network is
+    /// checked against them: a `via` network the server does not link to cannot be routed.
+    #[test]
+    fn networks_are_checked_against_the_servers_list() {
+        use tetra_config::bluestation::{BrewNetwork, Mni};
+        let body = json!({
+            "networks": [{"name": "tp", "mcc": 901, "mnc": 1638, "via": "home"}],
+            "cells": [{"id": 0, "network": "default"}, {"id": 1, "network": "tp"}],
+        });
+        let mut text = apply_roaming(BASE, &body).unwrap();
+        // Two more networks via home, each with a cell (every network needs one).
+        for (id, net, mnc, carrier) in [(2, "lab", 1234, 1545), (3, "x", 77, 1549)] {
+            text.push_str(&format!("\n[networks.{net}]\nmcc = 901\nmnc = {mnc}\nvia = \"home\"\n"));
+            text.push_str(&format!("\n[[cells]]\nid = {id}\nnetwork = \"{net}\"\n[cells.cell_info]\nmain_carrier = {carrier}\n"));
+        }
+        parsing::from_toml_str(&text).unwrap();
+        let f = write(&text);
+        let v = roaming_json(f.str(), None).unwrap();
+        assert!(v["server_networks"].is_null() && v["networks"][0]["server_check"].is_null(), "no list yet");
+
+        let shared = SharedConfig::from_parts(parsing::from_toml_str(&text).unwrap(), None);
+        let own = Mni { mcc: 901, mnc: 9999 };
+        shared.state_write().multi_network.server = Some((own, vec![
+            BrewNetwork { mni: Mni { mcc: 901, mnc: 1638 }, name: "TetraPack".into(), up: true },
+            BrewNetwork { mni: Mni { mcc: 901, mnc: 1234 }, name: "Lab".into(), up: false },
+        ]));
+        let v = roaming_json(f.str(), Some(&shared)).unwrap();
+        assert_eq!(v["server_networks"]["this"], json!({"mcc": 901, "mnc": 9999}));
+        assert_eq!(v["server_networks"]["networks"][0], json!({"name": "TetraPack", "mcc": 901, "mnc": 1638, "up": true}));
+        let check = |name: &str| v["networks"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap()["server_check"].clone();
+        assert_eq!(check("home"), json!("ok"), "home has the server's own MNI");
+        assert_eq!(check("tp"), json!("ok"));
+        assert_eq!(check("lab"), json!("down"));
+        assert_eq!(check("x"), json!("unknown"));
+
+        shared.state_write().multi_network.server = Some((Mni { mcc: 204, mnc: 1337 }, vec![]));
+        let v = roaming_json(f.str(), Some(&shared)).unwrap();
+        let home = v["networks"].as_array().unwrap().iter().find(|n| n["name"] == "home").unwrap()["server_check"].clone();
+        assert_eq!(home, json!("not_server_network"));
     }
 
     /// The first network added turns a classic config into `[networks]` (the Brew link goes with

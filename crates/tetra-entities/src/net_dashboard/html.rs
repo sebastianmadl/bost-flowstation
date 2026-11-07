@@ -6128,11 +6128,15 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 <th>MCC</th>
                 <th>MNC</th>
                 <th data-i18n="roam_net_reached">Reached</th>
+                <th data-i18n="roam_net_server">Brew server</th>
                 <th></th>
               </tr></thead>
               <tbody id="roam-nets-tbody"></tbody>
             </table>
           </div>
+          <div style="margin-top:12px"><b data-i18n="roam_srvnets_title">Networks of the Brew server</b></div>
+          <div class="help-text" id="roam-srvnets-help" style="margin:4px 0 6px"></div>
+          <div class="table-wrap"><table class="table-stack"><tbody id="roam-srvnets-tbody"></tbody></table></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
             <input type="text" class="form-input" style="width:120px" id="rm-net-name" data-i18n-placeholder="roam_net_name" placeholder="Name">
             <input type="number" class="form-input" style="width:80px" min="0" max="1023" id="rm-net-mcc" placeholder="MCC">
@@ -7772,7 +7776,7 @@ const LANGS={
     registered_terminals:'Registered Radios',
     roaming:'Roaming / Cells',roam_title:'Roaming, neighbours and cells',roam_reload:'Reload',roam_help:'Everything that decides when and how radios move between cells: the cells of this station and their location areas, the neighbour cells each cell broadcasts, the reselection values and the presence check. Saving checks the whole config first and restarts the station.',
     roam_cells_title:'Location areas',roam_cells_help:'Same location area on all cells: radios change cell without registering, so group calls and individual call setups run on every cell of the area. Own location area per cell: radios register on every change and station and server always know the exact cell (TS 100 392-2 clause 18.3.4.7.1a). Empty = the primary\'s location area. New cells are added in the Cells card above.',
-    roam_th_cell:'Cell',roam_th_network:'Network',roam_nets_title:'Networks (Multi Network)',roam_mn_on:'On',roam_mn_off:'Off',roam_mn_switch_help:'Multi Network on / off ([multi_network] enabled): radios of other networks may register here by migration (TS 100 392-2 16.4.1.1 b), and every cell announces migration. Saves and restarts the station.',roam_nets_help:'A cell broadcasts exactly one network (MCC / MNC, TS 100 392-2 table 18.17); pick it per cell in the Network column above. A radio that selects a network on the terminal uses the cells of that network. Reached: own server = the network\'s own [brew] link (credentials on this station, edit in the config); via = through another network\'s Brew server, which must offer the mni extension and reach that network (Infrastructure, no credentials here); local = switched inside this station. The first network added turns [net_info] and [brew] into the network "home".',roam_net_name:'Name',roam_net_reached:'Reached',roam_net_add:'Add network',roam_net_core:'own server',roam_net_via:'via {net}',roam_net_local:'local (no server)',roam_net_pending:'(not saved)',roam_net_confirm_core:'Remove network {net}? Its own Brew login in the config is removed too.',roam_net_need:'Network: name (letters, digits, _ or -), MCC and MNC are required.',roam_th_global:'Global cell id',roam_resel_title:'Cell reselection (advanced, all cells)',roam_resel_toggle:'Show / hide',roam_fast_th:'Fast threshold (dB)',roam_slow_th:'Slow threshold above fast (dB)',roam_fast_hy:'Fast hysteresis (dB)',roam_slow_hy:'Slow hysteresis (dB)',roam_presence:'Presence check after silence (s)',
+    roam_th_cell:'Cell',roam_th_network:'Network',roam_nets_title:'Networks (Multi Network)',roam_mn_on:'On',roam_net_server:'Brew server',roam_net_chk_ok:'routable',roam_net_chk_down:'link down',roam_net_chk_unknown:'Routing with this MCC/MNC not possible: the Brew server does not reach it',roam_net_chk_own:'The Brew server\'s own network is {mni}',roam_srvnets_title:'Networks of the Brew server',roam_srvnets_help:'The Brew server is network {mni} and reaches these networks (extension mni). "Add network" takes its MCC/MNC so every station uses the same values.',roam_srvnets_none:'No list from the Brew server yet: it needs Multi Network on and a brew-server that offers mni.',roam_srvnets_empty:'The Brew server reaches no other network.',roam_srvnets_up:'up',roam_srvnets_down:'down',roam_srvnets_have:'configured as {net}',roam_mn_off:'Off',roam_mn_switch_help:'Multi Network on / off ([multi_network] enabled): radios of other networks may register here by migration (TS 100 392-2 16.4.1.1 b), and every cell announces migration. Saves and restarts the station.',roam_nets_help:'A cell broadcasts exactly one network (MCC / MNC, TS 100 392-2 table 18.17); pick it per cell in the Network column above. A radio that selects a network on the terminal uses the cells of that network. Reached: own server = the network\'s own [brew] link (credentials on this station, edit in the config); via = through another network\'s Brew server, which must offer the mni extension and reach that network (Infrastructure, no credentials here); local = switched inside this station. The first network added turns [net_info] and [brew] into the network "home".',roam_net_name:'Name',roam_net_reached:'Reached',roam_net_add:'Add network',roam_net_core:'own server',roam_net_via:'via {net}',roam_net_local:'local (no server)',roam_net_pending:'(not saved)',roam_net_confirm_core:'Remove network {net}? Its own Brew login in the config is removed too.',roam_net_need:'Network: name (letters, digits, _ or -), MCC and MNC are required.',roam_th_global:'Global cell id',roam_resel_title:'Cell reselection (advanced, all cells)',roam_resel_toggle:'Show / hide',roam_fast_th:'Fast threshold (dB)',roam_slow_th:'Slow threshold above fast (dB)',roam_fast_hy:'Fast hysteresis (dB)',roam_slow_hy:'Slow hysteresis (dB)',roam_presence:'Presence check after silence (s)',
     roam_nb_title:'Neighbour cells',roam_nb_add:'Add neighbour',roam_nb_help:'What the selected cell broadcasts in D-NWRK-BROADCAST (at most 7, clause 18.5.17). The station\'s other cells are added automatically. An extra cell without its own list broadcasts only the station\'s cells.',roam_own_list:'Own neighbour list for this cell',
     roam_th_types:'Reselection',roam_th_services:'Services',roam_n_id:'Cell identifier (0-31)',roam_n_carrier:'Main carrier (0-4095)',roam_n_ext:'Carrier extension (optional)',roam_n_types:'Reselection types',roam_n_sync:'Synchronised with this cell',roam_n_load:'Cell load',roam_n_la:'Location area (optional)',roam_n_rxlev:'Min. RX access level (optional)',roam_n_txpwr:'Max. MS TX power (optional)',
     roam_n_services_help:'BS service details of the neighbour (table 18.26). Missing flags are broadcast as "not supported", so a new entry starts with this cell\'s own services.',roam_apply:'Apply',roam_edit:'Edit',roam_edit_title:'Neighbour {n}',roam_new_title:'New neighbour',roam_same_as_cell:'Same as this cell',
@@ -8364,7 +8368,7 @@ const LANGS={
     "ui_language":"Idioma",
     roaming:'Roaming / Celdas',roam_title:'Roaming, vecinas y celdas',roam_reload:'Recargar',roam_help:'Todo lo que decide cuándo y cómo pasan las radios de una celda a otra: las celdas de esta estación y sus áreas de localización, las celdas vecinas que anuncia cada celda, los valores de reselección y la comprobación de presencia. Al guardar se comprueba toda la configuración y la estación se reinicia.',
     roam_cells_title:'Áreas de localización',roam_cells_help:'Misma área de localización en todas las celdas: las radios cambian de celda sin registrarse, así que las llamadas de grupo y los establecimientos de llamada individual se emiten en todas las celdas del área. Área propia por celda: las radios se registran en cada cambio y la estación y el servidor siempre conocen la celda exacta (TS 100 392-2 cláusula 18.3.4.7.1a). Vacío = el área de la primaria. Las celdas nuevas se añaden en la tarjeta Celdas de arriba.',
-    roam_th_cell:'Celda',roam_th_network:'Red',roam_nets_title:'Redes (Multi Network)',roam_mn_on:'Activo',roam_mn_off:'Apagado',roam_mn_switch_help:'Multi Network activo / apagado ([multi_network] enabled): las radios de otras redes pueden registrarse aquí por migración (TS 100 392-2 16.4.1.1 b), y todas las celdas anuncian migración. Guarda y reinicia la estación.',roam_nets_help:'Una celda emite exactamente una red (MCC / MNC, TS 100 392-2 tabla 18.17); elígela por celda en la columna Red de arriba. Una radio que selecciona una red en el terminal usa las celdas de esa red. Acceso: servidor propio = el enlace [brew] propio de la red (credenciales en esta estación, se editan en la configuración); vía = a través del servidor Brew de otra red, que debe ofrecer la extensión mni y llegar a esa red (Infraestructura, sin credenciales aquí); local = conmutada dentro de esta estación. La primera red añadida convierte [net_info] y [brew] en la red "home".',roam_net_name:'Nombre',roam_net_reached:'Acceso',roam_net_add:'Añadir red',roam_net_core:'servidor propio',roam_net_via:'vía {net}',roam_net_local:'local (sin servidor)',roam_net_pending:'(sin guardar)',roam_net_confirm_core:'¿Quitar la red {net}? También se borra su propio usuario Brew de la configuración.',roam_net_need:'Red: hacen falta nombre (letras, dígitos, _ o -), MCC y MNC.',roam_th_global:'Id. global de celda',roam_resel_title:'Reselección de celda (avanzado, todas las celdas)',roam_resel_toggle:'Mostrar / ocultar',roam_fast_th:'Umbral rápido (dB)',roam_slow_th:'Umbral lento sobre el rápido (dB)',roam_fast_hy:'Histéresis rápida (dB)',roam_slow_hy:'Histéresis lenta (dB)',roam_presence:'Comprobación de presencia tras silencio (s)',
+    roam_th_cell:'Celda',roam_th_network:'Red',roam_nets_title:'Redes (Multi Network)',roam_mn_on:'Activo',roam_net_server:'Servidor Brew',roam_net_chk_ok:'enrutable',roam_net_chk_down:'enlace caído',roam_net_chk_unknown:'No es posible enrutar con este MCC/MNC: el servidor Brew no llega a esa red',roam_net_chk_own:'La red propia del servidor Brew es {mni}',roam_srvnets_title:'Redes del servidor Brew',roam_srvnets_help:'El servidor Brew es la red {mni} y llega a estas redes (extensión mni). «Añadir red» toma su MCC/MNC para que todas las estaciones usen los mismos valores.',roam_srvnets_none:'Aún no hay lista del servidor Brew: hace falta Multi Network activo y un brew-server que ofrezca mni.',roam_srvnets_empty:'El servidor Brew no llega a ninguna otra red.',roam_srvnets_up:'activa',roam_srvnets_down:'caída',roam_srvnets_have:'configurada como {net}',roam_mn_off:'Apagado',roam_mn_switch_help:'Multi Network activo / apagado ([multi_network] enabled): las radios de otras redes pueden registrarse aquí por migración (TS 100 392-2 16.4.1.1 b), y todas las celdas anuncian migración. Guarda y reinicia la estación.',roam_nets_help:'Una celda emite exactamente una red (MCC / MNC, TS 100 392-2 tabla 18.17); elígela por celda en la columna Red de arriba. Una radio que selecciona una red en el terminal usa las celdas de esa red. Acceso: servidor propio = el enlace [brew] propio de la red (credenciales en esta estación, se editan en la configuración); vía = a través del servidor Brew de otra red, que debe ofrecer la extensión mni y llegar a esa red (Infraestructura, sin credenciales aquí); local = conmutada dentro de esta estación. La primera red añadida convierte [net_info] y [brew] en la red "home".',roam_net_name:'Nombre',roam_net_reached:'Acceso',roam_net_add:'Añadir red',roam_net_core:'servidor propio',roam_net_via:'vía {net}',roam_net_local:'local (sin servidor)',roam_net_pending:'(sin guardar)',roam_net_confirm_core:'¿Quitar la red {net}? También se borra su propio usuario Brew de la configuración.',roam_net_need:'Red: hacen falta nombre (letras, dígitos, _ o -), MCC y MNC.',roam_th_global:'Id. global de celda',roam_resel_title:'Reselección de celda (avanzado, todas las celdas)',roam_resel_toggle:'Mostrar / ocultar',roam_fast_th:'Umbral rápido (dB)',roam_slow_th:'Umbral lento sobre el rápido (dB)',roam_fast_hy:'Histéresis rápida (dB)',roam_slow_hy:'Histéresis lenta (dB)',roam_presence:'Comprobación de presencia tras silencio (s)',
     roam_nb_title:'Celdas vecinas',roam_nb_add:'Añadir vecina',roam_nb_help:'Lo que la celda seleccionada anuncia en D-NWRK-BROADCAST (máx. 7, cláusula 18.5.17). Las demás celdas de la estación se añaden solas. Una celda adicional sin lista propia anuncia solo las celdas de la estación.',roam_own_list:'Lista de vecinas propia para esta celda',
     roam_th_types:'Reselección',roam_th_services:'Servicios',roam_n_id:'Identificador de celda (0-31)',roam_n_carrier:'Portadora principal (0-4095)',roam_n_ext:'Extensión de portadora (opcional)',roam_n_types:'Tipos de reselección',roam_n_sync:'Sincronizada con esta celda',roam_n_load:'Carga de la celda',roam_n_la:'Área de localización (opcional)',roam_n_rxlev:'Nivel mín. de acceso RX (opcional)',roam_n_txpwr:'Potencia TX máx. de la radio (opcional)',
     roam_n_services_help:'Detalles de servicio de la vecina (tabla 18.26). Los que faltan se anuncian como «no admitido», por eso una entrada nueva empieza con los servicios de esta celda.',roam_apply:'Aplicar',roam_edit:'Editar',roam_edit_title:'Vecina {n}',roam_new_title:'Vecina nueva',roam_same_as_cell:'Igual que esta celda',
@@ -18543,8 +18547,10 @@ function roamRenderNetworks(){
     return '<tr><td data-label="'+escHtmlAttr(t('roam_net_name'))+'"><b>'+escHtml(n.name)+'</b>'+(n.pending?' <span style="color:var(--muted)">'+escHtml(t('roam_net_pending'))+'</span>':'')+'</td>'+
       '<td data-label="MCC">'+n.mcc+'</td><td data-label="MNC">'+n.mnc+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_net_reached'))+'">'+escHtml(roamNetReached(n))+'</td>'+
+      '<td data-label="'+escHtmlAttr(t('roam_net_server'))+'">'+roamNetCheck(n)+'</td>'+
       '<td>'+(n.name===primaryNet||!roamData.networks_explicit&&!n.pending?'':'<button class="btn" onclick="roamNetRemove(\''+escHtmlAttr(n.name)+'\')">'+escHtml(t('cells_remove'))+'</button>')+'</td></tr>';
   }).join('');
+  roamRenderServerNets(list);
   const via=document.getElementById('rm-net-via');
   if(via){
     const cores=list.filter(n=>n.mode==='core');
@@ -18558,6 +18564,48 @@ function roamRenderNetworks(){
     const fallback=(document.getElementById('rm-cnet-0')||{}).value||roamData.cells[0].network;
     sel.value=list.some(n=>n.name===keep)?keep:(keep==='default'&&list.some(n=>n.name==='home')?'home':(list.some(n=>n.name===fallback)?fallback:list[0].name));
   });
+}
+// What the primary network's Brew server says about a network (SERVICE_NETWORKS, extension mni).
+function roamNetCheck(n){
+  const sn=roamData.server_networks;
+  let c=n.server_check;
+  // A network added on the page but not saved yet: check it here the same way.
+  if(n.pending&&sn&&(n.via===sn.via||n.via==='home'&&!roamData.networks_explicit)){
+    const l=(sn.networks||[]).find(x=>x.mcc===n.mcc&&x.mnc===n.mnc);
+    c=(sn.this.mcc===n.mcc&&sn.this.mnc===n.mnc)||(l&&l.up)?'ok':(l?'down':'unknown');
+  }
+  if(c==='ok')return '<span style="color:var(--accent)">✓ '+escHtml(t('roam_net_chk_ok'))+'</span>';
+  if(c==='down')return '<span style="color:var(--warn)">⚠ '+escHtml(t('roam_net_chk_down'))+'</span>';
+  if(c==='unknown')return '<span style="color:var(--danger)">⚠ '+escHtml(t('roam_net_chk_unknown'))+'</span>';
+  if(c==='not_server_network')return '<span style="color:var(--danger)">⚠ '+escHtml(t('roam_net_chk_own',{mni:sn.this.mcc+'/'+sn.this.mnc}))+'</span>';
+  return '<span style="color:var(--muted)">–</span>';
+}
+function roamRenderServerNets(list){
+  const tb=document.getElementById('roam-srvnets-tbody'),help=document.getElementById('roam-srvnets-help');
+  if(!tb||!help)return;
+  const sn=roamData.server_networks;
+  if(!sn){help.textContent=t('roam_srvnets_none');tb.innerHTML='';return;}
+  help.textContent=t('roam_srvnets_help',{mni:sn.this.mcc+'/'+sn.this.mnc});
+  const rows=(sn.networks||[]);
+  if(!rows.length){tb.innerHTML='<tr><td style="color:var(--muted)">'+escHtml(t('roam_srvnets_empty'))+'</td></tr>';return;}
+  tb.innerHTML=rows.map((n,i)=>{
+    const have=list.find(x=>x.mcc===n.mcc&&x.mnc===n.mnc);
+    return '<tr><td data-label="'+escHtmlAttr(t('roam_net_name'))+'"><b>'+escHtml(n.name)+'</b></td>'+
+      '<td data-label="MCC">'+n.mcc+'</td><td data-label="MNC">'+n.mnc+'</td>'+
+      '<td>'+(n.up?'<span style="color:var(--accent)">'+escHtml(t('roam_srvnets_up'))+'</span>':'<span style="color:var(--warn)">'+escHtml(t('roam_srvnets_down'))+'</span>')+'</td>'+
+      '<td>'+(have?'<span style="color:var(--muted)">'+escHtml(t('roam_srvnets_have',{net:have.name}))+'</span>':
+        '<button class="btn" onclick="roamSrvNetAdd('+i+')"><span class="btn-icon" data-icon="add"></span>'+escHtml(t('roam_net_add'))+'</button>')+'</td></tr>';
+  }).join('');
+}
+// Adds a network the Brew server reaches, with its MCC/MNC, reached via the server's network.
+function roamSrvNetAdd(i){
+  const sn=roamData.server_networks;const n=sn&&sn.networks[i];if(!n)return;
+  let name=(n.name||'').replace(/[^A-Za-z0-9_-]+/g,'_').replace(/^_+|_+$/g,'')||('net'+n.mcc+'_'+n.mnc);
+  if(roamNetList().some(x=>x.name===name))name=name+'_'+n.mnc;
+  const via=roamData.networks_explicit?sn.via:'home';
+  roamNetEdits=roamNetEdits.filter(e=>e.name!==name);
+  roamNetEdits.push({name:name,mcc:n.mcc,mnc:n.mnc,via:via});
+  roamRenderNetworks();
 }
 function roamNetAdd(){
   const v=id=>(document.getElementById(id)||{}).value||'';

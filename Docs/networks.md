@@ -126,7 +126,10 @@ of other networks registering on this network's cells by migration, and turns mi
 the cells while enabled). Networks and the network of
 each cell can also be set on the dashboard page **Roaming / Cells** ("Networks" card and the
 "Network" column of the location areas card); the first network added there turns `[net_info]`
-and `[brew]` into the network `home`.
+and `[brew]` into the network `home`. With Multi Network on and a brew-server that offers `mni`, the
+card also lists the networks the server reports (its own and the ones it links to) with "Add
+network", and warns when a network reached `via` the server has an MCC/MNC the server does not
+reach ("Routing with this MCC/MNC not possible").
 
 ## Not yet
 
