@@ -249,6 +249,7 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
         "migration": cfg.cell.migration,
         // `[multi_network]` on: migration is supported whatever `migration` says.
         "migration_auto": cfg.multi_network.enabled,
+        "multi_network_enabled": cfg.multi_network.enabled,
         "presence_check_secs": cfg.cell.presence_check_secs,
         "presence_response_secs": cfg.cell.presence_response_secs,
         "service_details": service_details,
@@ -333,7 +334,8 @@ fn table_mut<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, Stri
 /// or removes networks (`[networks.<name>]`; a network's own `[brew]` is kept and edited in the
 /// file), and a cell's `"network": s` binds it (cell 0: the root `network` key). The first
 /// network added to a classic config turns it into `[networks]`: `[net_info]` and `[brew]` become
-/// the network `home`.
+/// the network `home`. `"multi_network_enabled": bool` sets `[multi_network] enabled` (the switch
+/// on the Networks card), leaving the rest of the section as it is.
 /// Every key is optional; for a cell, `location_area: null` (extra cells only) inherits the
 /// primary's and `neighbours: null` (extra cells only) drops the cell's own list.
 pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String> {
@@ -376,6 +378,12 @@ pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String>
         if let Some(v) = obj.get("presence_check_secs") {
             cell_info.insert("presence_check_secs".into(), TomlValue::Integer(int_in(v, "presence_check_secs", 0, 86_400)?));
         }
+    }
+
+    if let Some(v) = obj.get("multi_network_enabled") {
+        let on = v.as_bool().ok_or_else(|| "multi_network_enabled must be true/false".to_string())?;
+        // Only the switch: networks and ranges in the section stay as they are.
+        table_mut(&mut table, "multi_network")?.insert("enabled".into(), TomlValue::Boolean(on));
     }
 
     if let Some(list) = obj.get("networks") {
@@ -627,6 +635,25 @@ main_carrier = 1525
         assert!(cfg.cell.neighbor_cells_ca.is_empty() && cfg.extra_cells[0].cell.neighbor_cells_ca.is_empty());
         assert_eq!(cfg.extra_cells[0].cell.location_area, 3);
         assert!(!text.contains("rxlev_access_min_dbm") && !text.contains("migration"));
+    }
+
+    /// The Multi Network switch writes `[multi_network] enabled` and keeps the rest of the
+    /// section; while on, the page reports migration as automatic.
+    #[test]
+    fn multi_network_switch_turns_the_section_on_and_off() {
+        let on = apply_roaming(BASE, &json!({"multi_network_enabled": true})).unwrap();
+        let cfg = parsing::from_toml_str(&on).unwrap();
+        assert!(cfg.multi_network.enabled && !cfg.cell.migration && cfg.migration_supported());
+        let v = roaming_json(write(&on).str(), None).unwrap();
+        assert_eq!((v["multi_network_enabled"].clone(), v["migration_auto"].clone()), (json!(true), json!(true)));
+        assert_eq!(v["service_details"]["migration"], true);
+
+        let with_list = format!("{BASE}\n[multi_network]\nenabled = true\nnetworks = [{{ mcc = 901, mnc = 1234 }}]\n");
+        let off = apply_roaming(&with_list, &json!({"multi_network_enabled": false})).unwrap();
+        let cfg = parsing::from_toml_str(&off).unwrap();
+        assert!(!cfg.multi_network.enabled && !cfg.migration_supported());
+        assert_eq!(cfg.multi_network.networks.len(), 1, "networks kept");
+        assert!(apply_roaming(BASE, &json!({"multi_network_enabled": 1})).is_err());
     }
 
     /// The first network added turns a classic config into `[networks]` (the Brew link goes with
