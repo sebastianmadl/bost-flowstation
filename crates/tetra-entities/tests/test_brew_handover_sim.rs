@@ -2434,6 +2434,7 @@ fn multi_cell_sim_with(
         id: CellId(1),
         cell: cell1,
         soapysdr: None,
+        network: None,
     }];
     assert!(config.is_site_linked());
     let sibling_config = config.for_extra_cell(CellId(1)).unwrap();

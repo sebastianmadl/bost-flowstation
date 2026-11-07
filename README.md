@@ -274,6 +274,10 @@ The registered-radios table shows every cell's radios with a C0/C1… badge, the
 
 Design notes and per-phase status: [`Docs/multi-cell-plan.md`](Docs/multi-cell-plan.md).
 
+### Several networks in one station
+
+Cells can serve different TETRA networks: a `[networks.<name>]` table gives each network its MCC/MNC and its own Brew core (or none, for a network switched inside the station), and `network = "<name>"` binds the primary cell at the root and each `[[cells]]` entry. A radio user picks the network on the terminal and lands on that network's cells and core. See [`Docs/networks.md`](Docs/networks.md).
+
 ## Roaming between stations over Brew *(v0.5.6)*
 
 Two or more separate stations on the same Brew server can keep a radio's calls when it moves from one to the other. The radio decides when it changes cells (TETRA cell reselection, ETSI TS 100 392-2 clause 18.3.4); the stations and the server only make sure the call is there when it arrives.
