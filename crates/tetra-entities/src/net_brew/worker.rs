@@ -1336,8 +1336,34 @@ impl<T: NetworkTransport> BrewWorker<T> {
             *at = Instant::now();
             return Some(Some(*vgssi));
         }
-        let (note, _) = self.mni_calls_in.remove(&uuid)?;
-        let (g, mni) = note.group?;
+        // Without a note the group is of the server's own network (the server names only other
+        // networks, and a server or terminal without `mni` names none). On a cell of another
+        // network it must not go out as that network's group of the same number: only a migrated
+        // radio of the server's network that attached it with its network has it, on a (V)GSSI.
+        let server_group = |w: &mut Self| -> Option<Option<u32>> {
+            w.mni_station_network()?;
+            let vgssi = {
+                let state = w.config.state_read();
+                let (this, _) = state.multi_network.server.as_ref()?;
+                state.multi_network.vgssi_of(*this, gssi)
+            };
+            match vgssi {
+                Some(v) => {
+                    w.mni_group_calls.insert(uuid, (v, Instant::now()));
+                    Some(Some(v))
+                }
+                None => {
+                    tracing::info!("BrewWorker: call {} on group {} of the server's network: not this cell's network, dropped", uuid, gssi);
+                    Some(None)
+                }
+            }
+        };
+        let Some((note, _)) = self.mni_calls_in.remove(&uuid) else {
+            return server_group(self);
+        };
+        let Some((g, mni)) = note.group else {
+            return server_group(self);
+        };
         if g != gssi {
             tracing::warn!("BrewWorker: call network names group {} but GROUP_TX {} is on {}", g, uuid, gssi);
         }
@@ -1981,6 +2007,22 @@ mod tests {
             }
         }
         assert_eq!(called, vec![VASSI, 2320973], "the migrated radio on its (V)ASSI, others unchanged");
+
+        // A group call without a network note (e.g. from an app without `mni`) is of the
+        // server's network: not sent out as the cell network's group 232; a migrated radio that
+        // attached group 9 of the server's network gets it on its (V)GSSI.
+        w.config.state_write().multi_network.groups.insert(VGSSI, (server, 9));
+        let (leak, own) = (Uuid::new_v4(), Uuid::new_v4());
+        w.handle_incoming_binary(&build_group_tx(&leak, 2329999, 232, 0, 0, None));
+        w.handle_incoming_binary(&build_group_tx(&own, 2329999, 9, 0, 0, None));
+        w.handle_incoming_binary(&build_group_tx(&own, 2329998, 9, 0, 0, None));
+        let mut groups = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let BrewEvent::GroupCallStart { uuid, dest_gssi, .. } = e {
+                groups.push((uuid, dest_gssi));
+            }
+        }
+        assert_eq!(groups, vec![(own, VGSSI), (own, VGSSI)], "group 232 of the server's network not sent out here");
     }
 
     /// From the server: the network list is kept, a group call of the visitor's home group comes
