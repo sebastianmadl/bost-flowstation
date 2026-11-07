@@ -2659,11 +2659,13 @@ impl MmBs {
         if mni.mcc == cfg.net.mcc && mni.mnc == cfg.net.mnc {
             return Migration::Home;
         }
-        // With a Brew server that offers `mni` the network has to be one it reaches and that is up
-        // (its `SERVICE_NETWORKS`), and, when `networks` is set, also in that list. Without
-        // such a server only `networks` counts and visitors stay inside this station.
+        // With a Brew server that offers `mni` the network has to be the server's own (a cell of
+        // another network reached `via` it, whose radios come from the server's network) or one
+        // it reaches and that is up (its `SERVICE_NETWORKS`), and, when `networks` is set, also
+        // in that list. Without such a server only `networks` counts and visitors stay inside
+        // this station.
         let server_ok = match &self.config.state_read().multi_network.server {
-            Some((_, list)) => list.iter().any(|n| n.mni == mni && n.up),
+            Some((this, list)) => *this == mni || list.iter().any(|n| n.mni == mni && n.up),
             None => !mn.networks.is_empty(),
         };
         let listed = mn.networks.is_empty() || mn.networks.contains(&mni);

@@ -371,6 +371,21 @@ fn test_migration_follows_the_server_network_list() {
     assert!(!first(&mut test, 5), "not in the configured list");
 }
 
+/// A cell of another network reached `via` the server (its own network differs from the
+/// server's): a radio of the server's own network migrates onto it even though the server's
+/// network list names only its links.
+#[test]
+fn test_radio_of_the_servers_own_network_migrates_onto_a_cell_of_another_network() {
+    use tetra_config::bluestation::BrewNetwork;
+    let mut config = multi_network_config(0);
+    config.multi_network.networks.clear();
+    let mut test = mm_test(config);
+    test.config.state_write().multi_network.server = Some((HOME, vec![BrewNetwork { mni: OTHER, name: "Other".into(), up: true }]));
+    submit_demand(&mut test, ussi(7), demand(LocationUpdateType::MigratingLocationUpdating, None, Some(HOME), vec![]));
+    let msgs = test.dump_sinks();
+    assert!(downlink(&msgs, MmPduTypeDl::DLocationUpdateProceeding).is_some(), "identity exchange for a radio of the server's network");
+}
+
 /// A visitor is visible to the Brew side (shared state) once its second demand passes, and
 /// leaves it when it detaches.
 #[test]
