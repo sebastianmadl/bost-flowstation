@@ -795,7 +795,12 @@ impl<T: NetworkTransport> BrewWorker<T> {
                                 }
                                 self.mni_visitors.insert(local, (mni, home));
                                 self.send_logged(&build_service_ms_network(home, mni), "MS network");
-                                tracing::info!("BrewWorker: visitor (V)ASSI {} registers as {}:{}", local, mni, home);
+                                if local == home && self.mni_station_network() == Some(mni) {
+                                    // Not a visitor: a radio of this cell's own network.
+                                    tracing::info!("BrewWorker: radio {} of this cell's network registers as {}:{}", local, mni, home);
+                                } else {
+                                    tracing::info!("BrewWorker: visitor (V)ASSI {} registers as {}:{}", local, mni, home);
+                                }
                                 home
                             }
                             None => local,
