@@ -402,3 +402,41 @@ fn test_unknown_vassi_is_rejected() {
     assert_eq!(reject_cause(&msgs).map(|r| r.1), Some(RejectCause::ItsiAtsiUnknown as u8));
     assert!(!test.config.state_read().subscribers.is_registered(stranger));
 }
+
+/// A radio whose home changed to another network answers a D-LOCATION UPDATE COMMAND with a
+/// demand naming its new MNI (seen in the field, Motorola MTP6650). It holds no valid
+/// registration here (clause 16.4.1.1 b)), so it is not registered under its bare ISSI but
+/// rejected with "ITSI/ATSI unknown" (16.4.7.3) and then registers again as a migrating radio.
+#[test]
+fn test_non_migrating_update_of_another_network_is_rejected() {
+    debug::setup_logging_verbose();
+    const RADIO: u32 = 2320972;
+    for lu_type in [LocationUpdateType::DemandLocationUpdating, LocationUpdateType::RoamingLocationUpdating] {
+        let mut test = mm_test(multi_network_config(0));
+        submit_demand(&mut test, TetraAddress::issi(RADIO), demand(lu_type, Some(RADIO), Some(HOME), vec![own_group(9)]));
+        let msgs = test.dump_sinks();
+        assert!(downlink(&msgs, MmPduTypeDl::DLocationUpdateAccept).is_none(), "{lu_type:?} not accepted");
+        let (addr, cause) = reject_cause(&msgs).expect("rejected");
+        assert_eq!(cause, RejectCause::ItsiAtsiUnknown as u8);
+        assert_eq!(addr, TetraAddress::issi(RADIO), "answered on the address it came on");
+        assert!(!test.config.state_read().subscribers.is_registered(RADIO));
+    }
+    // A radio of this network naming its own MNI registers as before.
+    let mut test = mm_test(multi_network_config(0));
+    submit_demand(
+        &mut test,
+        TetraAddress::issi(RADIO),
+        demand(LocationUpdateType::DemandLocationUpdating, Some(RADIO), Some(OWN), vec![]),
+    );
+    assert!(downlink(&test.dump_sinks(), MmPduTypeDl::DLocationUpdateAccept).is_some());
+    // Multi Network off: unchanged, the update is accepted as before.
+    let mut config = multi_network_config(0);
+    config.multi_network.enabled = false;
+    let mut test = mm_test(config);
+    submit_demand(
+        &mut test,
+        TetraAddress::issi(RADIO),
+        demand(LocationUpdateType::DemandLocationUpdating, Some(RADIO), Some(HOME), vec![]),
+    );
+    assert!(downlink(&test.dump_sinks(), MmPduTypeDl::DLocationUpdateAccept).is_some());
+}

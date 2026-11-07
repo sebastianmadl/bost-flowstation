@@ -728,6 +728,29 @@ impl MmBs {
                 RejectCause::ItsiAtsiUnknown,
             );
             return;
+        } else if !migrating && self.names_other_network(pdu.address_extension) {
+            // An ITSI of another network that is not migrating: it holds no valid registration
+            // here, so case b) of clause 16.4.1.1 applies (identity exchange), never a
+            // registration under its bare ISSI, which here is a radio of this network. A radio
+            // does this when it answers a D-LOCATION UPDATE COMMAND after its home changed.
+            // "ITSI/ATSI unknown" makes the registration invalid in the MS (clause 16.4.7.3), so
+            // it registers again, as a migrating radio.
+            tracing::info!(
+                "MM: ISSI {} of network {} sent a {:?} — not registered here, rejecting with ITSI/ATSI unknown",
+                issi,
+                pdu.address_extension.map(Mni::from_address_extension).map(|m| m.to_string()).unwrap_or_default(),
+                pdu.location_update_type
+            );
+            Self::send_d_location_update_reject_to(
+                queue,
+                prim.received_address,
+                handle,
+                pdu.location_update_type,
+                pdu.address_extension,
+                RejectCause::ItsiAtsiUnknown,
+                None,
+            );
+            return;
         }
         if migrating && migration == Migration::Refused {
             // Terminal wants to migrate to another network (e.g. SmartConnect).
@@ -2610,6 +2633,19 @@ impl MmBs {
     /// Which case of clause 16.4.1.1 a migrating location update is. Migration needs Multi
     /// Network on and the cell broadcasting "migration supported" (`[cell_info] migration`,
     /// clause 18.5.2.1); the request has to carry the MNI of the MS (cases b) and c)).
+    /// Whether a location update names an ITSI of another network (address extension, clause
+    /// 16.10.1). Only with Multi Network on; off keeps the old handling.
+    fn names_other_network(&self, address_extension: Option<u64>) -> bool {
+        let cfg = self.config.config();
+        if !cfg.multi_network.enabled {
+            return false;
+        }
+        address_extension.is_some_and(|ext| {
+            let mni = Mni::from_address_extension(ext);
+            mni.mcc != cfg.net.mcc || mni.mnc != cfg.net.mnc
+        })
+    }
+
     fn migration_case(&self, address_extension: Option<u64>) -> Migration {
         let cfg = self.config.config();
         let mn = &cfg.multi_network;
