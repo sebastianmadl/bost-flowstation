@@ -155,6 +155,18 @@ So on a 901/1638 cell an SDS from a migrated 9999 radio to `200999` goes to 901/
 to reach the app in 9999 the radio has to dial the full TSI. Calls and SDS from the home network
 to the radio reach it on its (V)ASSI.
 
+The same holds for groups: a migrated radio that attaches a group without an MNI is in the cell
+network's group (clause 14.2.3). So the cell decides which network a radio talks in, with one
+radio and one home identity ("switching the network by cell"). Field check 2026-11-07, MTP6650
+with home 901/9999 and the brew-server of 901/9999 linked to TetraPack:
+
+| Radio on | Group calls go to | The station shows |
+| --- | --- | --- |
+| a 901/9999 cell | the brew-server's own groups (901/9999) | a radio of this network |
+| a 901/1638 `via` cell | TetraPack / Brandmeister groups (901/1638), over the brew-server's link | the radio migrated, on a (V)ASSI |
+
+Groups bridged between the networks (talkgroup pools on the brew-server) work in both cases.
+
 ## Not yet
 
 - Routing by the radio's *home* network on a single carrier (a migrating radio presents its home
