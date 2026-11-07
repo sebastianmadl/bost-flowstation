@@ -1044,4 +1044,21 @@ voice_service = true
 # device = "driver=plutosdr,uri=ip:192.168.3.1"
 # tx_freq = 438125000
 # rx_freq = 433125000
+#
+# Several networks (one MCC/MNC per cell, ETSI TS 100 392-2 table 18.17): see
+# Docs/networks.md. A network reached through another network's Brew server
+# (Multi Network "Infrastructure", the server must offer `mni`) has `via`
+# instead of its own [brew]; `network = "..."` binds a cell to it:
+#
+# network = "home"                  # at the very top of the file
+# [networks.home]                   # MCC/MNC from [net_info]
+# [networks.home.brew]              # the [brew] keys move here
+# ...
+# [networks.tp]
+# mcc = 901
+# mnc = 1638
+# via = "home"
+# [[cells]]
+# id = 1
+# network = "tp"
 ###############################################################################

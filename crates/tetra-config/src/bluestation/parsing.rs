@@ -329,6 +329,7 @@ fn resolve_networks(cfg: &mut StackConfig, raw_networks: Option<Value>, primary_
             name: DEFAULT_NETWORK.to_owned(),
             net: cfg.net.clone(),
             brew: cfg.brew.clone(),
+            via: None,
         }];
         cfg.network = DEFAULT_NETWORK.to_owned();
         return Ok(());

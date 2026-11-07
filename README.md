@@ -278,6 +278,8 @@ Design notes and per-phase status: [`Docs/multi-cell-plan.md`](Docs/multi-cell-p
 
 Cells can serve different TETRA networks: a `[networks.<name>]` table gives each network its MCC/MNC and its own Brew core (or none, for a network switched inside the station), and `network = "<name>"` binds the primary cell at the root and each `[[cells]]` entry. A radio user picks the network on the terminal and lands on that network's cells and core. See [`Docs/networks.md`](Docs/networks.md).
 
+A network can also be reached *through* the Brew server of another of the station's networks, with no credentials of its own on the station: `via = "<network>"` in `[networks.<name>]` (Multi Network "Infrastructure"; the server must offer the `mni` extension and reach that network, e.g. over its TetraPack link). Networks and the network of each cell can be edited on the **Roaming / Cells** page. See [`Docs/networks.md`](Docs/networks.md).
+
 ## Roaming between stations over Brew *(v0.5.6)*
 
 Two or more separate stations on the same Brew server can keep a radio's calls when it moves from one to the other. The radio decides when it changes cells (TETRA cell reselection, ETSI TS 100 392-2 clause 18.3.4); the stations and the server only make sure the call is there when it arrives.

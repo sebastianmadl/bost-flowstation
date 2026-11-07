@@ -6102,9 +6102,36 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 <th data-i18n="cells_carrier">Carrier</th>
                 <th>CC</th>
                 <th>LA</th>
+                <th data-i18n="roam_th_network">Network</th>
               </tr></thead>
               <tbody id="roam-cells-tbody"></tbody>
             </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title" data-i18n="roam_nets_title">Networks (Multi Network)</div></div>
+        <div class="card-body">
+          <div class="help-text" style="margin-bottom:8px" data-i18n="roam_nets_help">A cell broadcasts exactly one network (MCC / MNC, TS 100 392-2 table 18.17); pick it per cell in the Network column above. A radio that selects a network on the terminal uses the cells of that network. Reached: own server = the network's own [brew] link (credentials on this station, edit in the config); via = through another network's Brew server, which must offer the mni extension and reach that network (Infrastructure, no credentials here); local = switched inside this station. The first network added turns [net_info] and [brew] into the network "home".</div>
+          <div class="table-wrap">
+            <table class="table-stack">
+              <thead><tr>
+                <th data-i18n="roam_net_name">Name</th>
+                <th>MCC</th>
+                <th>MNC</th>
+                <th data-i18n="roam_net_reached">Reached</th>
+                <th></th>
+              </tr></thead>
+              <tbody id="roam-nets-tbody"></tbody>
+            </table>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+            <input type="text" class="form-input" style="width:120px" id="rm-net-name" data-i18n-placeholder="roam_net_name" placeholder="Name">
+            <input type="number" class="form-input" style="width:80px" min="0" max="1023" id="rm-net-mcc" placeholder="MCC">
+            <input type="number" class="form-input" style="width:100px" min="0" max="16383" id="rm-net-mnc" placeholder="MNC">
+            <select class="form-input" id="rm-net-via" style="min-width:140px"></select>
+            <button class="btn" onclick="roamNetAdd()"><span class="btn-icon" data-icon="add"></span><span data-i18n="roam_net_add">Add network</span></button>
           </div>
         </div>
       </div>
@@ -7738,7 +7765,7 @@ const LANGS={
     registered_terminals:'Registered Radios',
     roaming:'Roaming / Cells',roam_title:'Roaming, neighbours and cells',roam_reload:'Reload',roam_help:'Everything that decides when and how radios move between cells: the cells of this station and their location areas, the neighbour cells each cell broadcasts, the reselection values and the presence check. Saving checks the whole config first and restarts the station.',
     roam_cells_title:'Location areas',roam_cells_help:'Same location area on all cells: radios change cell without registering, so group calls and individual call setups run on every cell of the area. Own location area per cell: radios register on every change and station and server always know the exact cell (TS 100 392-2 clause 18.3.4.7.1a). Empty = the primary\'s location area. New cells are added in the Cells card above.',
-    roam_th_cell:'Cell',roam_th_global:'Global cell id',roam_resel_title:'Cell reselection (advanced, all cells)',roam_resel_toggle:'Show / hide',roam_fast_th:'Fast threshold (dB)',roam_slow_th:'Slow threshold above fast (dB)',roam_fast_hy:'Fast hysteresis (dB)',roam_slow_hy:'Slow hysteresis (dB)',roam_presence:'Presence check after silence (s)',
+    roam_th_cell:'Cell',roam_th_network:'Network',roam_nets_title:'Networks (Multi Network)',roam_nets_help:'A cell broadcasts exactly one network (MCC / MNC, TS 100 392-2 table 18.17); pick it per cell in the Network column above. A radio that selects a network on the terminal uses the cells of that network. Reached: own server = the network\'s own [brew] link (credentials on this station, edit in the config); via = through another network\'s Brew server, which must offer the mni extension and reach that network (Infrastructure, no credentials here); local = switched inside this station. The first network added turns [net_info] and [brew] into the network "home".',roam_net_name:'Name',roam_net_reached:'Reached',roam_net_add:'Add network',roam_net_core:'own server',roam_net_via:'via {net}',roam_net_local:'local (no server)',roam_net_pending:'(not saved)',roam_net_need:'Network: name (letters, digits, _ or -), MCC and MNC are required.',roam_th_global:'Global cell id',roam_resel_title:'Cell reselection (advanced, all cells)',roam_resel_toggle:'Show / hide',roam_fast_th:'Fast threshold (dB)',roam_slow_th:'Slow threshold above fast (dB)',roam_fast_hy:'Fast hysteresis (dB)',roam_slow_hy:'Slow hysteresis (dB)',roam_presence:'Presence check after silence (s)',
     roam_nb_title:'Neighbour cells',roam_nb_add:'Add neighbour',roam_nb_help:'What the selected cell broadcasts in D-NWRK-BROADCAST (at most 7, clause 18.5.17). The station\'s other cells are added automatically. An extra cell without its own list broadcasts only the station\'s cells.',roam_own_list:'Own neighbour list for this cell',
     roam_th_types:'Reselection',roam_th_services:'Services',roam_n_id:'Cell identifier (0-31)',roam_n_carrier:'Main carrier (0-4095)',roam_n_ext:'Carrier extension (optional)',roam_n_types:'Reselection types',roam_n_sync:'Synchronised with this cell',roam_n_load:'Cell load',roam_n_la:'Location area (optional)',roam_n_rxlev:'Min. RX access level (optional)',roam_n_txpwr:'Max. MS TX power (optional)',
     roam_n_services_help:'BS service details of the neighbour (table 18.26). Missing flags are broadcast as "not supported", so a new entry starts with this cell\'s own services.',roam_apply:'Apply',roam_edit:'Edit',roam_edit_title:'Neighbour {n}',roam_new_title:'New neighbour',roam_same_as_cell:'Same as this cell',
@@ -8330,7 +8357,7 @@ const LANGS={
     "ui_language":"Idioma",
     roaming:'Roaming / Celdas',roam_title:'Roaming, vecinas y celdas',roam_reload:'Recargar',roam_help:'Todo lo que decide cuándo y cómo pasan las radios de una celda a otra: las celdas de esta estación y sus áreas de localización, las celdas vecinas que anuncia cada celda, los valores de reselección y la comprobación de presencia. Al guardar se comprueba toda la configuración y la estación se reinicia.',
     roam_cells_title:'Áreas de localización',roam_cells_help:'Misma área de localización en todas las celdas: las radios cambian de celda sin registrarse, así que las llamadas de grupo y los establecimientos de llamada individual se emiten en todas las celdas del área. Área propia por celda: las radios se registran en cada cambio y la estación y el servidor siempre conocen la celda exacta (TS 100 392-2 cláusula 18.3.4.7.1a). Vacío = el área de la primaria. Las celdas nuevas se añaden en la tarjeta Celdas de arriba.',
-    roam_th_cell:'Celda',roam_th_global:'Id. global de celda',roam_resel_title:'Reselección de celda (avanzado, todas las celdas)',roam_resel_toggle:'Mostrar / ocultar',roam_fast_th:'Umbral rápido (dB)',roam_slow_th:'Umbral lento sobre el rápido (dB)',roam_fast_hy:'Histéresis rápida (dB)',roam_slow_hy:'Histéresis lenta (dB)',roam_presence:'Comprobación de presencia tras silencio (s)',
+    roam_th_cell:'Celda',roam_th_network:'Red',roam_nets_title:'Redes (Multi Network)',roam_nets_help:'Una celda emite exactamente una red (MCC / MNC, TS 100 392-2 tabla 18.17); elígela por celda en la columna Red de arriba. Una radio que selecciona una red en el terminal usa las celdas de esa red. Acceso: servidor propio = el enlace [brew] propio de la red (credenciales en esta estación, se editan en la configuración); vía = a través del servidor Brew de otra red, que debe ofrecer la extensión mni y llegar a esa red (Infraestructura, sin credenciales aquí); local = conmutada dentro de esta estación. La primera red añadida convierte [net_info] y [brew] en la red "home".',roam_net_name:'Nombre',roam_net_reached:'Acceso',roam_net_add:'Añadir red',roam_net_core:'servidor propio',roam_net_via:'vía {net}',roam_net_local:'local (sin servidor)',roam_net_pending:'(sin guardar)',roam_net_need:'Red: hacen falta nombre (letras, dígitos, _ o -), MCC y MNC.',roam_th_global:'Id. global de celda',roam_resel_title:'Reselección de celda (avanzado, todas las celdas)',roam_resel_toggle:'Mostrar / ocultar',roam_fast_th:'Umbral rápido (dB)',roam_slow_th:'Umbral lento sobre el rápido (dB)',roam_fast_hy:'Histéresis rápida (dB)',roam_slow_hy:'Histéresis lenta (dB)',roam_presence:'Comprobación de presencia tras silencio (s)',
     roam_nb_title:'Celdas vecinas',roam_nb_add:'Añadir vecina',roam_nb_help:'Lo que la celda seleccionada anuncia en D-NWRK-BROADCAST (máx. 7, cláusula 18.5.17). Las demás celdas de la estación se añaden solas. Una celda adicional sin lista propia anuncia solo las celdas de la estación.',roam_own_list:'Lista de vecinas propia para esta celda',
     roam_th_types:'Reselección',roam_th_services:'Servicios',roam_n_id:'Identificador de celda (0-31)',roam_n_carrier:'Portadora principal (0-4095)',roam_n_ext:'Extensión de portadora (opcional)',roam_n_types:'Tipos de reselección',roam_n_sync:'Sincronizada con esta celda',roam_n_load:'Carga de la celda',roam_n_la:'Área de localización (opcional)',roam_n_rxlev:'Nivel mín. de acceso RX (opcional)',roam_n_txpwr:'Potencia TX máx. de la radio (opcional)',
     roam_n_services_help:'Detalles de servicio de la vecina (tabla 18.26). Los que faltan se anuncian como «no admitido», por eso una entrada nueva empieza con los servicios de esta celda.',roam_apply:'Aplicar',roam_edit:'Editar',roam_edit_title:'Vecina {n}',roam_new_title:'Vecina nueva',roam_same_as_cell:'Igual que esta celda',
@@ -18442,7 +18469,8 @@ async function loadRoaming(){
   vcSet('rm-rxlev',d.rxlev_access_min_dbm!=null?String(d.rxlev_access_min_dbm):'');
   const mig=document.getElementById('rm-migration');if(mig)mig.checked=!!d.migration;
   vcSet('rm-presence',String(d.presence_check_secs));
-  roamRenderBrew();roamRenderCells();
+  roamNetEdits=[];
+  roamRenderBrew();roamRenderCells();roamRenderNetworks();
   const sel=document.getElementById('rm-ncell');
   if(sel){
     const keep=sel.value;
@@ -18476,8 +18504,69 @@ function roamRenderCells(){
       '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(c.main_carrier,c.carrier_ext)+'</td>'+
       '<td data-label="CC">'+c.colour_code+'</td>'+
       '<td data-label="LA"><input type="number" class="form-input" style="width:100px" min="0" max="16383" id="rm-la-'+c.id+'" value="'+escHtmlAttr(la)+'"'+
-      (c.primary?'':' placeholder="'+escHtmlAttr(String(primaryLa))+'"')+'></td></tr>';
+      (c.primary?'':' placeholder="'+escHtmlAttr(String(primaryLa))+'"')+'></td>'+
+      '<td data-label="'+escHtmlAttr(t('roam_th_network'))+'"><select class="form-input" id="rm-cnet-'+c.id+'">'+
+      roamNetList().map(n=>'<option value="'+escHtmlAttr(n.name)+'"'+(n.name===c.network?' selected':'')+'>'+escHtml(roamNetLabel(n))+'</option>').join('')+
+      '</select></td></tr>';
   }).join('');
+}
+let roamNetEdits=[];
+// Networks as they will be after saving: the configured ones with the pending edits applied.
+function roamNetList(){
+  let l=(roamData.networks||[]).map(n=>Object.assign({},n));
+  roamNetEdits.forEach(e=>{
+    l=l.filter(n=>n.name!==e.name);
+    if(!e.remove)l.push({name:e.name,mcc:e.mcc,mnc:e.mnc,via:e.via||null,mode:e.via?'via':'local',pending:true});
+  });
+  if(roamNetEdits.some(e=>!e.remove)&&!roamData.networks_explicit)l.forEach(n=>{if(n.name==='default')n.name='home';});
+  return l;
+}
+function roamNetLabel(n){return n.name+' ('+n.mcc+'/'+n.mnc+')';}
+function roamNetReached(n){
+  if(n.mode==='via')return t('roam_net_via',{net:n.via});
+  if(n.mode==='core')return t('roam_net_core')+(n.host?' · '+n.host:'');
+  return t('roam_net_local');
+}
+function roamRenderNetworks(){
+  const tb=document.getElementById('roam-nets-tbody');if(!tb||!roamData)return;
+  const list=roamNetList();
+  tb.innerHTML=list.map(n=>{
+    const used=roamData.cells.some(c=>c.network===n.name);
+    return '<tr><td data-label="'+escHtmlAttr(t('roam_net_name'))+'"><b>'+escHtml(n.name)+'</b>'+(n.pending?' <span style="color:var(--muted)">'+escHtml(t('roam_net_pending'))+'</span>':'')+'</td>'+
+      '<td data-label="MCC">'+n.mcc+'</td><td data-label="MNC">'+n.mnc+'</td>'+
+      '<td data-label="'+escHtmlAttr(t('roam_net_reached'))+'">'+escHtml(roamNetReached(n))+'</td>'+
+      '<td>'+(n.mode==='core'||used||!roamData.networks_explicit&&!n.pending?'':'<button class="btn" onclick="roamNetRemove(\''+escHtmlAttr(n.name)+'\')">'+escHtml(t('cells_remove'))+'</button>')+'</td></tr>';
+  }).join('');
+  const via=document.getElementById('rm-net-via');
+  if(via){
+    const cores=list.filter(n=>n.mode==='core');
+    via.innerHTML=cores.map(n=>'<option value="'+escHtmlAttr(n.name)+'">'+escHtml(t('roam_net_via',{net:n.name}))+'</option>').join('')+
+      '<option value="">'+escHtml(t('roam_net_local'))+'</option>';
+  }
+  roamData.cells.forEach(c=>{
+    const sel=document.getElementById('rm-cnet-'+c.id);if(!sel)return;
+    const keep=sel.value;
+    sel.innerHTML=list.map(n=>'<option value="'+escHtmlAttr(n.name)+'">'+escHtml(roamNetLabel(n))+'</option>').join('');
+    sel.value=list.some(n=>n.name===keep)?keep:(keep==='default'&&list.some(n=>n.name==='home')?'home':c.network);
+  });
+}
+function roamNetAdd(){
+  const v=id=>(document.getElementById(id)||{}).value||'';
+  const name=v('rm-net-name').trim(),mcc=parseInt(v('rm-net-mcc'),10),mnc=parseInt(v('rm-net-mnc'),10);
+  if(!/^[A-Za-z0-9_-]+$/.test(name)||!isFinite(mcc)||!isFinite(mnc)){setText('roam-msg',t('roam_net_need'));return;}
+  let via=v('rm-net-via');
+  // A classic station's Brew link becomes the network "home" when the first network is added.
+  if(via==='default')via='home';
+  roamNetEdits=roamNetEdits.filter(e=>e.name!==name);
+  roamNetEdits.push({name:name,mcc:mcc,mnc:mnc,via:via||null});
+  ['rm-net-name','rm-net-mcc','rm-net-mnc'].forEach(id=>vcSet(id,''));
+  roamRenderNetworks();
+}
+function roamNetRemove(name){
+  const pending=roamNetEdits.some(e=>e.name===name&&!e.remove);
+  roamNetEdits=roamNetEdits.filter(e=>e.name!==name);
+  if(!pending)roamNetEdits.push({name:name,remove:true});
+  roamRenderNetworks();
 }
 function roamCell(){
   const sel=document.getElementById('rm-ncell');
@@ -18701,12 +18790,14 @@ async function roamSave(){
     rxlev_access_min_dbm:num('rm-rxlev'),
     migration:!!(document.getElementById('rm-migration')||{}).checked,
     presence_check_secs:num('rm-presence')||0,
-    cells:roamData.cells.map(c=>({
-      id:c.id,
-      location_area:num('rm-la-'+c.id),
-      neighbours:c.primary?c.neighbours:(c.own_list?c.neighbours:null),
-    })),
+    cells:roamData.cells.map(c=>{
+      const e={id:c.id,location_area:num('rm-la-'+c.id),neighbours:c.primary?c.neighbours:(c.own_list?c.neighbours:null)};
+      const net=(document.getElementById('rm-cnet-'+c.id)||{}).value;
+      if(net&&net!==c.network)e.network=net;
+      return e;
+    }),
   };
+  if(roamNetEdits.length)body.networks=roamNetEdits;
   if(body.cells[0].location_area==null){setText('roam-msg',t('roam_need_la'));return;}
   if(!confirm(t('roam_confirm_save')))return;
   try{

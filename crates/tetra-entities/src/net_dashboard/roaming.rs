@@ -74,6 +74,71 @@ fn extra_cell_entry(table: &Table, id: u8) -> Option<&Table> {
         .find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64))
 }
 
+fn extra_cell_entry_mut(table: &mut Table, id: u8) -> Option<&mut Table> {
+    table
+        .get_mut("cells")?
+        .as_array_mut()?
+        .iter_mut()
+        .filter_map(|c| c.as_table_mut())
+        .find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64))
+}
+
+/// Name of the network the classic `[net_info]` + `[brew]` becomes when `[networks]` is created.
+const CONVERTED_HOME: &str = "home";
+
+/// Apply the `networks` list of a POST /api/roaming body (see [`apply_roaming`]).
+fn apply_networks(table: &mut Table, list: &JsonValue) -> Result<(), String> {
+    let list = list.as_array().ok_or_else(|| "networks must be a list".to_string())?;
+    if list.is_empty() {
+        return Ok(());
+    }
+    if !table.contains_key("networks") {
+        // Classic config: the one network becomes `home`, its Brew link with it. The primary
+        // cell (and every cell without a binding) keeps serving it.
+        let mut home = Table::new();
+        if let Some(brew) = table.remove("brew") {
+            home.insert("brew".into(), brew);
+        }
+        let mut networks = Table::new();
+        networks.insert(CONVERTED_HOME.into(), TomlValue::Table(home));
+        table.insert("networks".into(), TomlValue::Table(networks));
+        table.insert("network".into(), TomlValue::String(CONVERTED_HOME.into()));
+    }
+    for (i, n) in list.iter().enumerate() {
+        let what = format!("networks[{i}]");
+        let name = n.get("name").and_then(|v| v.as_str()).map(str::trim).unwrap_or_default().to_string();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err(format!("{what}: a network name is letters, digits, '_' or '-'"));
+        }
+        let networks = table_mut(table, "networks")?;
+        if n.get("remove").and_then(|v| v.as_bool()).unwrap_or(false) {
+            networks.remove(&name);
+            continue;
+        }
+        let entry = table_mut(networks, &name)?;
+        if let Some(v) = n.get("mcc") {
+            entry.insert("mcc".into(), TomlValue::Integer(int_in(v, &format!("{what}.mcc"), 0, 1023)?));
+        }
+        if let Some(v) = n.get("mnc") {
+            entry.insert("mnc".into(), TomlValue::Integer(int_in(v, &format!("{what}.mnc"), 0, 16383)?));
+        }
+        if let Some(v) = n.get("via") {
+            match v.as_str().map(str::trim) {
+                None | Some("") => {
+                    entry.remove("via");
+                }
+                Some(via) => {
+                    if entry.contains_key("brew") {
+                        return Err(format!("networks.{name} has its own brew link; remove it in the config to reach it via {via}"));
+                    }
+                    entry.insert("via".into(), TomlValue::String(via.to_string()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn neighbours_in(cell_info: Option<&Table>) -> Option<JsonValue> {
     cell_info.and_then(|t| t.get("neighbor_cells_ca")).map(toml_to_json)
 }
@@ -126,6 +191,8 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
                 "colour_code": c.colour_code,
                 "location_area": c.location_area,
                 "location_area_own": la_own,
+                // The network the cell serves (`[networks]`, else the one implicit network).
+                "network": cfg.network_of_cell(*id).name,
                 "own_list": own.is_some(),
                 "neighbours": own.unwrap_or_else(|| json!([])),
                 "siblings": siblings,
@@ -157,6 +224,16 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
     let directory = shared.and_then(|s| s.state_read().brew_cell_directory.clone());
     Ok(json!({
         "cells": cells,
+        "networks": cfg.networks.iter().map(|n| json!({
+            "name": n.name,
+            "mcc": n.net.mcc,
+            "mnc": n.net.mnc,
+            "via": n.via,
+            // core: own Brew link; via: through another network's Brew server (mni); local: none.
+            "mode": if n.via.is_some() { "via" } else if n.brew.is_some() { "core" } else { "local" },
+            "host": n.brew.as_ref().map(|b| b.host.clone()),
+        })).collect::<Vec<_>>(),
+        "networks_explicit": cfg.networks_explicit,
         "mcc": cfg.net.mcc,
         "mnc": cfg.net.mnc,
         // The Brew server's cell list (extension `cell-directory`), `null` until one arrived.
@@ -250,6 +327,11 @@ fn table_mut<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, Stri
 ///
 /// Body: `{"reselect": {4 × dB}, "rxlev_access_min_dbm": N|null, "migration": bool,
 /// "presence_check_secs": N, "cells": [{"id": N, "location_area": N|null, "neighbours": [..]|null}]}`.
+/// `"networks": [{"name": s, "mcc": N, "mnc": N, "via": s|null, "remove": bool}]` adds, changes
+/// or removes networks (`[networks.<name>]`; a network's own `[brew]` is kept and edited in the
+/// file), and a cell's `"network": s` binds it (cell 0: the root `network` key). The first
+/// network added to a classic config turns it into `[networks]`: `[net_info]` and `[brew]` become
+/// the network `home`.
 /// Every key is optional; for a cell, `location_area: null` (extra cells only) inherits the
 /// primary's and `neighbours: null` (extra cells only) drops the cell's own list.
 pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String> {
@@ -294,6 +376,10 @@ pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String>
         }
     }
 
+    if let Some(list) = obj.get("networks") {
+        apply_networks(&mut table, list)?;
+    }
+
     for c in obj.get("cells").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or_default() {
         let id = c
             .get("id")
@@ -301,14 +387,27 @@ pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String>
             .and_then(|v| u8::try_from(v).ok())
             .ok_or_else(|| "cells[].id is required".to_string())?;
         let what = format!("cell {id}");
+        if let Some(v) = c.get("network") {
+            let name = v.as_str().ok_or_else(|| format!("{what} network must be a name"))?;
+            // After a conversion in this same save the implicit network is called `home`.
+            let has = |n: &str| table.get("networks").and_then(|t| t.as_table()).is_some_and(|t| t.contains_key(n));
+            let name = if name == tetra_config::bluestation::DEFAULT_NETWORK && !has(name) && has(CONVERTED_HOME) { CONVERTED_HOME } else { name };
+            let known = has(name);
+            if !known {
+                if name != tetra_config::bluestation::DEFAULT_NETWORK {
+                    return Err(format!("{what}: no network {name:?}"));
+                }
+            } else if id == 0 {
+                table.insert("network".into(), TomlValue::String(name.to_string()));
+            } else {
+                let entry = extra_cell_entry_mut(&mut table, id).ok_or_else(|| format!("{what} is not in the config"))?;
+                entry.insert("network".into(), TomlValue::String(name.to_string()));
+            }
+        }
         let cell_info = if id == 0 {
             table_mut(&mut table, "cell_info")?
         } else {
-            let entry = table
-                .get_mut("cells")
-                .and_then(|v| v.as_array_mut())
-                .and_then(|a| a.iter_mut().filter_map(|c| c.as_table_mut()).find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64)))
-                .ok_or_else(|| format!("{what} is not in the config"))?;
+            let entry = extra_cell_entry_mut(&mut table, id).ok_or_else(|| format!("{what} is not in the config"))?;
             table_mut(entry, "cell_info")?
         };
         if let Some(v) = c.get("location_area") {
@@ -526,6 +625,47 @@ main_carrier = 1525
         assert!(cfg.cell.neighbor_cells_ca.is_empty() && cfg.extra_cells[0].cell.neighbor_cells_ca.is_empty());
         assert_eq!(cfg.extra_cells[0].cell.location_area, 3);
         assert!(!text.contains("rxlev_access_min_dbm") && !text.contains("migration"));
+    }
+
+    /// The first network added turns a classic config into `[networks]` (the Brew link goes with
+    /// the converted `home` network), a cell is bound to it, and it is reached via `home`.
+    #[test]
+    fn networks_are_added_bound_and_removed() {
+        let body = json!({
+            "networks": [{"name": "tp", "mcc": 901, "mnc": 1638, "via": "home"}],
+            "cells": [{"id": 0, "network": "default"}, {"id": 1, "network": "tp"}],
+        });
+        let text = apply_roaming(BASE, &body).unwrap();
+        let cfg = parsing::from_toml_str(&text).unwrap();
+        assert!(cfg.networks_explicit && !text.contains("\n[brew]"), "{text}");
+        assert_eq!(cfg.network, "home");
+        assert_eq!(cfg.network("home").unwrap().brew.as_ref().unwrap().host, "brew.example");
+        let tp = cfg.network("tp").unwrap();
+        assert_eq!((tp.net.mcc, tp.net.mnc, tp.via.as_deref()), (901, 1638, Some("home")));
+        assert_eq!(cfg.network_of_cell(CellId(1)).name, "tp");
+        let cell = cfg.for_extra_cell(CellId(1)).unwrap();
+        assert!(cell.mni_enabled() && !cell.is_site_linked());
+
+        let f = write(&text);
+        let v = roaming_json(f.str(), None).unwrap();
+        assert_eq!(v["cells"][1]["network"], "tp");
+        assert_eq!(v["networks"].as_array().unwrap().iter().find(|n| n["name"] == "tp").unwrap()["mode"], "via");
+        assert_eq!(v["networks"].as_array().unwrap().iter().find(|n| n["name"] == "home").unwrap()["mode"], "core");
+
+        // Back: the cell to home, the network removed.
+        let text = apply_roaming(&text, &json!({"networks": [{"name": "tp", "remove": true}], "cells": [{"id": 1, "network": "home"}]})).unwrap();
+        let cfg = parsing::from_toml_str(&text).unwrap();
+        assert!(cfg.network("tp").is_none() && cfg.network_of_cell(CellId(1)).name == "home");
+
+        for bad in [
+            json!({"networks": [{"name": "bad name", "mcc": 1, "mnc": 1}]}),
+            json!({"networks": [{"name": "x", "mcc": 1024, "mnc": 1}]}),
+            json!({"cells": [{"id": 1, "network": "nowhere"}]}),
+            json!({"networks": [{"name": "tp", "mcc": 901, "mnc": 1638, "via": "nowhere"}]}),
+            json!({"networks": [{"name": "tp", "mcc": 901, "mnc": 9999}], "cells": [{"id": 1, "network": "tp"}]}),
+        ] {
+            assert!(apply_roaming(BASE, &bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

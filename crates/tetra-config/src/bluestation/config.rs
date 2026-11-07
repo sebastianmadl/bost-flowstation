@@ -379,7 +379,27 @@ impl StackConfig {
                 name: super::DEFAULT_NETWORK.to_owned(),
                 net: self.net.clone(),
                 brew: self.brew.clone(),
+                via: None,
             })
+    }
+
+    /// True when this cell's network is reached through another network's Brew server (`via`):
+    /// its radios and groups are named with this network's MCC/MNC towards the server (`mni`).
+    pub fn network_is_via(&self) -> bool {
+        self.network(&self.network).is_some_and(|n| n.via.is_some())
+    }
+
+    /// Multi Network towards the Brew server (`mni`): `[multi_network]` is on, or this cell's
+    /// network is reached `via` another one.
+    pub fn mni_enabled(&self) -> bool {
+        self.multi_network.enabled || self.network_is_via()
+    }
+
+    /// The cells this config's Brew connection announces (SERVICE_BTS_INFO): on the station's
+    /// config the cells of the primary's network, on a per-cell config that cell.
+    pub fn cells_of_station_network(&self) -> Vec<(CellId, &CfgCellInfo, Option<&CfgSoapySdr>)> {
+        let same_net = self.network_cells(&self.network);
+        self.cells().into_iter().filter(|(id, _, _)| same_net.contains(id)).collect()
     }
 
     /// The cells serving network `name`, lowest id first (the primary comes first when it is one).

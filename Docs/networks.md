@@ -86,14 +86,57 @@ network, called `default`, and cells are linked only when Brew or LST is configu
 - The Setup page's Brew **profiles** apply to a root `[brew]` and are refused on a station with
   `[networks]`; edit the network's `brew` table in the configuration instead.
 
+## Reached through another network's Brew server (`via`)
+
+A network can also be reached without credentials of its own on the station: `via` names the
+station's network whose Brew server reaches it (the "Infrastructure" way of Multi Network, see
+brew-server `docs/Multi-Network.md`). The network's cells broadcast its own MCC/MNC and connect
+with that network's `[brew]` login, and tell the server, which must offer the `mni` extension,
+that their radios and groups belong to this network (`SERVICE_MS_NETWORK`,
+`SERVICE_GROUP_NETWORK`, `SERVICE_CALL_NETWORK`). The server registers them in that network, for
+example over its link to TetraPack, and routes their calls and SDS there.
+
+```toml
+network = "home"
+
+[networks.home]                    # 901/9999 from [net_info]
+[networks.home.brew]
+host = "brew.example.org"
+port = 443
+tls = true
+username = 1000001
+password = "secret"
+
+[networks.tp]                      # TetraPack, reached through the brew-server
+mcc = 901
+mnc = 1638
+via = "home"
+
+[[cells]]
+id = 1
+network = "tp"
+[cells.cell_info]
+main_carrier = 1532
+```
+
+A radio whose home is 901/9999 that selects 901/1638 on the terminal registers on cell 1 and
+appears on the server as a radio of 901/1638. `via` must name a network with a `brew` of its own,
+and a network has either `brew` or `via`. `[multi_network]` is not needed for this (it is for radios
+of other networks registering on this network's cells by migration). Networks and the network of
+each cell can also be set on the dashboard page **Roaming / Cells** ("Networks" card and the
+"Network" column of the location areas card); the first network added there turns `[net_info]`
+and `[brew]` into the network `home`.
+
 ## Not yet
 
 - Routing by the radio's *home* network on a single carrier (a migrating radio presents its home
   MNI in U-LOCATION UPDATE DEMAND). Today a cell serves one network and a radio reaches another
   network by moving to that network's cell. Home-MNI routing is the natural next step on top of
   this and would also need migration enabled on the cell and in the radios' codeplugs.
-- Passing a radio's network to the core over Brew, so a dispatch console can see which network a
-  radio belongs to.
+- Passing a radio's network to a core of the network's own (`brew`); with `via` and a brew-server
+  that offers `mni` the server is told (see above).
+- A network reached `via` with more than one cell announces only its home cell in
+  `SERVICE_BTS_INFO`.
 - On-air validation: this has been exercised in unit and integration tests only. The first live
   check is two carriers on different MNIs, a radio with both networks programmed, and switching
   networks on the radio while the Cells card shows which cell it registers on.
