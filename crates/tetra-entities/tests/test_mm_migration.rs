@@ -337,3 +337,68 @@ fn test_simulation_ten_stations_twenty_five_radios() {
         assert_eq!(test.config.state_read().subscribers.attached_groups_of(2_320_000 + u32::from(station) * 100 + 2), vec![9]);
     }
 }
+
+/// With a Brew server that offers `mni` a visitor's network has to be in the server's list and
+/// up (its `SERVICE_NETWORKS`); `networks` in the config, when set, still has to list it.
+#[test]
+fn test_migration_follows_the_server_network_list() {
+    debug::setup_logging_verbose();
+    use tetra_config::bluestation::BrewNetwork;
+    let set = |test: &mut ComponentTest, up: bool| {
+        test.config.state_write().multi_network.server = Some((OWN, vec![BrewNetwork { mni: HOME, name: "Home".into(), up }]));
+    };
+    let first = |test: &mut ComponentTest, issi: u32| {
+        submit_demand(test, ussi(issi), demand(LocationUpdateType::MigratingLocationUpdating, None, Some(HOME), vec![]));
+        let msgs = test.dump_sinks();
+        downlink(&msgs, MmPduTypeDl::DLocationUpdateProceeding).is_some()
+    };
+    let mut test = mm_test(multi_network_config(0));
+    set(&mut test, false);
+    assert!(!first(&mut test, 1), "home network down at the server: refused");
+    set(&mut test, true);
+    assert!(first(&mut test, 2));
+
+    let mut config = multi_network_config(0);
+    config.multi_network.networks.clear();
+    let mut test = mm_test(config.clone());
+    assert!(!first(&mut test, 3), "no list anywhere: refused");
+    set(&mut test, true);
+    assert!(first(&mut test, 4), "the server's list is enough");
+
+    config.multi_network.networks = vec![OTHER];
+    let mut test = mm_test(config);
+    set(&mut test, true);
+    assert!(!first(&mut test, 5), "not in the configured list");
+}
+
+/// A visitor is visible to the Brew side (shared state) once its second demand passes, and
+/// leaves it when it detaches.
+#[test]
+fn test_visitor_is_shared_with_the_brew_side_until_it_detaches() {
+    debug::setup_logging_verbose();
+    let mut test = mm_test(multi_network_config(0));
+    let (vassi, accept) = migrate(&mut test, 2320972, vec![home_group(9)]);
+    let vgssi = accept.group_identity_location_accept.unwrap().group_identity_downlink.unwrap()[0].vgssi.unwrap();
+    {
+        let st = test.config.state_read();
+        assert_eq!(st.multi_network.visitors.get(&vassi), Some(&(HOME, 2320972)));
+        assert_eq!(st.multi_network.groups.get(&vgssi), Some(&(HOME, 9)));
+    }
+    let detach = tetra_pdus::mm::pdus::u_itsi_detach::UItsiDetach { address_extension: None, proprietary: None };
+    submit(&mut test, TetraAddress::issi(vassi), |b| detach.to_bitbuf(b).expect("serialize"));
+    assert!(test.config.state_read().multi_network.visitors.get(&vassi).is_none());
+}
+
+/// A (V)ASSI this station never gave (the visitor came from another station or cell, or the
+/// station restarted) is not taken for a radio of this network: "ITSI/ATSI unknown" makes it
+/// invalid in the MS (clause 16.4.7.3).
+#[test]
+fn test_unknown_vassi_is_rejected() {
+    debug::setup_logging_verbose();
+    let mut test = mm_test(multi_network_config(0));
+    let stranger = DEFAULT_VASSI_RANGE.0 + 9;
+    submit_demand(&mut test, TetraAddress::issi(stranger), demand(LocationUpdateType::RoamingLocationUpdating, None, None, vec![]));
+    let msgs = test.dump_sinks();
+    assert_eq!(reject_cause(&msgs).map(|r| r.1), Some(RejectCause::ItsiAtsiUnknown as u8));
+    assert!(!test.config.state_read().subscribers.is_registered(stranger));
+}

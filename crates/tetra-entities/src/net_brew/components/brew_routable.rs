@@ -51,14 +51,6 @@ fn is_pbx_gateway_issi(config: &SharedConfig, issi: u32) -> bool {
 }
 
 /// Determine if a given GSSI should be routed over Brew, or is restricted to local handling
-/// A (V)ASSI or (V)GSSI of Multi Network (TS 100 392-2 clauses 16.4.7.1, 16.8.7): valid only in
-/// this station, never an identity of the Brew network. Visitors stay local until the station
-/// tells the server their home identities.
-fn is_visitor_ssi(config: &SharedConfig, ssi: u32) -> bool {
-    let cfg = config.config();
-    cfg.multi_network.is_vassi(ssi) || cfg.multi_network.is_vgssi(ssi)
-}
-
 pub fn is_brew_gssi_routable(config: &SharedConfig, ssi: u32) -> bool {
     let Some(brew_config) = &config.config().brew else {
         // Brew not configured, so no routing to Brew
@@ -66,9 +58,6 @@ pub fn is_brew_gssi_routable(config: &SharedConfig, ssi: u32) -> bool {
     };
     if config.config().cell.local_ssi_ranges.contains(ssi) {
         // Range overridden as local
-        return false;
-    }
-    if is_visitor_ssi(config, ssi) {
         return false;
     }
 
@@ -178,9 +167,6 @@ pub fn is_brew_issi_routable(config: &SharedConfig, issi: u32) -> bool {
     if config.config().brew.is_none() {
         return false;
     }
-    if is_visitor_ssi(config, issi) {
-        return false;
-    }
     if is_tetrapack(config) {
         // 7-digit subscriber ISSIs are always routable.
         // Short ISSIs (< 1_000_000) are service numbers handled by TetraPack Core —
@@ -228,22 +214,6 @@ password = ""
             extra_cell
         );
         SharedConfig::from_parts(from_toml_str(&toml).expect("test config parses"), None)
-    }
-
-    /// (V)ASSIs and (V)GSSIs exist only in this station (TS 100 392-2 clauses 16.4.7.1, 16.8.7):
-    /// nothing of a visitor reaches the Brew network under them.
-    #[test]
-    fn visitor_identities_are_not_brew_routable() {
-        let cfg = shared_config("migration = true\n\n[multi_network]\nenabled = true\nnetworks = [{ mcc = 901, mnc = 1234 }]");
-        let vassi = tetra_config::bluestation::DEFAULT_VASSI_RANGE.0;
-        let vgssi = tetra_config::bluestation::DEFAULT_VGSSI_RANGE.1;
-        assert!(!is_brew_issi_routable(&cfg, vassi));
-        assert!(!is_brew_gssi_routable(&cfg, vgssi));
-        assert!(is_brew_issi_routable(&cfg, 2320972));
-        assert!(is_brew_gssi_routable(&cfg, 2_000_000));
-        assert!(is_brew_gssi_routable(&shared_config(""), vgssi));
-        // Off: the ranges mean nothing special.
-        assert!(is_brew_issi_routable(&shared_config(""), vassi));
     }
 
     #[test]

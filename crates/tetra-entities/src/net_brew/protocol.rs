@@ -1,6 +1,6 @@
 //! Brew protocol binary message parsing and serialization (2-byte [kind, type] prefix, little-endian)
 
-use tetra_config::bluestation::{BrewDirectoryCell, BrewDirectoryNeighbour, BrewGroupAccess};
+use tetra_config::bluestation::{BrewDirectoryCell, BrewDirectoryNeighbour, BrewGroupAccess, BrewNetwork, Mni};
 use tetra_saps::control::call_control::{CellReselection, HandedOffCall, NetworkRestoredCall};
 use uuid::Uuid;
 
@@ -924,6 +924,98 @@ pub fn parse_group_access(json_data: &str) -> Result<std::collections::BTreeMap<
         }
     }
     Ok(out)
+}
+
+// ── Multi Network (`mni`, brew-server docs/Brew-Extensions.md section 12b) ──
+
+/// Server -> station: the server's own network and the networks it reaches, with up/down
+pub const BREW_SERVICE_NETWORKS: u8 = 0x20;
+/// Station -> server: the home network of a visiting radio, before its `SUB_REGISTER`
+pub const BREW_SERVICE_MS_NETWORK: u8 = 0x21;
+/// Station -> server: groups of a radio that are not in the radio's own network
+pub const BREW_SERVICE_GROUP_NETWORK: u8 = 0x22;
+/// Both ways: the network of a call's group, or of the calling / called party, before the call
+pub const BREW_SERVICE_CALL_NETWORK: u8 = 0x23;
+/// Brew extension a server offers (`X-Brew-Extensions`) when it takes radios of other networks;
+/// the station names it in its `SERVICE_BTS_INFO` capabilities
+pub const BREW_EXT_MNI: &str = "mni";
+
+fn mni_json(mni: Mni) -> serde_json::Value {
+    serde_json::json!({ "mcc": mni.mcc, "mnc": mni.mnc })
+}
+
+/// `{"issi":2320972,"mcc":901,"mnc":1234}`: `issi` is the radio's home ISSI, not its (V)ASSI.
+pub fn build_service_ms_network(issi: u32, mni: Mni) -> Vec<u8> {
+    service_json(BREW_SERVICE_MS_NETWORK, serde_json::json!({ "issi": issi, "mcc": mni.mcc, "mnc": mni.mnc }))
+}
+
+/// `{"issi":2320972,"groups":[{"gssi":9,"mcc":901,"mnc":9999}]}`
+pub fn build_service_group_network(issi: u32, groups: &[(u32, Mni)]) -> Vec<u8> {
+    let groups: Vec<serde_json::Value> = groups
+        .iter()
+        .map(|(gssi, m)| serde_json::json!({ "gssi": gssi, "mcc": m.mcc, "mnc": m.mnc }))
+        .collect();
+    service_json(BREW_SERVICE_GROUP_NETWORK, serde_json::json!({ "issi": issi, "groups": groups }))
+}
+
+/// `{"uuid":"…","group":{"gssi":909,"mcc":901,"mnc":1234}}`
+pub fn build_service_call_network_group(uuid: &Uuid, gssi: u32, mni: Mni) -> Vec<u8> {
+    service_json(BREW_SERVICE_CALL_NETWORK, serde_json::json!({ "uuid": uuid.to_string(), "group": { "gssi": gssi, "mcc": mni.mcc, "mnc": mni.mnc } }),
+    )
+}
+
+/// `{"uuid":"…","calling":{…},"called":{…}}`, each only when given.
+pub fn build_service_call_network_parties(uuid: &Uuid, calling: Option<Mni>, called: Option<Mni>) -> Vec<u8> {
+    let mut v = serde_json::json!({ "uuid": uuid.to_string() });
+    if let Some(m) = calling {
+        v["calling"] = mni_json(m);
+    }
+    if let Some(m) = called {
+        v["called"] = mni_json(m);
+    }
+    service_json(BREW_SERVICE_CALL_NETWORK, v)
+}
+
+fn parse_mni(v: &serde_json::Value) -> Result<Mni, String> {
+    let mcc = json_uint(v, "mcc", 0x3ff)? as u16;
+    let mnc = json_uint(v, "mnc", 0x3fff)? as u16;
+    Ok(Mni { mcc, mnc })
+}
+
+/// `SERVICE_NETWORKS`: (this server's network, the networks it reaches). A malformed network
+/// entry is left out.
+pub fn parse_networks(json_data: &str) -> Result<(Mni, Vec<BrewNetwork>), String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    let this = parse_mni(json.get("this").ok_or("no this")?)?;
+    let mut out = Vec::new();
+    for n in json.get("networks").and_then(|n| n.as_array()).map(|a| a.as_slice()).unwrap_or_default().iter().take(64) {
+        let Ok(mni) = parse_mni(n) else { continue };
+        let name = n.get("name").and_then(|v| v.as_str()).unwrap_or_default().chars().take(64).collect();
+        let up = n.get("up").and_then(|v| v.as_bool()).unwrap_or(false);
+        out.push(BrewNetwork { mni, name, up });
+    }
+    Ok((this, out))
+}
+
+/// A parsed `SERVICE_CALL_NETWORK`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BrewCallNetwork {
+    pub group: Option<(u32, Mni)>,
+    pub calling: Option<Mni>,
+    pub called: Option<Mni>,
+}
+
+pub fn parse_call_network(json_data: &str) -> Result<(Uuid, BrewCallNetwork), String> {
+    let json: serde_json::Value = serde_json::from_str(json_data).map_err(|e| e.to_string())?;
+    let uuid = json.get("uuid").and_then(|v| v.as_str()).ok_or("no uuid")?;
+    let uuid = Uuid::parse_str(uuid).map_err(|e| e.to_string())?;
+    let group = match json.get("group") {
+        Some(g) => Some((json_uint(g, "gssi", 0xff_ffff)? as u32, parse_mni(g)?)),
+        None => None,
+    };
+    let calling = json.get("calling").map(parse_mni).transpose()?;
+    let called = json.get("called").map(parse_mni).transpose()?;
+    Ok((uuid, BrewCallNetwork { group, calling, called }))
 }
 
 /// Service type reporting the cell (carrier) a radio registered on (brew-server)

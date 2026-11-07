@@ -116,6 +116,37 @@ pub fn apply_multi_network_patch(dto: CfgMultiNetworkDto) -> CfgMultiNetwork {
     }
 }
 
+/// A network the Brew server can reach (`SERVICE_NETWORKS`, Brew extension `mni`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrewNetwork {
+    pub mni: Mni,
+    pub name: String,
+    pub up: bool,
+}
+
+/// Multi Network state shared by MM (writes) and the Brew worker (reads): who the visitors are,
+/// which home groups the (V)GSSIs stand for, and what the server last said about networks.
+#[derive(Debug, Clone, Default)]
+pub struct MultiNetworkState {
+    /// (V)ASSI -> (home network, home ISSI), registered visitors only.
+    pub visitors: std::collections::HashMap<u32, (Mni, u32)>,
+    /// (V)GSSI -> (home network, home GSSI).
+    pub groups: std::collections::HashMap<u32, (Mni, u32)>,
+    /// The server's own network and the networks it reaches, from the last `SERVICE_NETWORKS`
+    /// of this connection (`None`: none yet, or the server does not offer `mni`).
+    pub server: Option<(Mni, Vec<BrewNetwork>)>,
+}
+
+impl MultiNetworkState {
+    pub fn vassi_of(&self, mni: Mni, issi: u32) -> Option<u32> {
+        self.visitors.iter().find(|(_, v)| **v == (mni, issi)).map(|(k, _)| *k)
+    }
+
+    pub fn vgssi_of(&self, mni: Mni, gssi: u32) -> Option<u32> {
+        self.groups.iter().find(|(_, v)| **v == (mni, gssi)).map(|(k, _)| *k)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

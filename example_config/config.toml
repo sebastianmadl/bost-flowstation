@@ -538,11 +538,13 @@ voice_service = true
 # home groups a (V)GSSI from `vgssi_range` (clauses 16.4.7, 16.8.7). Needs `migration = true` in
 # [cell_info] as well. Off: every migrating radio is refused with "Migration not supported" as
 # before. A radio of this network coming back from another one (case c)) registers as usual.
-# For now visitors work only inside this station: nothing of them goes to Brew yet.
+# With a brew-server that offers the `mni` extension a visitor reaches its home network through
+# the server, and `networks` may stay empty: then every network the server reaches and has up is
+# accepted. Without such a server visitors work only inside this station.
 #
 # [multi_network]
 # enabled = true
-# networks = [{ mcc = 901, mnc = 1234 }]
+# networks = [{ mcc = 901, mnc = 1234 }]   # optional with an `mni` server
 # vassi_range = [15728640, 15794175]   # 0xF00000..0xF0FFFF (default), never an ISSI of this network
 # vgssi_range = [15794176, 15859711]   # 0xF10000..0xF1FFFF (default)
 

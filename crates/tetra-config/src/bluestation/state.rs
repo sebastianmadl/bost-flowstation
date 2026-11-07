@@ -619,6 +619,8 @@ pub struct StackState {
     /// location update for an ISSI whose Brew-routed setup fails (TIP/ETSI interrogation, not
     /// a mass kick). `None` or a past Instant means the soft-recovery window is closed.
     pub brew_soft_recovery_until: Option<std::time::Instant>,
+    /// Multi Network: visitors, their home groups and the server's network list.
+    pub multi_network: super::MultiNetworkState,
     /// Centralized subscriber registry for local-first routing decisions.
     pub subscribers: SubscriberRegistry,
     /// Queue of live SDS messages injected at runtime via the dashboard.
@@ -843,6 +845,7 @@ impl Default for StackState {
             brew_cell_directory: None,
             brew_group_access: BTreeMap::new(),
             brew_soft_recovery_until: None,
+            multi_network: Default::default(),
             subscribers: SubscriberRegistry::new(),
             live_sds_queue: VecDeque::new(),
             next_live_sds_id: 1,

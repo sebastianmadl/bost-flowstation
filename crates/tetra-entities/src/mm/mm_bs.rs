@@ -614,6 +614,7 @@ impl MmBs {
         };
         // Deregistration ends the (V)ASSI (clause 16.4.7.2).
         if let Some(v) = self.visitors.remove(ssi) {
+            self.config.state_write().multi_network.visitors.remove(&ssi);
             tracing::info!("MM: visitor {}:{} detached, (V)ASSI {} released", v.mni, v.issi, ssi);
         }
         self.group_report_requested_at.remove(&ssi);
@@ -699,6 +700,7 @@ impl MmBs {
                     pdu.ssi
                 );
                 self.visitors.remove(issi);
+                self.config.state_write().multi_network.visitors.remove(&issi);
                 Self::send_d_location_update_reject_cause(
                     queue,
                     issi,
@@ -709,6 +711,23 @@ impl MmBs {
                 );
                 return;
             }
+            // Visible to the Brew worker before anything of this radio goes to the network:
+            // there it is the home ISSI (extension `mni`).
+            self.config.state_write().multi_network.visitors.insert(issi, (visitor.mni, visitor.issi));
+        } else if !migrating && self.config.config().multi_network.is_vassi(issi) {
+            // A (V)ASSI this station did not give (another station or cell, or before a restart):
+            // never a radio of this network. "ITSI/ATSI unknown" makes it invalid in the MS
+            // (clause 16.4.7.3), so it has to register again with its own ITSI.
+            tracing::info!("MM: unknown (V)ASSI {} — rejecting with ITSI/ATSI unknown", issi);
+            Self::send_d_location_update_reject_cause(
+                queue,
+                issi,
+                handle,
+                pdu.location_update_type,
+                pdu.address_extension,
+                RejectCause::ItsiAtsiUnknown,
+            );
+            return;
         }
         if migrating && migration == Migration::Refused {
             // Terminal wants to migrate to another network (e.g. SmartConnect).
@@ -1514,6 +1533,7 @@ impl MmBs {
                             tracing::warn!("MM: visitor {} group {}:{} has no (V)GSSI — skipped", issi, mni, gssi);
                             continue;
                         };
+                        self.config.state_write().multi_network.groups.insert(vgssi, (mni, gssi));
                         forms.insert(vgssi, GroupForm::Home { mni, gssi });
                         g.gssi = Some(vgssi);
                         g.address_extension = None;
@@ -2603,10 +2623,18 @@ impl MmBs {
         if mni.mcc == cfg.net.mcc && mni.mnc == cfg.net.mnc {
             return Migration::Home;
         }
-        if mn.networks.contains(&mni) {
+        // With a Brew server that offers `mni` the network has to be one it reaches and that is up
+        // (its `SERVICE_NETWORKS`), and, when `networks` is set, also in that list. Without
+        // such a server only `networks` counts and visitors stay inside this station.
+        let server_ok = match &self.config.state_read().multi_network.server {
+            Some((_, list)) => list.iter().any(|n| n.mni == mni && n.up),
+            None => !mn.networks.is_empty(),
+        };
+        let listed = mn.networks.is_empty() || mn.networks.contains(&mni);
+        if server_ok && listed {
             Migration::Visitor(mni)
         } else {
-            tracing::info!("MM: migration from network {} refused: not in [multi_network] networks", mni);
+            tracing::info!("MM: migration from network {} refused: not a network this station accepts now", mni);
             Migration::Refused
         }
     }
@@ -2645,11 +2673,17 @@ impl MmBs {
             return;
         };
         // The old (V)ASSI became invalid (clause 16.4.7.1): forget the registration on it.
-        if let Some(old) = previous
-            && self.client_mgr.remove_client(old).is_some()
-        {
-            self.config.state_write().subscribers.deregister(old);
-            self.recovery_mark_dirty();
+        if let Some(old) = previous {
+            self.config.state_write().multi_network.visitors.remove(&old);
+            if let Some(client) = self.client_mgr.remove_client(old) {
+                self.config.state_write().subscribers.deregister(old);
+                if !client.groups.is_empty() {
+                    let groups: Vec<u32> = client.groups.iter().copied().collect();
+                    self.emit_subscriber_update(queue, old, groups, BrewSubscriberAction::Deaffiliate);
+                }
+                self.emit_subscriber_update(queue, old, Vec::new(), BrewSubscriberAction::Deregister);
+                self.recovery_mark_dirty();
+            }
         }
         tracing::info!(
             "MM: visitor {}:{} migrating ({:?}) — (V)ASSI {} in D-LOCATION UPDATE PROCEEDING",
