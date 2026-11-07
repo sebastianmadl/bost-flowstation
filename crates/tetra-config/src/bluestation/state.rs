@@ -826,12 +826,24 @@ mod tests {
 impl StackState {
     /// May `issi` attach to `gssi` (Brew server's `group-access` rules; no rule = yes)?
     pub fn group_may_join(&self, gssi: u32, issi: u32) -> bool {
+        let issi = self.group_access_issi(issi);
         self.brew_group_access.get(&gssi).is_none_or(|a| a.may_join(issi))
     }
 
     /// May `issi` talk on `gssi` (Brew server's `group-access` rules; no rule = yes)?
     pub fn group_may_talk(&self, gssi: u32, issi: u32) -> bool {
+        let issi = self.group_access_issi(issi);
         self.brew_group_access.get(&gssi).is_none_or(|a| a.may_talk(issi))
+    }
+
+    /// The ISSI the Brew server's rules name for a radio: a registered visitor whose home is the
+    /// server's own network is listed there under its home ISSI, not its (V)ASSI.
+    pub fn group_access_issi(&self, issi: u32) -> u32 {
+        let server = self.multi_network.server.as_ref().map(|(this, _)| *this);
+        match self.multi_network.visitors.get(&issi) {
+            Some(&(mni, home)) if Some(mni) == server => home,
+            _ => issi,
+        }
     }
 }
 

@@ -1495,12 +1495,19 @@ impl MmBs {
     /// and an MS should not retry a permanently detached group.
     fn group_access_split(&self, issi: u32, giu: Vec<GroupIdentityUplink>) -> (Vec<GroupIdentityUplink>, Vec<GroupIdentityDownlink>) {
         let state = self.config.state_read();
+        // A visitor from the server's own network is named by its home ISSI in the server's
+        // rules; during its registration it is not yet in the shared visitor table.
+        let server = state.multi_network.server.as_ref().map(|(this, _)| *this);
+        let rule_issi = match self.visitors.get(issi) {
+            Some(v) if Some(v.mni) == server => v.issi,
+            _ => issi,
+        };
         let mut refused = Vec::new();
         let admitted = giu
             .into_iter()
             .filter(|g| {
                 let Some(gssi) = g.gssi else { return true };
-                if g.group_identity_detachment_uplink.is_some() || state.group_may_join(gssi, issi) {
+                if g.group_identity_detachment_uplink.is_some() || state.group_may_join(gssi, rule_issi) {
                     return true;
                 }
                 tracing::info!("MM: ISSI {} may not attach GSSI {} (group-access), refused", issi, gssi);

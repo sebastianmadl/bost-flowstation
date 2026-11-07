@@ -460,3 +460,31 @@ fn test_non_migrating_update_of_another_network_is_rejected() {
     );
     assert!(downlink(&test.dump_sinks(), MmPduTypeDl::DLocationUpdateAccept).is_some());
 }
+
+/// The Brew server's group-access rules name a radio of its own network by its home ISSI: a
+/// radio of that network that migrated onto a cell of another network is checked under that
+/// ISSI, not its (V)ASSI, when it attaches and when it talks.
+#[test]
+fn test_group_access_checks_a_migrated_radio_of_the_servers_network_by_its_home_issi() {
+    use tetra_config::bluestation::BrewGroupAccess;
+    debug::setup_logging_verbose();
+    const RADIO: u32 = 2320972;
+    const GSSI: u32 = 2326406;
+    let mut config = multi_network_config(0);
+    config.multi_network.networks.clear();
+    let mut test = mm_test(config);
+    {
+        let mut state = test.config.state_write();
+        state.multi_network.server = Some((HOME, vec![]));
+        state.brew_group_access.insert(GSSI, BrewGroupAccess { gssi: GSSI, issis: vec![RADIO], ..Default::default() });
+    }
+    let (vassi, accept) = migrate(&mut test, RADIO, vec![own_group(GSSI)]);
+    let groups = accept.group_identity_location_accept.expect("groups answered").group_identity_downlink.unwrap_or_default();
+    assert!(
+        groups.iter().all(|g| g.group_identity_detachment_uplink.is_none()),
+        "the group is not refused: {groups:?}"
+    );
+    let state = test.config.state_read();
+    assert!(state.group_may_talk(GSSI, vassi) && state.group_may_join(GSSI, vassi), "checked by its home ISSI");
+    assert!(!state.group_may_join(GSSI, 4013), "others stay refused");
+}
