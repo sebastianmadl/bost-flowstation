@@ -359,7 +359,7 @@ The server side and the Brew messages are documented in brew-server: `docs/Hando
 
 ## Multi Network: radios of other networks
 
-> **Status:** tested on air 2026-11-07 (Motorola MTP6650, a 901/1638 `via` cell next to a 901/9999 cell, brew-server linked to TetraPack): a radio of the server's own network migrating onto the `via` cell, the same radio registered as a TetraPack radio (ITSI attach) and seen at the server as a visitor, group calls in TetraPack / Brandmeister groups, and duplex calls and SDS across the networks. **Not yet validated on air:** migration of a radio whose home is a third network (neither the cell's nor the server's).
+> **Status:** tested on air 2026-11-07 (Motorola MTP6650, a 901/1638 `via` cell next to a 901/9999 cell, brew-server linked to TetraPack): a radio of the server's own network migrating onto the `via` cell, the same radio registered as a TetraPack radio (ITSI attach) and seen at the server as a visitor, group calls in TetraPack / Brandmeister groups, and duplex calls and SDS across the networks. Also on air: a radio whose home is a third network linked to the server (901/1234) migrating onto the station, and the refusal of a home network the server does not have up.
 
 Switching networks by cell: one radio with one home identity (e.g. 901/9999) talks in this server's network on a 9999 cell and in TetraPack / Brandmeister groups on a 901/1638 `via` cell, where it migrates; bridged groups work on both. Table and radio settings in [`Docs/networks.md`](Docs/networks.md).
 
