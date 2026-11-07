@@ -287,8 +287,10 @@ fn bts_info_message(config: &StackConfig, server_extensions: &[String]) -> Optio
         return None;
     }
     let directory = server_extensions.iter().any(|e| e == BREW_EXT_CELL_DIRECTORY);
+    // Cells of another network (own `[cells.net_info]`) announce themselves on their own
+    // connection.
     let cells: Vec<BrewBtsCell> = config
-        .cells()
+        .cells_of_station_network()
         .into_iter()
         .filter_map(|(id, cell, _)| {
             let carrier_ext = tetra_config::bluestation::carrier_band_plan(cell)?;
@@ -476,7 +478,21 @@ impl<T: NetworkTransport> BrewWorker<T> {
         self.config.config().multi_network.enabled && self.transport.server_brew_extensions().iter().any(|e| e == BREW_EXT_MNI)
     }
 
-    /// The home identity of a visitor's (V)ASSI.
+    /// The network this connection's cell broadcasts, when it is not the server's own (a cell
+    /// with its own `[cells.net_info]`, or a whole station of another network): its radios and
+    /// groups are that network's, and the server is told so (`mni`). `None` until the server
+    /// named its network (`SERVICE_NETWORKS`), or when it is the same.
+    fn mni_station_network(&self) -> Option<Mni> {
+        if !self.config.config().multi_network.enabled {
+            return None;
+        }
+        let own = self.own_mni();
+        let server = self.config.state_read().multi_network.server.as_ref().map(|(this, _)| *this)?;
+        (own != server).then_some(own)
+    }
+
+    /// The home identity of a visitor's (V)ASSI; on a cell of another network than the
+    /// server's, every radio is that network's under its own ISSI.
     fn mni_visitor(&self, ssi: u32) -> Option<(Mni, u32)> {
         if !self.config.config().multi_network.enabled {
             return None;
@@ -488,14 +504,22 @@ impl<T: NetworkTransport> BrewWorker<T> {
             .get(&ssi)
             .copied()
             .or_else(|| self.mni_visitors.get(&ssi).copied())
+            .or_else(|| self.mni_station_network().map(|n| (n, ssi)))
     }
 
-    /// The home group behind a (V)GSSI.
+    /// The home group behind a (V)GSSI; on a cell of another network than the server's, every
+    /// group is that network's under its own GSSI.
     fn mni_home_group(&self, gssi: u32) -> Option<(Mni, u32)> {
         if !self.config.config().multi_network.enabled {
             return None;
         }
-        self.config.state_read().multi_network.groups.get(&gssi).copied()
+        self.config
+            .state_read()
+            .multi_network
+            .groups
+            .get(&gssi)
+            .copied()
+            .or_else(|| self.mni_station_network().map(|n| (n, gssi)))
     }
 
     fn own_mni(&self) -> Mni {
@@ -540,6 +564,35 @@ impl<T: NetworkTransport> BrewWorker<T> {
             }
         }
         (out, foreign)
+    }
+
+    /// This cell turned out to be of another network than the server's: radios registered
+    /// before that are moved over to it (deregistered as the server's, registered again as
+    /// that network's with their groups).
+    fn mni_reannounce_station(&mut self, net: Mni) {
+        let state = self.config.state_read();
+        let local: Vec<(u32, Vec<u32>)> = self
+            .subscriber_groups
+            .iter()
+            .filter(|(issi, _)| !state.multi_network.visitors.contains_key(*issi) && !self.mni_visitors.contains_key(*issi))
+            .map(|(issi, groups)| {
+                let mut g: Vec<u32> = groups.iter().copied().collect();
+                g.sort_unstable();
+                (*issi, g)
+            })
+            .collect();
+        drop(state);
+        if !local.is_empty() {
+            tracing::info!("BrewWorker: cell of network {}: {} radios registered again under it", net, local.len());
+        }
+        for (issi, groups) in local {
+            self.send_logged(&build_subscriber_deregister(issi), "deregistration");
+            self.send_logged(&build_service_ms_network(issi, net), "MS network");
+            self.send_logged(&build_subscriber_register(issi, &[]), "registration");
+            if !groups.is_empty() {
+                self.send_logged(&build_subscriber_affiliate(issi, &groups), "affiliation");
+            }
+        }
     }
 
     fn mni_prune(&mut self) {
@@ -891,7 +944,9 @@ impl<T: NetworkTransport> BrewWorker<T> {
                                 if !self.mni_on() {
                                     continue;
                                 }
-                                self.send_logged(&build_service_call_network_parties(&uuid, Some(mni), None), "call network");
+                                // On a cell of another network an ISSI without network is one of it.
+                                let called = self.mni_station_network();
+                                self.send_logged(&build_service_call_network_parties(&uuid, Some(mni), called), "call network");
                                 home
                             }
                             None => source,
@@ -930,7 +985,8 @@ impl<T: NetworkTransport> BrewWorker<T> {
                                 self.mni_local_calls.insert(uuid);
                                 continue;
                             }
-                            self.send_logged(&build_service_call_network_parties(&uuid, Some(mni), None), "call network");
+                            let called = self.mni_station_network();
+                            self.send_logged(&build_service_call_network_parties(&uuid, Some(mni), called), "call network");
                             call.source = home;
                         }
                         let data = build_setup_request(&uuid, &call);
@@ -1233,7 +1289,13 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         this,
                         networks.iter().map(|n| format!("{} {} {}", n.name, n.mni, if n.up { "up" } else { "down" })).collect::<Vec<_>>()
                     );
+                    let before = self.mni_station_network();
                     self.config.state_write().multi_network.server = Some((this, networks));
+                    if before.is_none() {
+                        if let Some(net) = self.mni_station_network() {
+                            self.mni_reannounce_station(net);
+                        }
+                    }
                 }
                 Err(e) => tracing::warn!("BrewWorker: malformed networks message: {}", e),
             },
@@ -1275,6 +1337,8 @@ impl<T: NetworkTransport> BrewWorker<T> {
             tracing::warn!("BrewWorker: call network names group {} but GROUP_TX {} is on {}", g, uuid, gssi);
         }
         let vgssi = self.config.state_read().multi_network.vgssi_of(mni, g);
+        // A group of the network this cell broadcasts keeps its GSSI.
+        let vgssi = vgssi.or_else(|| (self.mni_station_network() == Some(mni)).then_some(g));
         match vgssi {
             Some(v) => {
                 tracing::info!("BrewWorker: call {} on group {}:{} = (V)GSSI {}", uuid, mni, g, v);
@@ -1300,6 +1364,8 @@ impl<T: NetworkTransport> BrewWorker<T> {
         }
         let mni = note.called?;
         let vassi = self.config.state_read().multi_network.vassi_of(mni, called);
+        // A radio of the network this cell broadcasts keeps its ISSI.
+        let vassi = vassi.or_else(|| (self.mni_station_network() == Some(mni)).then_some(called));
         if vassi.is_none() {
             tracing::info!("BrewWorker: call {} to {}:{}: no such visitor here, dropped", uuid, mni, called);
         }
@@ -1736,6 +1802,102 @@ mod tests {
         assert!(bts_info_message(&w.config.config(), &["bts-info".to_string()]).is_some_and(|m| !String::from_utf8_lossy(&m).contains("\"mni\"")));
         let offered = bts_info_message(&w.config.config(), &["bts-info".to_string(), BREW_EXT_MNI.to_string()]).unwrap();
         assert!(String::from_utf8_lossy(&offered).contains("\"mni\""), "capability only where offered");
+    }
+
+    fn networks_message(this: Mni) -> Vec<u8> {
+        let networks = serde_json::json!({ "this": { "mcc": this.mcc, "mnc": this.mnc }, "networks": [] });
+        let mut svc = vec![BREW_CLASS_SERVICE, BREW_SERVICE_NETWORKS];
+        svc.extend_from_slice(networks.to_string().as_bytes());
+        svc.push(0);
+        svc
+    }
+
+    /// A cell of another network than the server's (own `[cells.net_info]`, here the test
+    /// station's 232/5 against a server of 901/9999): every radio and group is that network's.
+    /// Radios registered before the server named its network are moved over; calls, SDS and
+    /// affiliations are named with it; calls from the server keep their ISSI / GSSI.
+    #[test]
+    fn cell_of_another_network_names_its_radios_and_groups_with_it() {
+        const OWN: Mni = Mni { mcc: 232, mnc: 5 };
+        let cfg = config("\n[multi_network]\nenabled = true\n");
+        let (event_tx, rx) = bounded(64);
+        let (tx, command_rx) = bounded(64);
+        let mut w = BrewWorker::new(cfg, event_tx, command_rx, MockTransport::new().with_brew_extensions(&["bts-info", BREW_EXT_MNI]));
+        w.transport.connect().unwrap();
+        // Registered before the server named its network: plain.
+        tx.send(BrewCommand::RegisterSubscriber { issi: 2320971 }).unwrap();
+        tx.send(BrewCommand::AffiliateGroups { issi: 2320971, groups: vec![9] }).unwrap();
+        tx.send(BrewCommand::Disconnect).unwrap();
+        w.message_loop().unwrap();
+        w.transport.connect().unwrap();
+        let before = w.transport.sent_payloads().len();
+        w.handle_incoming_binary(&networks_message(Mni { mcc: 901, mnc: 9999 }));
+        let moved = w.transport.sent_payloads()[before..].to_vec();
+        assert_eq!(moved[0][..6], build_subscriber_deregister(2320971)[..6]);
+        assert_eq!(service_body(&moved[1]), serde_json::json!({ "issi": 2320971, "mcc": 232, "mnc": 5 }));
+        assert_eq!(moved[2][..6], build_subscriber_register(2320971, &[])[..6]);
+        let aff = build_subscriber_affiliate(2320971, &[9]);
+        assert_eq!((&moved[3][..6], &moved[3][18..]), (&aff[..6], &aff[18..]));
+
+        let uuid = Uuid::new_v4();
+        let sds = Uuid::new_v4();
+        let start = w.transport.sent_payloads().len();
+        for c in [
+            BrewCommand::RegisterSubscriber { issi: 2320972 },
+            BrewCommand::AffiliateGroups { issi: 2320972, groups: vec![9] },
+            BrewCommand::SendGroupTx { uuid, source_issi: 2320972, dest_gssi: 9, priority: 0, service: 0 },
+            BrewCommand::SendSds { uuid: sds, source: 2320972, destination: 200999, data: vec![1, 2], length_bits: 16 },
+        ] {
+            tx.send(c).unwrap();
+        }
+        tx.send(BrewCommand::Disconnect).unwrap();
+        w.message_loop().unwrap();
+        let sent = w.transport.sent_payloads()[start..].to_vec();
+        assert_eq!(service_body(&sent[0]), serde_json::json!({ "issi": 2320972, "mcc": 232, "mnc": 5 }));
+        assert_eq!(sent[1][..6], build_subscriber_register(2320972, &[])[..6]);
+        let aff = build_subscriber_affiliate(2320972, &[9]);
+        assert_eq!((&sent[2][..6], &sent[2][18..]), (&aff[..6], &aff[18..]), "its groups are its network's: no group network");
+        assert_eq!(service_body(&sent[3])["group"], serde_json::json!({ "gssi": 9, "mcc": 232, "mnc": 5 }));
+        assert_eq!(sent[4], build_group_tx(&uuid, 2320972, 9, 0, 0, None));
+        let parties = service_body(&sent[5]);
+        assert_eq!(parties["calling"], serde_json::json!({ "mcc": 232, "mnc": 5 }));
+        assert_eq!(parties["called"], serde_json::json!({ "mcc": 232, "mnc": 5 }), "an ISSI without network is one of this cell's");
+
+        // From the server: a call of this network's group and to radio 2320972 keep their ids
+        // (2_000_009: GSSI 9 is a local-only range in the test config).
+        let call = Uuid::new_v4();
+        w.handle_incoming_binary(&build_service_call_network_group(&call, 2_000_009, OWN));
+        w.handle_incoming_binary(&build_group_tx(&call, 5551234, 2_000_009, 0, 0, None));
+        let individual = Uuid::new_v4();
+        w.handle_incoming_binary(&build_service_call_network_parties(&individual, Some(Mni { mcc: 901, mnc: 9999 }), Some(OWN)));
+        let c = BrewCircularCall {
+            source: 200999, destination: 2320972, number: String::new(), priority: 0, service: 0, mode: 0, duplex: 1,
+            method: 0, communication: 0, grant: 0, permission: 0, timeout: 0, ownership: 0, queued: 0, mnemonic: None,
+        };
+        w.handle_incoming_binary(&build_setup_request(&individual, &c));
+        let (mut groups, mut called) = (Vec::new(), Vec::new());
+        while let Ok(e) = rx.try_recv() {
+            match e {
+                BrewEvent::GroupCallStart { dest_gssi, .. } => groups.push(dest_gssi),
+                BrewEvent::CircuitSetupRequest { call, .. } => called.push(call.destination),
+                _ => {}
+            }
+        }
+        assert_eq!(groups, vec![2_000_009]);
+        assert_eq!(called, vec![2320972]);
+    }
+
+    /// The server's own network: nothing changes (no network messages for own radios).
+    #[test]
+    fn cell_of_the_servers_network_sends_no_network_messages() {
+        let cfg = config("\n[multi_network]\nenabled = true\n");
+        let (event_tx, _rx) = bounded(64);
+        let (tx, command_rx) = bounded(64);
+        let mut w = BrewWorker::new(cfg, event_tx, command_rx, MockTransport::new().with_brew_extensions(&["bts-info", BREW_EXT_MNI]));
+        w.transport.connect().unwrap();
+        w.handle_incoming_binary(&networks_message(Mni { mcc: 232, mnc: 5 }));
+        let sent = run(&mut w, &tx, vec![BrewCommand::RegisterSubscriber { issi: 2320972 }]);
+        assert!(sent.iter().all(|m| !(m[0] == BREW_CLASS_SERVICE && m[1] == BREW_SERVICE_MS_NETWORK)));
     }
 
     /// From the server: the network list is kept, a group call of the visitor's home group comes

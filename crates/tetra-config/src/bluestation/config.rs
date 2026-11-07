@@ -216,7 +216,9 @@ impl StackConfig {
 
     /// All cells, primary first then `[[cells]]` in config order: (id, cell parameters, SDR settings).
     pub fn cells(&self) -> Vec<(CellId, &CfgCellInfo, Option<&CfgSoapySdr>)> {
-        let mut v = vec![(CellId::PRIMARY, &self.cell, self.phy_io.soapysdr.as_ref())];
+        // `cell_id` is the primary's id in the station config and the cell's own id in a config
+        // from `for_extra_cell` (which holds just that cell).
+        let mut v = vec![(self.cell_id, &self.cell, self.phy_io.soapysdr.as_ref())];
         v.extend(self.extra_cells.iter().map(|c| (c.id, &c.cell, c.soapysdr.as_ref())));
         v
     }
@@ -227,16 +229,27 @@ impl StackConfig {
     /// and, when the cells are linked, `asterisk` are kept so the cell's CMCE still routes network
     /// traffic; in the cell's router those slots are links to the primary's entities, not second
     /// connections. WX runs on every cell (each answers its own radios' requests).
+    ///
+    /// A cell of another network (see [`StackConfig::has_own_network`]) broadcasts that network
+    /// and stands alone: it is not linked to the other cells and its `brew` is its own connection.
     pub fn for_extra_cell(&self, id: CellId) -> Option<StackConfig> {
         let extra = self.extra_cells.iter().find(|c| c.id == id)?;
+        let own_network = self.has_own_network(extra);
         let mut cfg = self.clone();
         cfg.cell = extra.cell.clone();
         cfg.phy_io.soapysdr = extra.soapysdr.clone();
-        cfg.site_linked = self.is_site_linked();
-        cfg.station_carriers = self.cells().iter().map(|(_, c, _)| c.main_carrier).collect();
+        if let Some(net) = extra.net {
+            cfg.net = net;
+        }
+        cfg.site_linked = !own_network && self.is_site_linked();
+        cfg.station_carriers = if own_network {
+            vec![extra.cell.main_carrier]
+        } else {
+            self.cells_of_station_network().iter().map(|(_, c, _)| c.main_carrier).collect()
+        };
         cfg.cell_id = id;
         cfg.extra_cells = Vec::new();
-        cfg.asterisk.enabled = self.asterisk.enabled && self.is_site_linked();
+        cfg.asterisk.enabled = self.asterisk.enabled && cfg.site_linked;
         cfg.dapnet.enabled = false;
         cfg.geoalarm.enabled = false;
         cfg.tpg2200_action.enabled = false;
@@ -260,10 +273,17 @@ impl StackConfig {
         if self.extra_cells.is_empty() {
             return;
         }
-        let siblings: Vec<CfgCellInfo> = self.cells().iter().map(|(_, c, _)| (*c).clone()).collect();
-        let lists = std::iter::once(&mut self.cell).chain(self.extra_cells.iter_mut().map(|c| &mut c.cell));
-        for cell in lists {
-            for sibling in &siblings {
+        // Only siblings of the same network: a cell of another network (own `[cells.net_info]`)
+        // is no reselection target for this cell's radios (that would be migration).
+        let station = self.net;
+        let siblings: Vec<(CfgNetInfo, CfgCellInfo)> = self.cells().iter().map(|(id, c, _)| (self.network_of(*id), (*c).clone())).collect();
+        let lists = std::iter::once((station, &mut self.cell))
+            .chain(self.extra_cells.iter_mut().map(|c| (c.net.unwrap_or(station), &mut c.cell)));
+        for (net, cell) in lists {
+            for (sibling_net, sibling) in &siblings {
+                if *sibling_net != net {
+                    continue;
+                }
                 let carrier = sibling.main_carrier;
                 if carrier == cell.main_carrier
                     || cell.neighbor_cells_ca.len() >= 7
@@ -310,7 +330,7 @@ impl StackConfig {
     /// True when `carrier` is the main carrier of a cell of this station (this one or a sibling).
     /// A neighbour on any other carrier belongs to another station.
     pub fn is_station_carrier(&self, carrier: u16) -> bool {
-        self.cells().iter().any(|(_, c, _)| c.main_carrier == carrier) || self.station_carriers.contains(&carrier)
+        self.cells_of_station_network().iter().any(|(_, c, _)| c.main_carrier == carrier) || self.station_carriers.contains(&carrier)
     }
 
     /// True when a network link (Brew, or enabled LST Dispatch) is configured.
@@ -321,8 +341,26 @@ impl StackConfig {
     /// True when this stack is one cell of a multi-cell station whose cells are linked through
     /// the site switch. The stack then reports every registration, group floor and call to its
     /// network slot (the switch applies the Brew routing rules before the real network sees it).
+    /// Cells of another network (own `[cells.net_info]`) are never linked.
     pub fn is_site_linked(&self) -> bool {
-        self.site_linked || (!self.extra_cells.is_empty() && self.has_network_link())
+        self.site_linked || (self.extra_cells.iter().any(|c| !self.has_own_network(c)) && self.has_network_link())
+    }
+
+    /// True when `cell` broadcasts a network other than the station's `[net_info]`.
+    pub fn has_own_network(&self, cell: &CfgExtraCell) -> bool {
+        cell.net.is_some_and(|n| n != self.net)
+    }
+
+    /// The network a cell of this station broadcasts.
+    pub fn network_of(&self, id: CellId) -> CfgNetInfo {
+        self.extra_cells.iter().find(|c| c.id == id).and_then(|c| c.net).unwrap_or(self.net)
+    }
+
+    /// The cells that broadcast the station's network (the primary and every `[[cells]]` entry
+    /// without a network of its own): the cells that are linked with each other.
+    pub fn cells_of_station_network(&self) -> Vec<(CellId, &CfgCellInfo, Option<&CfgSoapySdr>)> {
+        let own: Vec<CellId> = self.extra_cells.iter().filter(|c| self.has_own_network(c)).map(|c| c.id).collect();
+        self.cells().into_iter().filter(|(id, _, _)| !own.contains(id)).collect()
     }
 
     /// Validate that all required configuration fields are properly set.
@@ -410,6 +448,11 @@ impl StackConfig {
             }
             if rxlev_access_min_code(c.cell.rxlev_access_min_dbm).is_none() {
                 return Err(format!("{}: {RXLEV_ACCESS_MIN_RANGE}", c.id));
+            }
+            if let Some(n) = c.net {
+                if n.mcc > 0x3FF || n.mnc > 0x3FFF {
+                    return Err(format!("{}: net_info mcc is 10 bits (0-1023), mnc 14 bits (0-16383)", c.id));
+                }
             }
             Self::validate_cell_rf(self.phy_io.backend, &c.cell, c.soapysdr.as_ref()).map_err(|e| format!("{}: {e}", c.id))?;
             validate_neighbours(&c.cell).map_err(|e| format!("{}: {e}", c.id))?;

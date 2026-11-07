@@ -273,7 +273,7 @@ fn build_cell_router(cfg: &SharedConfig, link: Option<CellLink>, tsink: Option<T
     router.register_entity(Box::new(Sndcp::new(cfg.clone())));
     // CMCE gets its own command link so the WX/METAR responder can send its replies.
     let (c_d, mut c_e) = build_all_control_links();
-    let mut cmce = CmceBs::new(cfg.clone(), tsink, c_e.remove(&TetraEntity::Cmce));
+    let mut cmce = CmceBs::new(cfg.clone(), tsink.clone(), c_e.remove(&TetraEntity::Cmce));
     if let Some(d) = c_d.get(&TetraEntity::Cmce) {
         cmce.set_wx_cmd_sender(d.clone_sender());
     }
@@ -284,6 +284,16 @@ fn build_cell_router(cfg: &SharedConfig, link: Option<CellLink>, tsink: Option<T
             router.register_entity(Box::new(link.asterisk_link()));
         }
         router.register_entity(Box::new(link));
+    } else if let Some(ref brew_cfg) = cfg.config().brew {
+        // A cell of another network (own `[cells.net_info]`): its own Brew connection, which
+        // names its radios and groups with that network (Multi Network, `mni`).
+        let mut brew_entity = BrewEntity::new(cfg.clone(), new_websocket_transport(brew_cfg));
+        if let Some(ref sink) = tsink {
+            brew_entity.set_telemetry_sink(sink.clone());
+        }
+        router.register_entity(Box::new(brew_entity));
+        let net = cfg.config().net;
+        eprintln!(" -> {}: cell of network {}/{}, own Brew connection", cfg.config().cell_id, net.mcc, net.mnc);
     }
     router.set_dl_time(TdmaTime::default());
     router
@@ -634,10 +644,14 @@ fn main() {
             .collect()
     };
     tetra_entities::net_site::register_extra_cells(extra_cell_cfgs.clone());
-    let extra_cell_ids: Vec<CellId> = extra_cell_cfgs.iter().map(|(id, _)| *id).collect();
+    // A cell of another network (own `[cells.net_info]`) is not linked: it has its own network
+    // connection (see `build_cell_router`).
+    let linked_cell_cfgs: Vec<(CellId, SharedConfig)> =
+        extra_cell_cfgs.iter().filter(|(_, c)| c.config().is_site_linked()).cloned().collect();
+    let extra_cell_ids: Vec<CellId> = linked_cell_cfgs.iter().map(|(id, _)| *id).collect();
     let (site, cell_links) = if cfg.config().is_site_linked() {
         let (ports, links) = site_links(&extra_cell_ids);
-        (Some((ports, extra_cell_cfgs.clone(), SharedDirectory::default())), links)
+        (Some((ports, linked_cell_cfgs.clone(), SharedDirectory::default())), links)
     } else {
         (None, HashMap::new())
     };
@@ -1043,7 +1057,7 @@ mod telemetry_tests {
         let mut cell = config.cell.clone();
         cell.main_carrier += 1;
         cell.wap_ip = Some(wap_profile());
-        config.extra_cells.push(tetra_config::bluestation::CfgExtraCell { id: CellId(1), cell, soapysdr: None });
+        config.extra_cells.push(tetra_config::bluestation::CfgExtraCell { id: CellId(1), cell, soapysdr: None, net: None });
         let cfg = SharedConfig::try_from_parts(config, None).unwrap();
         assert!(needs_telemetry(&cfg));
     }

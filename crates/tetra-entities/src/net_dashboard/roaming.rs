@@ -74,6 +74,15 @@ fn extra_cell_entry(table: &Table, id: u8) -> Option<&Table> {
         .find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64))
 }
 
+fn extra_cell_entry_mut(table: &mut Table, id: u8) -> Option<&mut Table> {
+    table
+        .get_mut("cells")?
+        .as_array_mut()?
+        .iter_mut()
+        .filter_map(|c| c.as_table_mut())
+        .find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64))
+}
+
 fn neighbours_in(cell_info: Option<&Table>) -> Option<JsonValue> {
     cell_info.and_then(|t| t.get("neighbor_cells_ca")).map(toml_to_json)
 }
@@ -126,6 +135,10 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
                 "colour_code": c.colour_code,
                 "location_area": c.location_area,
                 "location_area_own": la_own,
+                // The cell's network (D-MLE-SYNC, table 18.17); own = its own `[cells.net_info]`.
+                "mcc": cfg.network_of(*id).mcc,
+                "mnc": cfg.network_of(*id).mnc,
+                "network_own": cfg.extra_cells.iter().any(|e| e.id == *id && cfg.has_own_network(e)),
                 "own_list": own.is_some(),
                 "neighbours": own.unwrap_or_else(|| json!([])),
                 "siblings": siblings,
@@ -249,9 +262,11 @@ fn table_mut<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, Stri
 /// Apply a POST /api/roaming body to the config text. Returns the new text (validated).
 ///
 /// Body: `{"reselect": {4 × dB}, "rxlev_access_min_dbm": N|null, "migration": bool,
-/// "presence_check_secs": N, "cells": [{"id": N, "location_area": N|null, "neighbours": [..]|null}]}`.
+/// "presence_check_secs": N, "cells": [{"id": N, "location_area": N|null, "neighbours": [..]|null,
+/// "network": {"mcc": N, "mnc": N}|null}]}`.
 /// Every key is optional; for a cell, `location_area: null` (extra cells only) inherits the
-/// primary's and `neighbours: null` (extra cells only) drops the cell's own list.
+/// primary's, `neighbours: null` (extra cells only) drops the cell's own list and `network: null`
+/// (extra cells only) drops its `[cells.net_info]`, so it is of the station's network again.
 pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String> {
     let obj = body.as_object().ok_or_else(|| "body must be a JSON object".to_string())?;
     let mut table: Table = toml::from_str(original).map_err(|e| format!("config does not parse: {e}"))?;
@@ -301,14 +316,26 @@ pub fn apply_roaming(original: &str, body: &JsonValue) -> Result<String, String>
             .and_then(|v| u8::try_from(v).ok())
             .ok_or_else(|| "cells[].id is required".to_string())?;
         let what = format!("cell {id}");
+        if let Some(v) = c.get("network") {
+            if id == 0 {
+                return Err("the primary cell's network is [net_info]".into());
+            }
+            let entry = extra_cell_entry_mut(&mut table, id).ok_or_else(|| format!("{what} is not in the config"))?;
+            if v.is_null() {
+                entry.remove("net_info");
+            } else {
+                let mcc = int_in(&v["mcc"], &format!("{what} mcc"), 0, 1023)?;
+                let mnc = int_in(&v["mnc"], &format!("{what} mnc"), 0, 16383)?;
+                let mut net = Table::new();
+                net.insert("mcc".into(), TomlValue::Integer(mcc));
+                net.insert("mnc".into(), TomlValue::Integer(mnc));
+                entry.insert("net_info".into(), TomlValue::Table(net));
+            }
+        }
         let cell_info = if id == 0 {
             table_mut(&mut table, "cell_info")?
         } else {
-            let entry = table
-                .get_mut("cells")
-                .and_then(|v| v.as_array_mut())
-                .and_then(|a| a.iter_mut().filter_map(|c| c.as_table_mut()).find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64)))
-                .ok_or_else(|| format!("{what} is not in the config"))?;
+            let entry = extra_cell_entry_mut(&mut table, id).ok_or_else(|| format!("{what} is not in the config"))?;
             table_mut(entry, "cell_info")?
         };
         if let Some(v) = c.get("location_area") {
@@ -526,6 +553,32 @@ main_carrier = 1525
         assert!(cfg.cell.neighbor_cells_ca.is_empty() && cfg.extra_cells[0].cell.neighbor_cells_ca.is_empty());
         assert_eq!(cfg.extra_cells[0].cell.location_area, 3);
         assert!(!text.contains("rxlev_access_min_dbm") && !text.contains("migration"));
+    }
+
+    #[test]
+    fn cell_network_is_set_shown_and_dropped() {
+        let text = apply_roaming(BASE, &json!({"cells": [{"id": 1, "network": {"mcc": 901, "mnc": 1638}}]})).unwrap();
+        let cfg = parsing::from_toml_str(&text).unwrap();
+        let net = cfg.extra_cells[0].net.unwrap();
+        assert_eq!((net.mcc, net.mnc), (901, 1638));
+        assert!(!cfg.for_extra_cell(CellId(1)).unwrap().is_site_linked());
+        let f = write(&text);
+        let v = roaming_json(f.str(), None).unwrap();
+        assert_eq!((v["cells"][1]["mnc"].clone(), v["cells"][1]["network_own"].clone()), (json!(1638), json!(true)));
+        assert_eq!((v["cells"][0]["mnc"].clone(), v["cells"][0]["network_own"].clone()), (json!(9999), json!(false)));
+
+        let text = apply_roaming(&text, &json!({"cells": [{"id": 1, "network": null}]})).unwrap();
+        assert!(parsing::from_toml_str(&text).unwrap().extra_cells[0].net.is_none());
+        assert!(!text.contains("net_info]\nmcc = 901\nmnc = 1638"));
+
+        for bad in [
+            json!({"cells": [{"id": 0, "network": {"mcc": 901, "mnc": 1638}}]}),
+            json!({"cells": [{"id": 1, "network": {"mcc": 901, "mnc": 16384}}]}),
+            json!({"cells": [{"id": 1, "network": {"mcc": 901}}]}),
+            json!({"cells": [{"id": 3, "network": {"mcc": 901, "mnc": 1}}]}),
+        ] {
+            assert!(apply_roaming(BASE, &bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

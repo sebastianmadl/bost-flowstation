@@ -1044,4 +1044,16 @@ voice_service = true
 # device = "driver=plutosdr,uri=ip:192.168.3.1"
 # tx_freq = 438125000
 # rx_freq = 433125000
+#
+# Optional: the cell broadcasts its own network (one MCC/MNC per cell, ETSI
+# TS 100 392-2 table 18.17). A radio that selects that network uses this cell
+# and, with [multi_network] and a brew-server that offers `mni`, registers into
+# that network on the server (e.g. a TetraPack link there). Such a cell is not
+# linked with the other cells and has its own Brew connection; it is no sibling
+# neighbour of the others. Same as [net_info] or absent = an ordinary cell.
+# Also editable on the Roaming / Cells page.
+#
+# [cells.net_info]
+# mcc = 901
+# mnc = 1638
 ###############################################################################

@@ -12,17 +12,29 @@
 //! main_carrier = 1590
 //! colour_code = 2
 //!
+//! [cells.net_info]          # optional: this cell's own network (MCC/MNC); see below
+//! mcc = 901
+//! mnc = 1638
+//!
 //! [cells.soapysdr]          # full SDR section for this cell (same keys as [phy_io.soapysdr])
 //! device = "driver=plutosdr,uri=ip:192.168.2.2"
 //! tx_freq = 438150000
 //! rx_freq = 433150000
 //! ```
+//!
+//! A cell broadcasts exactly one network (MCC/MNC in D-MLE-SYNC, TS 100 392-2 table 18.17). A
+//! cell with its own `[cells.net_info]` that differs from the station's `[net_info]` is a cell of
+//! that other network: it is not linked to the other cells and has its own connection to the
+//! network (Brew), which names its radios and groups with that network (Multi Network, `mni`).
 
 use serde::Deserialize;
 use tetra_core::CellId;
 use toml::Value;
 
-use crate::bluestation::{CellInfoDto, CfgCellInfo, CfgSoapySdr, SoapySdrDto, cell_dto_to_cfg, soapy_dto_to_cfg, soapy_dto_unknown_keys};
+use crate::bluestation::{
+    CellInfoDto, CfgCellInfo, CfgNetInfo, CfgSoapySdr, NetInfoDto, SoapySdrDto, cell_dto_to_cfg, net_dto_to_cfg, soapy_dto_to_cfg,
+    soapy_dto_unknown_keys,
+};
 
 /// `[cell_info]` keys that may not be overridden per cell: SDS remote control is a station-wide
 /// function owned by the primary cell.
@@ -36,6 +48,8 @@ pub struct CfgExtraCell {
     pub cell: CfgCellInfo,
     /// SDR settings for this cell. Required when the PHY backend is SoapySdr.
     pub soapysdr: Option<CfgSoapySdr>,
+    /// This cell's own network (`[cells.net_info]`); `None`: the station's `[net_info]`.
+    pub net: Option<CfgNetInfo>,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +58,7 @@ struct ExtraCellDto {
     enabled: Option<bool>,
     cell_info: Option<toml::Table>,
     soapysdr: Option<SoapySdrDto>,
+    net_info: Option<NetInfoDto>,
     #[serde(flatten)]
     extra: std::collections::HashMap<String, Value>,
 }
@@ -103,12 +118,25 @@ pub fn parse_extra_cells(raw_cells: Option<Value>, primary_cell_info: &toml::Tab
             None => None,
         };
 
+        let net = match dto.net_info {
+            Some(n) => {
+                if !n.extra.is_empty() {
+                    let mut keys: Vec<&str> = n.extra.keys().map(|k| k.as_str()).collect();
+                    keys.sort_unstable();
+                    return Err(format!("Unrecognized fields in cells[{i}].net_info: {keys:?}"));
+                }
+                Some(net_dto_to_cfg(n))
+            }
+            None => None,
+        };
+
         let mut cell = cell_dto_to_cfg(cell_dto);
         cell.neighbor_cells_ca = neighbours;
         cells.push(CfgExtraCell {
             id: CellId(dto.id),
             cell,
             soapysdr,
+            net,
         });
     }
     Ok(cells)
@@ -409,5 +437,67 @@ voice_service = true
     fn cells_must_share_a_custom_duplex_spacing() {
         let cfg = parse("[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\ncustom_duplex_spacing = 10000000\n").unwrap();
         assert!(cfg.validate().unwrap_err().contains("custom_duplex_spacing"));
+    }
+
+    const BREW: &str = "[brew]\nhost = \"brew.example\"\nport = 3000\ntls = false\nusername = 1\npassword = \"x\"\n";
+
+    #[test]
+    fn cell_with_its_own_network_is_not_site_linked() {
+        let cfg = parse(&format!(
+            "{BREW}[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n[cells.net_info]\nmcc = 901\nmnc = 1638\n"
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        let c = &cfg.extra_cells[0];
+        assert!(cfg.has_own_network(c));
+        assert!(!cfg.is_site_linked(), "the only extra cell is of another network: nothing to link");
+        let cell = cfg.for_extra_cell(CellId(1)).unwrap();
+        assert_eq!((cell.net.mcc, cell.net.mnc), (901, 1638), "D-MLE-SYNC of this cell, 18.17");
+        assert!(!cell.is_site_linked(), "own Brew connection instead of the site switch");
+        assert!(cell.brew.is_some());
+        assert!(!cfg.is_station_carrier(1525), "not a carrier of the station's network");
+        assert!(cell.is_station_carrier(1525) && !cell.is_station_carrier(cfg.cell.main_carrier));
+        assert_eq!(cfg.network_of(CellId(1)).mnc, 1638);
+        assert_eq!(cfg.network_of(CellId(0)).mnc, 9999);
+    }
+
+    #[test]
+    fn same_network_as_the_station_is_an_ordinary_cell() {
+        let cfg = parse(&format!(
+            "{BREW}[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n[cells.net_info]\nmcc = 901\nmnc = 9999\n"
+        ))
+        .unwrap();
+        assert!(!cfg.has_own_network(&cfg.extra_cells[0]));
+        assert!(cfg.is_site_linked() && cfg.for_extra_cell(CellId(1)).unwrap().is_site_linked());
+    }
+
+    #[test]
+    fn network_cell_beside_a_station_cell_keeps_the_others_linked() {
+        let mut cfg = parse(&format!(
+            "{BREW}[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n[cells.net_info]\nmcc = 901\nmnc = 1638\n\
+             [[cells]]\nid = 2\n[cells.cell_info]\nmain_carrier = 1530\n"
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        assert!(cfg.is_site_linked());
+        assert!(cfg.for_extra_cell(CellId(2)).unwrap().is_site_linked());
+        assert!(!cfg.for_extra_cell(CellId(1)).unwrap().is_site_linked());
+        assert!(cfg.is_station_carrier(1530) && !cfg.is_station_carrier(1525));
+        cfg.add_sibling_neighbours();
+        let carriers = |n: &[crate::bluestation::CfgNeighborCellCa]| n.iter().map(|n| n.main_carrier_number).collect::<Vec<_>>();
+        assert_eq!(carriers(&cfg.cell.neighbor_cells_ca), vec![1530], "no neighbour of another network");
+        assert!(cfg.extra_cells[0].cell.neighbor_cells_ca.is_empty());
+        assert_eq!(carriers(&cfg.extra_cells[1].cell.neighbor_cells_ca), vec![1521]);
+    }
+
+    #[test]
+    fn cell_network_is_checked() {
+        let err = parse("[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n[cells.net_info]\nmcc = 901\nmnc = 1638\nbogus = 1\n")
+            .unwrap_err();
+        assert!(err.contains("bogus"), "{err}");
+        let big = parse("[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n[cells.net_info]\nmcc = 901\nmnc = 16384\n").unwrap();
+        assert!(big.validate().unwrap_err().contains("mnc"));
+        let big = parse("[[cells]]\nid = 1\n[cells.cell_info]\nmain_carrier = 1525\n[cells.net_info]\nmcc = 1024\nmnc = 1\n").unwrap();
+        assert!(big.validate().unwrap_err().contains("mcc"));
     }
 }

@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use toml::Value;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CfgNetInfo {
     /// 10 bits, from 18.4.2.1 D-MLE-SYNC
     pub mcc: u16,
