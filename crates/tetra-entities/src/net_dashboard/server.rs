@@ -4005,7 +4005,15 @@ fn handle_connection(
         drain_http_headers(&mut s);
         let _ = crate::net_dashboard::profiles::ensure_seeded(&config_path);
         let active = crate::net_dashboard::profiles::read_active(&config_path);
-        http_json_response(s, 200, &serde_json::to_string(&active).unwrap_or_else(|_| "{}".into()));
+        let mut v = serde_json::to_value(&active).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            // Multi Network: the core links live in [networks], the Brew profile select is off.
+            obj.insert(
+                "networks_managed".into(),
+                serde_json::Value::Bool(crate::net_dashboard::profiles::networks_managed_at(&config_path)),
+            );
+        }
+        http_json_response(s, 200, &v.to_string());
     } else if req_line.contains("POST /api/profiles/apply") {
         let (inner, body_str) = read_post_body(stream);
         match serde_json::from_str::<serde_json::Value>(&body_str) {
