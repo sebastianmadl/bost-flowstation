@@ -63,7 +63,6 @@ sudo systemctl reload NetworkManager
 | `BOST_FORCE_CLEAN=1` | Delete `/opt/bost-flowstation` and re-clone (keeps `/etc/flowstation`) |
 | `BOST_SKIP_BUILD=1` | Reuse an already-built `target/release/bluestation-bs` |
 | `BOST_SERVICE_USER` | User for rustup/build (default `bts`) |
-| `BOST_SKIP_PLUTO=1` | Skip the ADALM-Pluto / Pluto+ driver (SoapyPlutoSDR from the pgreenland fork, branch `sdr_gadget_timestamping`); built once, later runs skip it |
 | `BOST_DASH_PORTS` | `standard` (HTTP 80 → HTTPS 443) or `high` (HTTPS 8443 only). Prompted on a TTY when unset; only applies to **new** configs |
 
 ## First login
@@ -97,7 +96,7 @@ The dashboard never runs free-form shell. Driver install and systemd ensure go t
 
 Allowed actions: `install-driver sx|lime|mucell|uhd|pluto`, `enable-service`, `restart-service`.
 
-**Pluto (`pluto`):** builds SoapyPlutoSDR with timestamped streaming from [pgreenland/SoapyPlutoSDR](https://github.com/pgreenland/SoapyPlutoSDR) (branch `sdr_gadget_timestamping`) in `/opt/SoapyPlutoSDR` (deps `libiio-dev`, `libad9361-dev`, `libusb-1.0-0-dev`). Override with `BOST_PLUTO_GIT` / `BOST_PLUTO_BRANCH` / `BOST_PLUTO_DIR`. The installer runs it too. Device string: `driver=plutosdr`, over the network `driver=plutosdr,uri=ip:192.168.2.1`.
+**Pluto (`pluto`):** builds SoapyPlutoSDR with timestamped streaming from [pgreenland/SoapyPlutoSDR](https://github.com/pgreenland/SoapyPlutoSDR) (branch `sdr_gadget_timestamping`) in `/opt/SoapyPlutoSDR` (deps `libiio-dev`, `libad9361-dev`, `libusb-1.0-0-dev`). Override with `BOST_PLUTO_GIT` / `BOST_PLUTO_BRANCH` / `BOST_PLUTO_DIR`. Installed on demand like the other drivers (Setup wizard → Install Pluto); the installer does not build it. Device string: `driver=plutosdr`, over the network `driver=plutosdr,uri=ip:192.168.2.1`.
 
 **SXceiver (`sx`):** clones and builds [tejeez/sxxcvr](https://github.com/tejeez/sxxcvr) into `/opt/sxxcvr` (SoapySX module), then `ldconfig`. Override with `BOST_SOAPY_SX_DIR` / `BOST_SOAPY_SX_GIT` if needed. Hardware must be stacked on the Pi HAT for `SoapySDRUtil --find` / `--probe=driver=sx` to see it.
 

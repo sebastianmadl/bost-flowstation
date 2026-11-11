@@ -80,10 +80,10 @@ overlay loads; the wizard offers that reboot automatically.
 
 ### ADALM-Pluto / Pluto+
 
-The installer and the Setup wizard's **Install Pluto** button build SoapyPlutoSDR with timestamped
+The Setup wizard's **Install Pluto** button builds SoapyPlutoSDR with timestamped
 streaming from [pgreenland/SoapyPlutoSDR](https://github.com/pgreenland/SoapyPlutoSDR) (branch
 `sdr_gadget_timestamping`). Device string: `driver=plutosdr`, or over the network
-`driver=plutosdr,uri=ip:192.168.2.1` (the Pluto's address). Skip it in the installer with `BOST_SKIP_PLUTO=1`.
+`driver=plutosdr,uri=ip:192.168.2.1` (the Pluto's address).
 
 ### USRP B210 (and B200 / B210 clones)
 
