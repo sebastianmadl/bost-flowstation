@@ -1459,13 +1459,6 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
     }
 
     log!(update, "=== {} OTA Update ===", tetra_core::PRODUCT_NAME);
-    log!(
-        update,
-        "Migration notice: {} ({}) is coming. This bridge tracks stable→git branch `main` \
-         (legacy `bost` still receives this bridge so field units can update once).",
-        tetra_core::PRODUCT_NAME_NEXT,
-        tetra_core::PRODUCT_NAME_NEXT_LONG
-    );
 
     // Step 1: resolve source directory. Bail out cleanly if we can't find a git repo.
     let src_dir = match resolve_source_dir(source_dir_override.as_deref()) {

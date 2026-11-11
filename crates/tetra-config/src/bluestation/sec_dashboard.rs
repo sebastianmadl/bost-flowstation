@@ -142,8 +142,12 @@ pub struct CfgDashboard {
     /// with the git clone elsewhere), or when auto-detection picks the wrong directory.
     /// OTA pulls from github.com/Aitorrio/bost-flowstation (`ota_channel` selects the branch).
     pub source_dir: Option<String>,
-    /// OTA release channel: `"stable"` → git branch `main`, `"beta"` → `beta`. Default `stable`.
+    /// OTA source: `"installed"` (default: repository and branch of the installed checkout),
+    /// `"stable"` → product repository `main`, `"beta"` → `beta`, `"custom"` → `ota_repo` /
+    /// `ota_branch` (checked by the dashboard before use).
     pub ota_channel: String,
+    pub ota_repo: Option<String>,
+    pub ota_branch: Option<String>,
     /// Optional dashboard login credentials. POST /api/login accepts JSON `user`/`password`
     /// or a form body and issues an `fs_session` cookie for protected HTTP and WebSocket requests.
     /// When omitted, the dashboard is accessible without a password (default, home-network use).
@@ -182,7 +186,9 @@ impl Default for CfgDashboard {
             https_port: 443,
             bind: "0.0.0.0".to_string(),
             source_dir: None,
-            ota_channel: "stable".to_string(),
+            ota_channel: "installed".to_string(),
+            ota_repo: None,
+            ota_branch: None,
             username: None,
             password: None,
             http_allowed_networks: Vec::new(),
@@ -215,6 +221,10 @@ pub struct CfgDashboardDto {
     pub source_dir: Option<String>,
     #[serde(default = "default_ota_channel")]
     pub ota_channel: String,
+    #[serde(default)]
+    pub ota_repo: Option<String>,
+    #[serde(default)]
+    pub ota_branch: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
@@ -250,7 +260,7 @@ fn default_bind() -> String {
 }
 
 fn default_ota_channel() -> String {
-    "stable".to_string()
+    "installed".to_string()
 }
 
 pub fn apply_dashboard_patch(src: CfgDashboardDto) -> Result<CfgDashboard, String> {
@@ -288,10 +298,12 @@ pub fn apply_dashboard_patch(src: CfgDashboardDto) -> Result<CfgDashboard, Strin
         _ => return Err("dashboard: set both 'username' and 'password', or neither".to_string()),
     }
     let ota_channel = match src.ota_channel.trim().to_ascii_lowercase().as_str() {
-        "stable" | "beta" => src.ota_channel.trim().to_ascii_lowercase(),
-        other if other.is_empty() => "stable".to_string(),
+        "installed" | "stable" | "beta" | "custom" => src.ota_channel.trim().to_ascii_lowercase(),
+        other if other.is_empty() => "installed".to_string(),
         other => {
-            return Err(format!("dashboard: ota_channel must be \"stable\" or \"beta\" (got '{other}')"));
+            return Err(format!(
+                "dashboard: ota_channel must be \"installed\", \"stable\", \"beta\" or \"custom\" (got '{other}')"
+            ));
         }
     };
     if src.http_allowed_networks.len() > 32 {
@@ -321,6 +333,8 @@ pub fn apply_dashboard_patch(src: CfgDashboardDto) -> Result<CfgDashboard, Strin
         bind: src.bind,
         source_dir: src.source_dir,
         ota_channel,
+        ota_repo: src.ota_repo.filter(|v| !v.trim().is_empty()),
+        ota_branch: src.ota_branch.filter(|v| !v.trim().is_empty()),
         username: src.username,
         password: src.password,
         http_allowed_networks,
@@ -508,6 +522,8 @@ mod tests {
             bind: "0.0.0.0".into(),
             source_dir: None,
             ota_channel: "stable".into(),
+            ota_repo: None,
+            ota_branch: None,
             username: None,
             password: None,
             http_allowed_networks: Vec::new(),
@@ -529,6 +545,8 @@ mod tests {
             bind: "0.0.0.0".into(),
             source_dir: None,
             ota_channel: "stable".into(),
+            ota_repo: None,
+            ota_branch: None,
             username: None,
             password: None,
             http_allowed_networks: Vec::new(),
@@ -548,6 +566,8 @@ mod tests {
             bind: "0.0.0.0".into(),
             source_dir: None,
             ota_channel: "stable".into(),
+            ota_repo: None,
+            ota_branch: None,
             username: None,
             password: None,
             http_allowed_networks: Vec::new(),

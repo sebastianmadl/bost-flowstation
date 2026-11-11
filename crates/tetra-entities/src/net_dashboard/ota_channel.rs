@@ -391,6 +391,24 @@ mod tests {
     }
 
     #[test]
+    fn every_ota_source_is_accepted_by_the_config_parser() {
+        let base = include_str!("../../../../example_config/config.toml");
+        for channel in ["installed", "stable", "beta", "custom"] {
+            let mut txt = set_dashboard_key(base, "ota_channel", &format!("\"{channel}\""));
+            if channel == "custom" {
+                txt = set_dashboard_key(&txt, "ota_repo", "\"https://github.com/a/b.git\"");
+                txt = set_dashboard_key(&txt, "ota_branch", "\"dev\"");
+            }
+            let cfg = tetra_config::bluestation::from_toml_str(&txt)
+                .unwrap_or_else(|e| panic!("ota_channel = {channel}: {e}"));
+            assert_eq!(cfg.dashboard.as_ref().map(|d| d.ota_channel.as_str()), Some(channel));
+        }
+        // No key at all: still a valid config, default "installed".
+        let cfg = tetra_config::bluestation::from_toml_str(&set_dashboard_key(base, "port", "8080")).unwrap();
+        assert_eq!(cfg.dashboard.unwrap().ota_channel, "installed");
+    }
+
+    #[test]
     fn write_custom_source_round_trips() {
         let dir = std::env::temp_dir().join(format!("ota-src-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
