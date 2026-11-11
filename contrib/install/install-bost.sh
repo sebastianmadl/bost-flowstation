@@ -17,6 +17,7 @@
 #   BOST_USE_DEB=1      prefer .deb asset if available (optional)
 #   BOST_SKIP_BUILD=1   skip cargo build (use existing binary)
 #   BOST_SKIP_TETRA_CODEC=1  skip outerplane ACELP lib (LST voice / Asterisk feature off)
+#   BOST_SKIP_PLUTO=1   skip the ADALM-Pluto / Pluto+ driver (SoapyPlutoSDR, pgreenland fork)
 #   BOST_DASH_PORTS     standard (80→443) or high (HTTPS 8443 only); prompted on TTY if unset
 set -euo pipefail
 
@@ -366,6 +367,16 @@ Defaults!${HELPER_DST} !requiretty
 EOF
 chmod 440 "$SUDOERS_DST"
 visudo -cf "$SUDOERS_DST" >/dev/null || die "invalid sudoers drop-in"
+
+# ADALM-Pluto / Pluto+ driver (SoapyPlutoSDR with timestamped streaming). Built once; later runs
+# (updates) find the module and skip it. A failure only costs the Pluto support.
+if [[ "${BOST_SKIP_PLUTO:-0}" == "1" ]]; then
+  log "BOST_SKIP_PLUTO=1 — skipping the Pluto driver"
+else
+  log "Pluto driver (SoapyPlutoSDR)"
+  "$HELPER_DST" install-driver pluto \
+    || warn "Pluto driver install failed — install it later in Setup (Install Pluto) or re-run the installer"
+fi
 
 # NetworkManager Wi-Fi resilience (powersave off). Harmless if NM is absent.
 NM_WIFI_SRC="$SRC_ROOT/contrib/install/networkmanager/bost-wifi.conf"

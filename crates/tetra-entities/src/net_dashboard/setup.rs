@@ -232,8 +232,8 @@ fn run_helper(args: &[&str]) -> Result<String, String> {
 pub fn install_driver(driver: &str) -> Result<String, String> {
     let driver = driver.trim().to_ascii_lowercase();
     match driver.as_str() {
-        "sx" | "lime" | "mucell" | "uhd" => run_helper(&["install-driver", &driver]),
-        _ => Err("unsupported driver (use sx, lime, mucell or uhd)".into()),
+        "sx" | "lime" | "mucell" | "uhd" | "pluto" => run_helper(&["install-driver", &driver]),
+        _ => Err("unsupported driver (use sx, lime, mucell, uhd or pluto)".into()),
     }
 }
 
@@ -361,6 +361,42 @@ pub fn apply_setup(config_path: &str, req: &SetupApplyRequest) -> Result<(), Str
     Ok(())
 }
 
+/// The station default language (`[dashboard] language`), read from the config file so a change
+/// from the Setup wizard applies to the next page load without a restart.
+pub fn station_language(config_path: &str) -> Option<String> {
+    let text = fs::read_to_string(config_path).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    let lang = table.get("dashboard")?.get("language")?.as_str()?.trim();
+    tetra_config::bluestation::DASHBOARD_LANGUAGES.contains(&lang).then(|| lang.to_string())
+}
+
+/// The page with `{{STATION_LANG}}` filled in (empty when no station language is set).
+pub fn with_station_language(page: &str, config_path: &str) -> String {
+    page.replacen("{{STATION_LANG}}", station_language(config_path).as_deref().unwrap_or(""), 1)
+}
+
+/// Store the station default language (`[dashboard] language`). No restart needed.
+pub fn set_station_language(config_path: &str, language: &str) -> Result<String, String> {
+    let lang = language.trim().to_ascii_lowercase();
+    if !tetra_config::bluestation::DASHBOARD_LANGUAGES.contains(&lang.as_str()) {
+        return Err(format!("unknown language {lang:?}"));
+    }
+    let current = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+    let mut table: toml::Table = toml::from_str(&current).map_err(|e| format!("parse config: {e}"))?;
+    let dash = table
+        .entry("dashboard".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "dashboard must be a table".to_string())?;
+    if dash.get("language").and_then(|v| v.as_str()) == Some(lang.as_str()) {
+        return Ok(lang);
+    }
+    dash.insert("language".into(), toml::Value::String(lang.clone()));
+    let rendered = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    crate::net_dashboard::profiles::validate_and_write_toml(config_path, &rendered)?;
+    Ok(lang)
+}
+
 pub fn status_payload(config_path: &str) -> JsonValue {
     let setup = read_setup_state(config_path);
     let rf = crate::rf_status::get();
@@ -402,4 +438,62 @@ pub fn status_payload(config_path: &str) -> JsonValue {
         "helper_path": helper,
         "setup_json": setup_json_path(config_path).to_string_lossy(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONFIG: &str = r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "None"
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[cell_info]
+main_carrier = 1521
+freq_band = 4
+freq_offset = 0
+duplex_spacing = 4
+reverse_operation = false
+location_area = 1
+"#;
+
+    fn temp_config(text: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let p = std::env::temp_dir().join(format!("fs-lang-test-{n}.toml"));
+        fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[test]
+    fn station_language_is_stored_and_filled_into_the_pages() {
+        let p = temp_config(CONFIG);
+        let path = p.to_str().unwrap();
+        assert_eq!(station_language(path), None);
+        assert_eq!(with_station_language("const L='{{STATION_LANG}}';", path), "const L='';");
+
+        assert_eq!(set_station_language(path, " DE ").unwrap(), "de");
+        assert_eq!(station_language(path).as_deref(), Some("de"));
+        assert_eq!(with_station_language("const L='{{STATION_LANG}}';", path), "const L='de';");
+        // The config still loads and carries it.
+        let cfg = tetra_config::bluestation::from_toml_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(cfg.dashboard.and_then(|d| d.language).as_deref(), Some("de"));
+
+        assert!(set_station_language(path, "xx").is_err());
+        assert_eq!(station_language(path).as_deref(), Some("de"), "a refused language changes nothing");
+        let _ = fs::remove_file(&p);
+        let _ = fs::remove_file(format!("{path}.bak"));
+    }
+
+    #[test]
+    fn both_pages_carry_the_station_language_placeholder() {
+        assert!(crate::net_dashboard::html::DASHBOARD_HTML.contains("'{{STATION_LANG}}'"));
+        assert!(crate::net_dashboard::html::LOGIN_HTML.contains("'{{STATION_LANG}}'"));
+    }
 }

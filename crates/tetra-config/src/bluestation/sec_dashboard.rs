@@ -166,7 +166,14 @@ pub struct CfgDashboard {
     /// Advanced DGNA control: when true, the dashboard shows the SS-DGNA attachment-mode picker.
     /// When false, operators always use the cell-level default attachment mode.
     pub show_dgna_attachment_mode_picker: bool,
+    /// Station default language of the dashboard and the login page (one of
+    /// [`DASHBOARD_LANGUAGES`]), chosen in the Setup wizard. A browser that picked its own
+    /// language keeps it; `None` = the browser's language.
+    pub language: Option<String>,
 }
+
+/// Languages the dashboard has strings for (`LANGS` in the dashboard page).
+pub const DASHBOARD_LANGUAGES: &[&str] = &["en", "de", "es", "fr", "pt", "ro", "hu", "zh"];
 
 impl Default for CfgDashboard {
     fn default() -> Self {
@@ -181,6 +188,7 @@ impl Default for CfgDashboard {
             http_allowed_networks: Vec::new(),
             public_overview: false,
             show_dgna_attachment_mode_picker: false,
+            language: None,
         }
     }
 }
@@ -219,6 +227,8 @@ pub struct CfgDashboardDto {
     pub public_overview: bool,
     #[serde(default)]
     pub show_dgna_attachment_mode_picker: bool,
+    #[serde(default)]
+    pub language: Option<String>,
 
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
@@ -299,7 +309,13 @@ pub fn apply_dashboard_patch(src: CfgDashboardDto) -> Result<CfgDashboard, Strin
             http_allowed_networks.push(network);
         }
     }
+    let language = match src.language.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(l) if DASHBOARD_LANGUAGES.contains(&l) => Some(l.to_string()),
+        Some(l) => return Err(format!("dashboard: language {l:?} is not one of {DASHBOARD_LANGUAGES:?}")),
+    };
     Ok(CfgDashboard {
+        language,
         port: src.port,
         https_port: src.https_port,
         bind: src.bind,
@@ -497,6 +513,7 @@ mod tests {
             http_allowed_networks: Vec::new(),
             public_overview: false,
             show_dgna_attachment_mode_picker: false,
+            language: None,
             extra: HashMap::new(),
         };
         let c = apply_dashboard_patch(dto).expect("high preset");
@@ -517,8 +534,31 @@ mod tests {
             http_allowed_networks: Vec::new(),
             public_overview: false,
             show_dgna_attachment_mode_picker: false,
+            language: None,
             extra: HashMap::new(),
         };
         assert!(apply_dashboard_patch(dto).is_err());
+    }
+
+    #[test]
+    fn language_is_optional_and_checked() {
+        let dto = |language: Option<&str>| CfgDashboardDto {
+            port: 80,
+            https_port: 443,
+            bind: "0.0.0.0".into(),
+            source_dir: None,
+            ota_channel: "stable".into(),
+            username: None,
+            password: None,
+            http_allowed_networks: Vec::new(),
+            public_overview: false,
+            show_dgna_attachment_mode_picker: false,
+            language: language.map(str::to_string),
+            extra: HashMap::new(),
+        };
+        assert_eq!(apply_dashboard_patch(dto(None)).unwrap().language, None);
+        assert_eq!(apply_dashboard_patch(dto(Some("de"))).unwrap().language.as_deref(), Some("de"));
+        assert_eq!(apply_dashboard_patch(dto(Some(""))).unwrap().language, None);
+        assert!(apply_dashboard_patch(dto(Some("xx"))).is_err());
     }
 }

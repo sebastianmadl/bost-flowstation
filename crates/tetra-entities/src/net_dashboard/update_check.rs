@@ -282,18 +282,18 @@ fn fetch_remote_version(client: &reqwest::blocking::Client, branch: &str) -> Opt
     parse_bost_version_from_lib_rs(&text)
 }
 
-fn fetch_changelog_md(client: &reqwest::blocking::Client, branch: &str) -> Option<String> {
-    let url = format!(
-        "https://raw.githubusercontent.com/Aitorrio/bost-flowstation/{}/CHANGELOG.md",
-        branch
-    );
-    client
-        .get(&url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .ok()?
-        .text()
-        .ok()
+/// Changelogs to read for the update notes, in order: `CHANGELOG.md` (Spanish) for a Spanish
+/// station, otherwise `CHANGELOG_en.md` (English, same entries) with the Spanish file as fallback
+/// for branches that do not have it.
+fn changelog_files_for(lang: &str) -> &'static [&'static str] {
+    if lang == "es" { &["CHANGELOG.md"] } else { &["CHANGELOG_en.md", "CHANGELOG.md"] }
+}
+
+fn fetch_changelog_md(client: &reqwest::blocking::Client, branch: &str, lang: &str) -> Option<String> {
+    changelog_files_for(lang).iter().find_map(|file| {
+        let url = format!("https://raw.githubusercontent.com/Aitorrio/bost-flowstation/{branch}/{file}");
+        client.get(&url).send().and_then(|r| r.error_for_status()).ok()?.text().ok()
+    })
 }
 
 fn fetch_release_body(client: &reqwest::blocking::Client, version: &str) -> Option<String> {
@@ -373,11 +373,12 @@ fn resolve_notes(
     current_version: &str,
     remote_version: Option<&str>,
     commits: &[ChangelogEntry],
+    lang: &str,
 ) -> (Option<String>, NotesSource) {
     let local = SemVer::parse(current_version);
     let remote = remote_version.and_then(SemVer::parse);
 
-    if let Some(md) = fetch_changelog_md(client, branch) {
+    if let Some(md) = fetch_changelog_md(client, branch, lang) {
         if let Some(notes) = notes_from_changelog(&md, local, remote) {
             return (Some(notes), NotesSource::Changelog);
         }
@@ -404,7 +405,8 @@ fn resolve_notes(
 ///
 /// `with_notes=false` (boot/badge): tip SHA + remote version only (≤2 HTTPS calls).
 /// `with_notes=true` (OTA modal): also fetch changelog/compare when an update exists.
-pub fn check_for_update(current_version: &str, channel: &str, with_notes: bool) -> UpdateCheck {
+/// `lang`: the station language; anything but `es` reads the English changelog.
+pub fn check_for_update(current_version: &str, channel: &str, with_notes: bool, lang: &str) -> UpdateCheck {
     let channel = tetra_core::normalize_ota_channel(channel).to_string();
     let branch = tetra_core::ota_branch_for_channel(&channel).to_string();
 
@@ -457,6 +459,7 @@ pub fn check_for_update(current_version: &str, channel: &str, with_notes: bool) 
                             current_version,
                             remote_version.as_deref(),
                             &changelog,
+                            lang,
                         );
                         if release_notes.is_none() && changelog.is_empty() {
                             changelog_truncated = true;
@@ -548,6 +551,13 @@ pub fn check_for_update(current_version: &str, channel: &str, with_notes: bool) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notes_use_the_english_changelog_except_for_spanish() {
+        assert_eq!(super::changelog_files_for("es"), &["CHANGELOG.md"]);
+        assert_eq!(super::changelog_files_for("de"), &["CHANGELOG_en.md", "CHANGELOG.md"]);
+        assert_eq!(super::changelog_files_for("en"), &["CHANGELOG_en.md", "CHANGELOG.md"]);
+    }
+
     use super::*;
 
     #[test]

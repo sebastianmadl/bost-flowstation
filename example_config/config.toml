@@ -729,6 +729,10 @@ voice_service = true
 # Product rebrand to PTBS (Personal Tetra Base Station) is underway — keep OTA current.
 # ota_channel = "stable"
 #
+# OPTIONAL: station default language of the dashboard and the login page (en, de, es, fr,
+# pt, ro, hu, zh), set by the Setup wizard. A browser that picked its own language keeps it.
+# language = "en"
+#
 # OPTIONAL: explicit path to the git source directory used by the
 # "Update" button. By default the dashboard auto-detects by walking up from the
 # binary path looking for a .git directory, then trying /opt/ptbs,

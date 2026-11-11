@@ -3835,6 +3835,11 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
 }
 .setup-wiz-step{display:none;}
 .setup-wiz-step.active{display:block;}
+.setup-lang-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;}
+.setup-lang{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg2);color:var(--text);cursor:pointer;font-size:14px;text-align:left;}
+.setup-lang b{font-size:12px;min-width:26px;color:var(--muted);}
+.setup-lang.selected{border-color:var(--accent,#2563eb);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent,#2563eb) 30%,transparent);}
+.setup-lang.selected b{color:var(--accent,#2563eb);}
 .setup-wiz-nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:22px;justify-content:flex-end;}
 .setup-device-list{display:flex;flex-direction:column;gap:8px;margin:12px 0;}
 .setup-device{
@@ -5521,6 +5526,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             <button class="btn" onclick="setupInstallDriver('lime')" data-i18n="setup_install_lime">Instalar Lime</button>
             <button class="btn" onclick="setupInstallDriver('mucell')" data-i18n="setup_install_mucell">Instalar µCell</button>
             <button class="btn" onclick="setupInstallDriver('uhd')" data-i18n="setup_install_uhd">Instalar USRP (UHD)</button>
+            <button class="btn" onclick="setupInstallDriver('pluto')" data-i18n="setup_install_pluto">Instalar Pluto</button>
           </div>
         </div>
         <div class="card-body">
@@ -7313,6 +7319,15 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
 <div id="setup-wizard" aria-modal="true" role="dialog">
   <div class="setup-wiz-card">
     <div class="setup-wiz-step active" data-step="0">
+      <h2 style="margin:0 0 8px;font-size:22px">Language · Sprache · Idioma · Langue</h2>
+      <p style="color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 14px" data-i18n="wiz_lang_help">Choose the language of this station. It becomes the default for the dashboard and the login page; each browser can still pick its own in the menu.</p>
+      <div class="setup-lang-grid" id="wiz-lang-grid"></div>
+      <div class="config-msg" id="wiz-lang-msg"></div>
+      <div class="setup-wiz-nav">
+        <button class="btn btn-primary" onclick="wizLangContinue()" data-i18n="wiz_continue">Continuar</button>
+      </div>
+    </div>
+    <div class="setup-wiz-step" data-step="1">
       <h2 style="margin:0 0 8px;font-size:22px" data-i18n="wiz_welcome_title">Bienvenido a Bost FlowStation</h2>
       <p style="color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 16px" data-i18n="wiz_welcome_body">
         Este asistente configura el SDR, parámetros RF y el arranque automático.
@@ -7325,15 +7340,16 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <button class="btn btn-primary" onclick="wizNext()" data-i18n="wiz_continue">Continuar</button>
       </div>
     </div>
-    <div class="setup-wiz-step" data-step="1">
+    <div class="setup-wiz-step" data-step="2">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_sdr_title">Seleccionar SDR</h2>
-      <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_sdr_help">Escanea dispositivos SoapySDR o instala un driver (SXceiver / Lime / µCell / USRP).</p>
+      <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_sdr_help">Escanea dispositivos SoapySDR o instala un driver (SXceiver / Lime / µCell / USRP / Pluto).</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
         <button class="btn btn-sm" onclick="setupScanSdr(true)" data-i18n="setup_scan">Escanear</button>
         <button class="btn btn-sm" onclick="setupInstallDriver('sx',true)" data-i18n="setup_install_sx">Instalar SXceiver</button>
         <button class="btn btn-sm" onclick="setupInstallDriver('lime',true)" data-i18n="setup_install_lime">Instalar Lime</button>
         <button class="btn btn-sm" onclick="setupInstallDriver('mucell',true)" data-i18n="setup_install_mucell">Instalar µCell</button>
         <button class="btn btn-sm" onclick="setupInstallDriver('uhd',true)" data-i18n="setup_install_uhd">Instalar USRP (UHD)</button>
+        <button class="btn btn-sm" onclick="setupInstallDriver('pluto',true)" data-i18n="setup_install_pluto">Instalar Pluto</button>
       </div>
       <div class="setup-device-list" id="wiz-device-list"></div>
       <label class="field" style="display:block;margin-top:10px"><span data-i18n="wiz_device_args">Argumentos device</span>
@@ -7345,7 +7361,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <button class="btn btn-primary" onclick="wizNext()" data-i18n="wiz_next">Siguiente</button>
       </div>
     </div>
-    <div class="setup-wiz-step" data-step="2">
+    <div class="setup-wiz-step" data-step="3">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_params_title">RF / Red / Brew</h2>
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_params_help">
         Usa los formularios de Config para editar todo, o mantén los valores por defecto.
@@ -7357,7 +7373,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <button class="btn btn-primary" onclick="wizNext()" data-i18n="wiz_next">Siguiente</button>
       </div>
     </div>
-    <div class="setup-wiz-step" data-step="3">
+    <div class="setup-wiz-step" data-step="4">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_rf_title">Activar RF</h2>
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_rf_help">
         Pone <code>phy_io.backend = SoapySdr</code>, guarda el device y reinicia el servicio.
@@ -7369,7 +7385,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <button class="btn" onclick="wizNext()" data-i18n="wiz_skip_now">Omitir por ahora</button>
       </div>
     </div>
-    <div class="setup-wiz-step" data-step="4">
+    <div class="setup-wiz-step" data-step="5">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_auto_title">Arranque automático</h2>
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_auto_help">Asegura que la unidad systemd esté enabled para volver tras un reinicio.</p>
       <div class="config-msg" id="wiz-systemd-msg"></div>
@@ -7884,15 +7900,15 @@ const LANGS={
     security:'Security',stations:'Home',calls:'Calls',lastheard:'Last Heard',log:'Log',rf:'RF',health:'Health',asterisk:'Asterisk SIP',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',setup:'Setup',config:'Config',
     home_quick_title:'Quick profiles',home_more_settings:'More settings',
     setup_sec:'First-run / SDR',setup_title:'Setup',setup_open_wizard:'Open wizard',setup_sdr_title:'SDR devices',
-    setup_scan:'Scan',setup_install_sx:'Install SXceiver',setup_install_lime:'Install Lime',setup_install_mucell:'Install µCell',setup_install_uhd:'Install USRP (UHD)',
+    setup_scan:'Scan',setup_install_sx:'Install SXceiver',setup_install_lime:'Install Lime',setup_install_mucell:'Install µCell',setup_install_pluto:'Install Pluto',setup_install_uhd:'Install USRP (UHD)',
     setup_enable_rf:'Enable RF & Restart',setup_autostart:'Ensure autostart',setup_mark_done:'Mark setup done',
     setup_complete_key:'Setup complete',setup_backend_key:'Config backend',setup_device_key:'Device',
     setup_unit_key:'Service unit',setup_helper_key:'Helper',
     setup_installing:'Installing {driver}…',setup_session:'Session expired — log in again, then retry.',
     setup_install_fail:'Install failed',setup_drv_ok:'Driver installed (OK).',
-    wiz_welcome_title:'Welcome to Bost FlowStation',wiz_welcome_body:'This wizard configures your SDR, RF parameters, and systemd autostart. The dashboard stays available even when the radio is offline.',
+    wiz_lang_help:'Choose the language of this station. It becomes the default for the dashboard and the login page; each browser can still pick its own in the menu.',wiz_welcome_title:'Welcome to Bost FlowStation',wiz_welcome_body:'This wizard configures your SDR, RF parameters, and systemd autostart. The dashboard stays available even when the radio is offline.',
     wiz_skip:'Skip with defaults',wiz_continue:'Continue',wiz_back:'Back',wiz_next:'Next',wiz_finish:'Finish',wiz_skip_now:'Skip for now',
-    wiz_sdr_title:'Select SDR',wiz_sdr_help:'Scan SoapySDR devices or install a driver (SXceiver / Lime / µCell / USRP).',wiz_device_args:'Device args',
+    wiz_sdr_title:'Select SDR',wiz_sdr_help:'Scan SoapySDR devices or install a driver (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Device args',
     wiz_reboot_title:'Rebooting Pi…',wiz_reboot_body:'µCell needs a reboot so the device-tree overlay can load. The page will come back on its own.',
     wiz_reboot_confirm:'µCell driver installed. Reboot the Pi now so the board can be opened?',
     wiz_params_title:'RF / Network / Brew',wiz_params_help:'Use the Config tab forms for full editing, or keep the example defaults for now.',
@@ -8353,14 +8369,14 @@ const LANGS={
     cr_enhanced:'Versiune îmbunătățită de Aitor, EA4HBL',
     geo_lat:'Latitudine Bost FlowStation',geo_lon:'Longitudine Bost FlowStation',
     setup:'Setup',setup_sec:'Primul pornire / SDR',setup_title:'Setup',setup_open_wizard:'Deschide asistentul',setup_sdr_title:'Dispozitive SDR',
-    setup_scan:'Scanare',setup_install_sx:'Instalează SXceiver',setup_install_lime:'Instalează Lime',setup_install_mucell:'Instalează µCell',
+    setup_scan:'Scanare',setup_install_sx:'Instalează SXceiver',setup_install_lime:'Instalează Lime',setup_install_mucell:'Instalează µCell',setup_install_pluto:'Instalează Pluto',
     setup_enable_rf:'Activează RF și repornește',setup_autostart:'Asigură autostart',setup_mark_done:'Marchează setup finalizat',
     setup_complete_key:'Setup complet',setup_backend_key:'Backend config',setup_device_key:'Device',setup_unit_key:'Unitate systemd',setup_helper_key:'Helper',
     setup_installing:'Se instalează {driver}…',setup_session:'Sesiune expirată — autentifică-te din nou.',
     setup_install_fail:'Instalare eșuată',setup_drv_ok:'Driver instalat (OK).',
     wiz_welcome_title:'Bun venit la Bost FlowStation',wiz_welcome_body:'Acest asistent configurează SDR-ul, parametrii RF și autostart-ul systemd. Panoul web rămâne disponibil chiar dacă radio-ul e offline.',
     wiz_skip:'Omite cu implicite',wiz_continue:'Continuă',wiz_back:'Înapoi',wiz_next:'Următorul',wiz_finish:'Finalizează',wiz_skip_now:'Omite deocamdată',
-    wiz_sdr_title:'Selectează SDR',wiz_sdr_help:'Scanează dispozitive SoapySDR sau instalează un driver (SXceiver / Lime / µCell / USRP).',wiz_device_args:'Argumente device',
+    wiz_sdr_title:'Selectează SDR',wiz_sdr_help:'Scanează dispozitive SoapySDR sau instalează un driver (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Argumente device',
     wiz_reboot_title:'Se repornește Pi…',wiz_reboot_body:'µCell necesită reboot pentru overlay-ul device-tree. Pagina revine singură.',
     wiz_reboot_confirm:'Driver µCell instalat. Repornești Pi acum ca placa să poată fi deschisă?',
     wiz_params_title:'RF / Rețea / Brew',wiz_params_help:'Folosește formularele din Config pentru editare completă, sau păstrează implicitele.',
@@ -8528,14 +8544,14 @@ const LANGS={
     cr_enhanced:'Verbesserte Version von Aitor, EA4HBL',
     geo_lat:'Bost FlowStation Breitengrad',geo_lon:'Bost FlowStation Längengrad',
     setup:'Setup',setup_sec:'Ersteinrichtung / SDR',setup_title:'Setup',setup_open_wizard:'Assistent öffnen',setup_sdr_title:'SDR-Geräte',
-    setup_scan:'Scannen',setup_install_sx:'SXceiver installieren',setup_install_lime:'Lime installieren',setup_install_mucell:'µCell installieren',
+    setup_scan:'Scannen',setup_install_sx:'SXceiver installieren',setup_install_lime:'Lime installieren',setup_install_mucell:'µCell installieren',setup_install_uhd:'USRP (UHD) installieren',setup_no_sdr:'Keine SDR-Geräte von SoapySDRUtil --find gemeldet.',setup_install_pluto:'Pluto installieren',
     setup_enable_rf:'RF aktivieren & neu starten',setup_autostart:'Autostart sicherstellen',setup_mark_done:'Setup als fertig markieren',
     setup_complete_key:'Setup fertig',setup_backend_key:'Config-Backend',setup_device_key:'Device',setup_unit_key:'Systemd-Unit',setup_helper_key:'Helper',
     setup_installing:'Installiere {driver}…',setup_session:'Sitzung abgelaufen — bitte erneut anmelden.',
     setup_install_fail:'Installation fehlgeschlagen',setup_drv_ok:'Treiber installiert (OK).',
-    wiz_welcome_title:'Willkommen bei Bost FlowStation',wiz_welcome_body:'Dieser Assistent konfiguriert SDR, RF-Parameter und systemd-Autostart. Das Dashboard bleibt auch ohne Radio verfügbar.',
+    wiz_lang_help:'Sprache dieser Station wählen. Sie wird zur Standardsprache von Dashboard und Anmeldeseite; jeder Browser kann im Menü trotzdem eine eigene wählen.',wiz_welcome_title:'Willkommen bei Bost FlowStation',wiz_welcome_body:'Dieser Assistent konfiguriert SDR, RF-Parameter und systemd-Autostart. Das Dashboard bleibt auch ohne Radio verfügbar.',
     wiz_skip:'Mit Standardwerten überspringen',wiz_continue:'Weiter',wiz_back:'Zurück',wiz_next:'Weiter',wiz_finish:'Fertig',wiz_skip_now:'Vorerst überspringen',
-    wiz_sdr_title:'SDR wählen',wiz_sdr_help:'SoapySDR-Geräte scannen oder Treiber installieren (SXceiver / Lime / µCell / USRP).',wiz_device_args:'Device-Argumente',
+    wiz_sdr_title:'SDR wählen',wiz_sdr_help:'SoapySDR-Geräte scannen oder Treiber installieren (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Device-Argumente',
     wiz_reboot_title:'Pi wird neu gestartet…',wiz_reboot_body:'µCell braucht einen Neustart, damit das Device-Tree-Overlay geladen wird. Die Seite kommt von selbst zurück.',
     wiz_reboot_confirm:'µCell-Treiber installiert. Pi jetzt neu starten, damit das Board geöffnet werden kann?',
     wiz_params_title:'RF / Netz / Brew',wiz_params_help:'Nutze die Config-Formulare für volle Bearbeitung oder behalte die Standardwerte.',
@@ -8600,15 +8616,15 @@ const LANGS={
     stations:'Inicio',calls:'Llamadas',lastheard:'Última Actividad',log:'Log',rf:'RF',health:'Salud',asterisk:'Asterisk SIP',dapnet:'DAPNET',echolink:'EchoLink',echolink_title:'EchoLink',meshcom:'MeshCom',meshcom_title:'MeshCom',geoalarm:'GeoAlarm',geoalarm_title:'GeoAlarm',setup:'Setup',config:'Config',
     home_quick_title:'Perfiles rápidos',home_more_settings:'Más ajustes',
     setup_sec:'Primer arranque / SDR',setup_title:'Setup',setup_open_wizard:'Abrir asistente',setup_sdr_title:'Dispositivos SDR',
-    setup_scan:'Escanear',setup_install_sx:'Instalar SXceiver',setup_install_lime:'Instalar Lime',setup_install_mucell:'Instalar µCell',setup_install_uhd:'Instalar USRP (UHD)',
+    setup_scan:'Escanear',setup_install_sx:'Instalar SXceiver',setup_install_lime:'Instalar Lime',setup_install_mucell:'Instalar µCell',setup_no_sdr:'SoapySDRUtil --find no ha detectado ningún SDR.',setup_install_pluto:'Instalar Pluto',setup_install_uhd:'Instalar USRP (UHD)',
     setup_enable_rf:'Activar RF y reiniciar',setup_autostart:'Asegurar autostart',setup_mark_done:'Marcar setup hecho',
     setup_complete_key:'Setup completo',setup_backend_key:'Backend config',setup_device_key:'Device',
     setup_unit_key:'Unidad systemd',setup_helper_key:'Helper',
     setup_installing:'Instalando {driver}…',setup_session:'La sesión ha caducado. Entra de nuevo y reintenta.',
     setup_install_fail:'No se pudo instalar',setup_drv_ok:'Driver instalado (OK).',
-    wiz_welcome_title:'Bienvenido a Bost FlowStation',wiz_welcome_body:'Este asistente configura el SDR, parámetros RF y el arranque automático. El panel web sigue disponible aunque la radio esté apagada.',
+    wiz_lang_help:'Elige el idioma de esta estación. Será el idioma por defecto del panel y de la página de acceso; cada navegador puede elegir el suyo en el menú.',wiz_welcome_title:'Bienvenido a Bost FlowStation',wiz_welcome_body:'Este asistente configura el SDR, parámetros RF y el arranque automático. El panel web sigue disponible aunque la radio esté apagada.',
     wiz_skip:'Omitir con valores por defecto',wiz_continue:'Continuar',wiz_back:'Atrás',wiz_next:'Siguiente',wiz_finish:'Finalizar',wiz_skip_now:'Omitir por ahora',
-    wiz_sdr_title:'Seleccionar SDR',wiz_sdr_help:'Escanea dispositivos SoapySDR o instala un driver (SXceiver / Lime / µCell / USRP).',wiz_device_args:'Argumentos device',
+    wiz_sdr_title:'Seleccionar SDR',wiz_sdr_help:'Escanea dispositivos SoapySDR o instala un driver (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Argumentos device',
     wiz_reboot_title:'Reiniciando la Pi…',wiz_reboot_body:'µCell necesita reiniciar para cargar el overlay del device-tree. La página volverá sola.',
     wiz_reboot_confirm:'Driver µCell instalado. ¿Reiniciar la Pi ahora para que la placa se pueda abrir?',
     wiz_params_title:'RF / Red / Brew',wiz_params_help:'Usa los formularios de Config para editar todo, o mantén los valores por defecto.',
@@ -9176,6 +9192,7 @@ const LANGS={
     "setup_install_sx": "Instalar SXceiver",
     "setup_install_lime": "Instalar Lime",
     "setup_install_mucell": "Instalar µCell",
+    "setup_install_pluto": "Instalar Pluto",
     "setup_install_uhd": "Instalar USRP (UHD)",
     "setup_enable_rf": "Ativar RF e reiniciar",
     "setup_autostart": "Ativar arranque automático",
@@ -9198,7 +9215,7 @@ const LANGS={
     "wiz_finish": "Concluir",
     "wiz_skip_now": "Ignorar por agora",
     "wiz_sdr_title": "Selecionar SDR",
-    "wiz_sdr_help": "Procura dispositivos SoapySDR ou instala um driver (SXceiver / Lime / µCell / USRP).",
+    "wiz_sdr_help": "Procura dispositivos SoapySDR ou instala um driver (SXceiver / Lime / µCell / USRP / Pluto).",
     "wiz_device_args": "Argumentos do dispositivo",
     "wiz_reboot_title": "A reiniciar o Pi…",
     "wiz_reboot_body": "O µCell precisa de um reinício para carregar o device-tree overlay. A página será restabelecida automaticamente.",
@@ -10436,6 +10453,7 @@ const LANGS={
     "setup_install_sx": "Installer SXceiver",
     "setup_install_lime": "Installer Lime",
     "setup_install_mucell": "Installer µCell",
+    "setup_install_pluto": "Installer Pluto",
     "setup_install_uhd": "Installer USRP (UHD)",
     "setup_enable_rf": "Activer la RF et redémarrer",
     "setup_autostart": "Activer le démarrage automatique",
@@ -10458,7 +10476,7 @@ const LANGS={
     "wiz_finish": "Terminer",
     "wiz_skip_now": "Ignorer pour le moment",
     "wiz_sdr_title": "Sélectionner le SDR",
-    "wiz_sdr_help": "Recherchez les périphériques SoapySDR ou installez un pilote (SXceiver / Lime / µCell / USRP).",
+    "wiz_sdr_help": "Recherchez les périphériques SoapySDR ou installez un pilote (SXceiver / Lime / µCell / USRP / Pluto).",
     "wiz_device_args": "Arguments du périphérique",
     "wiz_reboot_title": "Redémarrage du Pi…",
     "wiz_reboot_body": "µCell nécessite un redémarrage pour charger le device-tree overlay. La page se reconnectera automatiquement.",
@@ -11622,9 +11640,12 @@ const LANGS={
 
 function dashboardLanguage(value){
   const code=String(value||'').toLowerCase().split('-')[0];
-  return Object.prototype.hasOwnProperty.call(LANGS,code)?code:'es';
+  return Object.prototype.hasOwnProperty.call(LANGS,code)?code:'en';
 }
-let currentLang=dashboardLanguage(localStorage.getItem('fs_lang')||navigator.language||'es');
+// Station default language ([dashboard] language, set in the Setup wizard; filled in by the
+// server). Order: this browser's own choice, the station default, the browser language, English.
+const STATION_LANG=(s=>s.indexOf('{{')===0?'':s)('{{STATION_LANG}}');
+let currentLang=dashboardLanguage(localStorage.getItem('fs_lang')||STATION_LANG||navigator.language||'en');
 function t(k,v){let s=(LANGS[currentLang]||LANGS.en)[k]||(LANGS.en[k]||k);if(v)Object.keys(v).forEach(x=>{s=s.replace('{'+x+'}',v[x]);});return s;}
 function applyLang(){
   document.documentElement.lang=currentLang==='pt'?'pt-PT':currentLang;
@@ -21216,11 +21237,26 @@ function closeSetupWizard(){
   if(w)w.classList.remove('open');
 }
 function wizShowStep(){
+  if(wizStep===0)wizRenderLangs();
   document.querySelectorAll('.setup-wiz-step').forEach(el=>{
     el.classList.toggle('active', String(el.getAttribute('data-step'))===String(wizStep));
   });
 }
-function wizNext(){wizStep=Math.min(4,wizStep+1);wizShowStep();}
+function wizNext(){wizStep=Math.min(5,wizStep+1);wizShowStep();}
+// Step 0: station language ([dashboard] language). Picking one switches the page at once;
+// Continue stores it as the station default.
+function wizRenderLangs(){
+  const box=document.getElementById('wiz-lang-grid');if(!box)return;
+  box.innerHTML=Object.keys(LANGUAGE_NAMES).map(l=>'<button type="button" class="setup-lang'+(l===currentLang?' selected':'')+'" onclick="wizPickLang(\''+l+'\')"><b>'+(l==='zh'?'CN':l.toUpperCase())+'</b><span>'+escHtml(LANGUAGE_NAMES[l])+'</span></button>').join('');
+}
+function wizPickLang(l){setLang(l);wizRenderLangs();setText('wiz-lang-msg','');}
+async function wizLangContinue(){
+  try{
+    const r=await fetch('/api/setup/language',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:currentLang})});
+    if(!r.ok){setText('wiz-lang-msg',await r.text());return;}
+  }catch(e){setText('wiz-lang-msg',String(e));return;}
+  wizNext();
+}
 function wizPrev(){wizStep=Math.max(0,wizStep-1);wizShowStep();}
 
 async function setupScanSdr(inWizard){
@@ -21260,6 +21296,7 @@ async function setupInstallDriver(driver,inWizard){
       if(driver==='lime'){const inp=document.getElementById('wiz-device');if(inp)inp.value='driver=lime';setupSelectedDevice='driver=lime';}
       if(driver==='mucell'){const inp=document.getElementById('wiz-device');if(inp)inp.value='driver=mucell';setupSelectedDevice='driver=mucell';}
       if(driver==='uhd'){const inp=document.getElementById('wiz-device');if(inp)inp.value='driver=uhd';setupSelectedDevice='driver=uhd';}
+      if(driver==='pluto'){const inp=document.getElementById('wiz-device');if(inp)inp.value='driver=plutosdr';setupSelectedDevice='driver=plutosdr';}
       if(needReboot){
         // µCell overlay is only read at boot — apply device string then reboot the Pi.
         try{
@@ -21614,8 +21651,9 @@ const LOGIN_I18N={
   hu:{user:'Felhasználó',pass:'Jelszó',enter:'Belépés',entering:'Belépés…',bad:'Hibás hitelesítő adatok',err:'Belépési hiba (',net:'Hálózati hiba: ',credit:'Fejlesztett verzió: Aitor, EA4HBL',title:'Belépés'},
   zh:{user:'用户名',pass:'密码',enter:'登录',entering:'登录中…',bad:'凭据无效',err:'登录错误 (',net:'网络错误: ',credit:'改进版本：Aitor, EA4HBL',title:'登录'},
 };
-const _pref=String(localStorage.getItem('fs_lang')||navigator.language||'es').toLowerCase().split('-')[0];
-const _lang=Object.prototype.hasOwnProperty.call(LOGIN_I18N,_pref)?_pref:'es';
+const STATION_LANG=(s=>s.indexOf('{{')===0?'':s)('{{STATION_LANG}}');
+const _pref=String(localStorage.getItem('fs_lang')||STATION_LANG||navigator.language||'en').toLowerCase().split('-')[0];
+const _lang=Object.prototype.hasOwnProperty.call(LOGIN_I18N,_pref)?_pref:'en';
 const L=LOGIN_I18N[_lang];
 document.documentElement.lang=_lang==='pt'?'pt-PT':_lang;
 document.title='{{PRODUCT_NAME}} — '+L.title;

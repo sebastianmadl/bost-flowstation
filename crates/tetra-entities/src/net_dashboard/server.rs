@@ -3346,7 +3346,7 @@ fn handle_connection(
             if session_ok {
                 http_redirect(buf.into_inner(), "/");
             } else {
-                serve_login_page(buf.into_inner());
+                serve_login_page(buf.into_inner(), &config_path);
             }
             return;
         }
@@ -3475,7 +3475,7 @@ fn handle_connection(
             // controls, /ws, raw telemetry) still falls through to the redirect/401 below, so the
             // admin surface stays fully behind the session wall.
             if !require_http_auth && public_overview && is_root {
-                serve_html(inner);
+                serve_html(inner, &config_path);
                 return;
             }
             if !require_http_auth && public_overview
@@ -3940,6 +3940,20 @@ fn handle_connection(
                 Err(e) => http_response(inner, 400, &e),
             },
             Err(e) => http_response(inner, 400, &format!("invalid JSON: {e}")),
+        }
+    } else if req_line.contains("POST /api/setup/language") {
+        let (inner, body_str) = read_post_body(stream);
+        let lang = serde_json::from_str::<serde_json::Value>(&body_str)
+            .ok()
+            .and_then(|v| v.get("language").and_then(|l| l.as_str()).map(str::to_string));
+        match lang.ok_or_else(|| "body must be {\"language\": \"de\"}".to_string())
+            .and_then(|l| crate::net_dashboard::setup::set_station_language(&config_path, &l))
+        {
+            Ok(l) => {
+                tracing::info!("Dashboard setup: station language {l}");
+                http_json_response(inner, 200, &serde_json::json!({"ok": true, "language": l}).to_string());
+            }
+            Err(e) => http_response(inner, 400, &e),
         }
     } else if req_line.contains("POST /api/setup/complete") {
         let (inner, body_str) = read_post_body(stream);
@@ -4872,7 +4886,7 @@ fn handle_connection(
                 break;
             }
         }
-        serve_html(buf.into_inner());
+        serve_html(buf.into_inner(), &config_path);
     }
 }
 
@@ -5597,6 +5611,8 @@ fn radio_names_json(radioid: &crate::net_dashboard::radioid::RadioIdCache) -> St
 /// (OTA modal). Boot/badge should omit notes to keep the Pi responsive.
 fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool, with_notes: bool) {
     let channel = crate::net_dashboard::ota_channel::read_ota_channel(config_path);
+    // Update notes: the Spanish changelog only for a Spanish station, English otherwise.
+    let notes_lang = crate::net_dashboard::setup::station_language(config_path).unwrap_or_else(|| "en".into());
     const CACHE_OK_SECS: u64 = 90;
     // Cache key includes notes so a light boot result does not starve the modal of changelog.
     type CacheEntry = (std::time::Instant, String, bool, String); // at, channel, with_notes, json
@@ -5657,6 +5673,7 @@ fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool
                 tetra_core::STACK_VERSION,
                 &channel,
                 with_notes,
+                &notes_lang,
             );
             let json = result.to_json();
             if !result.check_failed {
@@ -5710,6 +5727,7 @@ fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool
                     tetra_core::STACK_VERSION,
                     &channel,
                     with_notes,
+                    &notes_lang,
                 )
                 .to_json()
             })
@@ -7341,8 +7359,9 @@ fn activate_config_profile(config_path: &str, profile_name: &str) -> Result<(), 
     atomic_write(config_path, &profile_content).map_err(|e| format!("failed to copy profile: {}", e))
 }
 
-fn serve_html(mut stream: PrefixedConn) {
-    let body = dashboard_html_body().as_bytes();
+fn serve_html(mut stream: PrefixedConn, config_path: &str) {
+    let body = crate::net_dashboard::setup::with_station_language(dashboard_html_body(), config_path);
+    let body = body.as_bytes();
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -8196,8 +8215,8 @@ fn serve_dashboard_tls_status(stream: PrefixedConn) {
     http_json_response(stream, 200, &body);
 }
 
-fn serve_login_page(mut stream: PrefixedConn) {
-    let body = login_html_body();
+fn serve_login_page(mut stream: PrefixedConn, config_path: &str) {
+    let body = crate::net_dashboard::setup::with_station_language(login_html_body(), config_path);
     let header = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/html; charset=utf-8\r\n\
