@@ -4,6 +4,10 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## Pendiente de publicar — Correcciones
+
+- **El dashboard muestra quién habla cuando el turno llega de la red.** Si otra radio tomaba la palabra por Brew (otra estación, la app TetraLink) durante el hangtime de una llamada de grupo en curso, la estación daba la palabra correctamente en el aire, pero el dashboard seguía mostrando al primer hablante y «Last Heard» no listaba los turnos siguientes. Solo con un hangtime corto y una pausa (llamada nueva) aparecía el segundo. Ahora cada turno de la red se comunica al dashboard: el hablante actual se actualiza y cada turno entra en «Last Heard». El aire no cambia. Probado en simulación con 10 estaciones y 30 radios.
+
 ## v0.5.7 — SC3 (TEA2), grupos gestionados y correcciones
 
 - **Los paquetes de estación rechazan rutas absolutas y de salto de directorio al extraerse.** Al importar un paquete de estación, una entrada con ruta absoluta o con `..` ya no puede escribir fuera del directorio de destino (zip-slip). Corrección aportada por David Harcus, MM7FDM (PR #46).

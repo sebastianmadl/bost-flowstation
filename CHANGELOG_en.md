@@ -2,6 +2,10 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+## Not yet released — Fixes
+
+- **The dashboard shows who is talking when the over comes from the network.** When another radio took the floor over Brew (another station, the TetraLink app) during the hang time of a running group call, the station granted it correctly on the air, but the dashboard kept showing the first speaker and Last Heard did not list the later overs. Only with a short hang time and a pause (a new call) did the second one appear. Every network over is now reported to the dashboard: the current speaker is updated and every over goes into Last Heard. Nothing changes on the air. Tested in a simulation with 10 stations and 30 radios.
+
 ## v0.5.7 — SC3 (TEA2), managed talkgroups and fixes
 
 - **Station bundles reject absolute and traversal paths on extraction.** When importing a station bundle, an entry with an absolute path or `..` can no longer write outside the target directory (zip-slip). Fix contributed by David Harcus, MM7FDM (PR #46).
