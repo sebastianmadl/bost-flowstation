@@ -31,9 +31,9 @@ HELPER_DST="/usr/local/sbin/bost-setup-helper.sh"
 SUDOERS_DST="/etc/sudoers.d/bost-setup"
 SERVICE_USER="${BOST_SERVICE_USER:-bts}"
 
-# Dashboard channel id for [dashboard].ota_channel
-OTA_CHANNEL="stable"
-[[ "$BRANCH" == "beta" ]] && OTA_CHANNEL="beta"
+# Dashboard channel id for [dashboard].ota_channel: "installed" = the dashboard update follows
+# the repository and branch installed here (BOST_REPO / BOST_BRANCH), forks included.
+OTA_CHANNEL="installed"
 
 # Dashboard listen preset: standard (80→443) or high (HTTPS 8443 only).
 # Override with BOST_DASH_PORTS=standard|high. Interactive prompt when TTY and unset.
@@ -266,7 +266,7 @@ if [[ ! -f "$CFG_PATH" ]]; then
     python3 - "$CFG_PATH" "$OTA_CHANNEL" "$DASH_HTTP_PORT" "$DASH_HTTPS_PORT" <<'PY'
 import sys, re
 path = sys.argv[1]
-ota_channel = sys.argv[2] if len(sys.argv) > 2 else "stable"
+ota_channel = sys.argv[2] if len(sys.argv) > 2 else "installed"
 http_port = sys.argv[3] if len(sys.argv) > 3 else "80"
 https_port = sys.argv[4] if len(sys.argv) > 4 else "443"
 text = open(path, encoding="utf-8").read()
@@ -337,7 +337,7 @@ EOF
   cp "$CFG_PATH" "${CFG_PATH}.fallback"
 else
   log "Keeping existing $CFG_PATH"
-  # Ensure ota_channel exists / matches install branch when reinstalling with BOST_BRANCH=.
+  # Reinstalling: the dashboard update follows the repository and branch installed now.
   python3 - "$CFG_PATH" "$OTA_CHANNEL" <<'PY'
 import sys, re
 path, channel = sys.argv[1], sys.argv[2]

@@ -582,7 +582,7 @@ fn parse_session_cookie(headers: &str) -> Option<String> {
 /// Returns `Ok(path)` on success, or `Err(message)` listing all paths tried.
 /// The returned path is guaranteed to contain a `.git` entry (file or directory —
 /// `.git` can be a file in git worktrees).
-fn resolve_source_dir(override_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
+pub(crate) fn resolve_source_dir(override_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
     fn is_git_repo(p: &std::path::Path) -> bool {
         // `.git` is a directory in normal clones, but a file in git worktrees,
         // so check for existence of either form.
@@ -1553,20 +1553,21 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
     }
 
     // Step 3: channel → branch, point origin at the Bost repo, fetch.
-    let channel = crate::net_dashboard::ota_channel::read_ota_channel(&config_path);
-    let ota_branch = tetra_core::ota_branch_for_channel(&channel);
-    let ota_url = tetra_core::PRODUCT_REPO_GIT;
+    // Source: [dashboard] ota_channel (default: the installed repository and branch).
+    let ota_source = crate::net_dashboard::ota_channel::resolve_ota_source(&config_path);
+    let ota_branch = ota_source.branch.as_str();
+    let ota_url = ota_source.git_url.as_str();
     let remote_ref = format!("origin/{}", ota_branch);
     log!(
         update,
         "OTA channel={} → branch {}",
-        channel,
+        ota_source.channel,
         ota_branch
     );
     log!(
         update,
         "--- Ensuring OTA remote {} (branch {}) ---",
-        ota_url,
+        ota_source.repo_display,
         ota_branch
     );
     let current_origin = run_cmd_output(&update, "git", &["-C", src_str, "remote", "get-url", "origin"], &src_dir)
@@ -1587,8 +1588,8 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
         log!(
             update,
             "origin was '{}' — switching to {}",
-            current_origin,
-            ota_url
+            crate::net_dashboard::ota_channel::strip_url_credentials(&current_origin),
+            ota_source.repo_display
         );
         if run_cmd_output(
             &update,
@@ -3768,19 +3769,20 @@ fn handle_connection(
         let (inner, body_str) = read_post_body(stream);
         match serde_json::from_str::<serde_json::Value>(&body_str) {
             Ok(v) => {
-                let channel = v
-                    .get("channel")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .trim();
-                let channel = tetra_core::normalize_ota_channel(channel);
-                match crate::net_dashboard::ota_channel::write_ota_channel(&config_path, channel) {
+                let field = |k: &str| v.get(k).and_then(|c| c.as_str()).map(str::trim);
+                let channel = crate::net_dashboard::ota_channel::normalize_channel(field("channel").unwrap_or(""));
+                match crate::net_dashboard::ota_channel::write_ota_source(
+                    &config_path,
+                    channel,
+                    field("repo"),
+                    field("branch"),
+                ) {
                     Ok(()) => {
                         tracing::info!("Dashboard: OTA channel set to {}", channel);
                         let body = crate::net_dashboard::ota_channel::channel_json(&config_path);
                         http_json_response(inner, 200, &body);
                     }
-                    Err(e) => http_response(inner, 500, &format!("failed to save ota_channel: {e}")),
+                    Err(e) => http_response(inner, 400, &e),
                 }
             }
             Err(e) => http_response(inner, 400, &format!("invalid JSON: {e}")),
@@ -5610,7 +5612,9 @@ fn radio_names_json(radioid: &crate::net_dashboard::radioid::RadioIdCache) -> St
 /// Query: `?refresh=1` bypasses success cache; `?notes=1` also fetches changelog text
 /// (OTA modal). Boot/badge should omit notes to keep the Pi responsive.
 fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool, with_notes: bool) {
-    let channel = crate::net_dashboard::ota_channel::read_ota_channel(config_path);
+    let source = crate::net_dashboard::ota_channel::resolve_ota_source(config_path);
+    // Cache/coalescing key: the same source and branch give the same answer.
+    let channel = format!("{}|{}|{}", source.channel, source.git_url, source.branch);
     // Update notes: the Spanish changelog only for a Spanish station, English otherwise.
     let notes_lang = crate::net_dashboard::setup::station_language(config_path).unwrap_or_else(|| "en".into());
     const CACHE_OK_SECS: u64 = 90;
@@ -5671,7 +5675,7 @@ fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool
         let json = if is_leader {
             let result = crate::net_dashboard::update_check::check_for_update(
                 tetra_core::STACK_VERSION,
-                &channel,
+                &source,
                 with_notes,
                 &notes_lang,
             );
@@ -5725,7 +5729,7 @@ fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool
             st.clone().unwrap_or_else(|| {
                 crate::net_dashboard::update_check::check_for_update(
                     tetra_core::STACK_VERSION,
-                    &channel,
+                    &source,
                     with_notes,
                     &notes_lang,
                 )
@@ -7160,9 +7164,13 @@ fn serve_system_info(mut stream: PrefixedConn, config_path: &str, probe_sdr: boo
     let sdr_name = crate::phy::components::soapy_settings::detected_sdr_name().unwrap_or_else(|| "unknown".to_string());
     let rf_status = crate::rf_status::get();
 
+    let (source_repo, source_branch) = crate::net_dashboard::ota_channel::installed_source(config_path);
+
     let body = serde_json::to_string(&serde_json::json!({
         "hostname": hostname,
         "uptime_secs": uptime_secs,
+        "source_repo": source_repo,
+        "source_branch": source_branch,
         "os": os_info,
         "config_path": config_path,
         "config_dir": config_dir,
@@ -9554,6 +9562,7 @@ fn serve_dapnet_send(
 
 #[cfg(test)]
 mod tests {
+
     use super::{
         DashboardServer, LoginThrottle, MAX_TETRA_SSI, UpdateState, activate_config_profile, binary_built_from,
         handle_ws_command, is_masked_secret_key, mask_config_secrets, normalize_mojibake_html,

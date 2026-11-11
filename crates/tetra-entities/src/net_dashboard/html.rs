@@ -6791,6 +6791,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
         <div class="card-body">
           <div class="info-row"><div class="info-key" data-i18n="sys_version">FS Version</div><div class="info-val accent" id="sysVersion">—</div></div>
+          <div class="info-row"><div class="info-key" data-i18n="sys_source">Installed from</div><div class="info-val" id="sysSource" style="overflow-wrap:anywhere">—</div></div>
           <div class="info-row"><div class="info-key" data-i18n="sys_os">OS</div><div class="info-val" id="sysOs">—</div></div>
           <div class="info-row"><div class="info-key" data-i18n="sys_config">Active Config</div><div class="info-val" id="sysConfigPath">—</div></div>
           <div class="info-row"><div class="info-key" data-i18n="sys_cpu">CPU</div><div class="info-val" id="sysCpu">—</div></div>
@@ -7222,11 +7223,20 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
     <div class="ota-step is-active" id="ota-step-choose">
       <div class="ota-channel-field">
         <label for="ota-channel-select" data-i18n="ota_channel_title">OTA channel</label>
-        <select id="ota-channel-select" onchange="saveOtaChannel()">
+        <select id="ota-channel-select" onchange="onOtaChannelSelect()">
+          <option value="installed" data-i18n="ota_channel_installed">Installed repository</option>
           <option value="stable" data-i18n="ota_channel_stable">Stable (main)</option>
           <option value="beta" data-i18n="ota_channel_beta">Beta</option>
+          <option value="custom" data-i18n="ota_channel_custom">Custom git URL</option>
         </select>
-        <span class="ota-channel-hint" id="ota-channel-hint" data-i18n="ota_channel_help">Stable = main (day-to-day). Beta = previews. This release bridges to PTBS — please OTA once.</span>
+        <div id="ota-custom-fields" style="display:none;margin-top:10px">
+          <label for="ota-custom-repo" data-i18n="ota_custom_repo">Git URL</label>
+          <input type="text" id="ota-custom-repo" class="form-input" placeholder="https://github.com/owner/bost-flowstation.git" autocomplete="off" spellcheck="false" onchange="saveOtaChannel()">
+          <label for="ota-custom-branch" style="margin-top:8px" data-i18n="ota_custom_branch">Branch</label>
+          <input type="text" id="ota-custom-branch" class="form-input" placeholder="main" autocomplete="off" spellcheck="false" onchange="saveOtaChannel()">
+        </div>
+        <span class="ota-channel-hint" id="ota-source-line"></span>
+        <span class="ota-channel-hint" id="ota-channel-hint" data-i18n="ota_channel_help">Default: the repository and branch this station was installed from.</span>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn" onclick="closeUpdateModal()" data-i18n="cancel">Cancel</button>
@@ -8198,12 +8208,12 @@ const LANGS={
     cfg_apply_confirm:'Apply selected Cell × Brew profiles and restart? Current config.toml will be backed up.',
     cfg_need_name:'Enter a profile name.',cfg_need_select:'Select a profile first.',cfg_deleted:'✓ Deleted',cfg_applied:'✓ Applied — restarting…',cfg_updated:'✓ Profile saved',
 
-    update:'Update',update_available:'Update available',update_title:'OTA Update — github.com/Aitorrio/bost-flowstation',
+    update:'Update',update_available:'Update available',update_title:'OTA Update',
     update_confirm:'Pull latest from the {channel} channel (branch {branch}) and rebuild?\nThe service will restart automatically if a new build is needed.',
     ota_channel_title:'OTA channel',
-    ota_channel_stable:'Stable (main)',
+    ota_channel_stable:'Stable (main)',ota_channel_installed:'Installed repository',ota_channel_custom:'Custom git URL',ota_custom_repo:'Git URL',ota_custom_branch:'Branch',ota_source_line:'Updates come from {repo} · {branch}.',ota_source_no_check:'Not on GitHub: no update check, the update itself still works.',ota_custom_missing:'Enter git URL and branch first.',
     ota_channel_beta:'Beta',
-    ota_channel_help:'Stable tracks git branch main (was bost). Beta = previews. Coming soon: rebrand to PTBS (Personal Tetra Base Station) — please run OTA once on this bridge release.',
+    ota_channel_help:'Default: the repository and branch this station was installed from (also a fork). Stable/Beta = original repository main/beta. Custom git URL = any repository and branch.',
     ota_channel_saved:'✓ Channel saved — checks use {channel} ({branch}).',
     ota_channel_save_fail:'✗ Could not save OTA channel',
     ota_check:'Check for updates',
@@ -8250,7 +8260,7 @@ const LANGS={
     restart_wait_retry:'Retry / Reload',
     restart_wait_timeout:'The station did not come back in time. Check power and run: systemctl status bluestation-bs — then Retry. Only power-cycle as a last resort.',
     system:'System',sys_info:'System Info',sys_hostname:'Hostname',sys_uptime:'Uptime',
-    sys_version:'Bost version',sys_os:'OS',sys_config:'Active Config',
+    sys_version:'Bost version',sys_source:'Installed from',sys_os:'OS',sys_config:'Active Config',
     sys_cpu:'CPU',sys_cpu_load:'CPU Load',sys_ram:'RAM',sys_temp:'CPU Temp',
     network:'Network',network_links:'Links',network_ethernet:'Ethernet',network_wifi_sec:'WiFi',network_primary_hint:'The default-route address is what U-STATUS and outbound traffic use. You can open the dashboard on any listed IP.',network_default_route:'DEFAULT ROUTE',network_iface:'Interface',network_kind:'Type',network_state:'State',network_no_links:'No network interfaces found.',network_kind_ethernet:'Ethernet',network_kind_wifi:'WiFi',network_kind_other:'Other',network_conn_wired:'Wired connection',network_nm_connected:'Connected',network_nm_disconnected:'Disconnected',network_nm_unavailable:'Unavailable',network_nm_connecting:'Connecting',network_nm_disconnecting:'Disconnecting',network_nm_unmanaged:'Unmanaged',network_nm_deactivating:'Deactivating',eth_warn_lose_access:'If you are connected via Ethernet, disconnecting the cable profile may cut off this session. Keep WiFi or another path available.',eth_no_saved:'No saved Ethernet profiles.',eth_connected:'CONNECTED',wifi_status:'Current connection',wifi_saved:'Saved networks',wifi_visible:'Available networks',wifi_loading:'Loading…',wifi_scanning:'Scanning…',wifi_no_device:'No WiFi device detected on this host.',wifi_radio_disabled:'WiFi radio is disabled.',wifi_not_connected:'Not connected to any network.',wifi_no_saved:'No saved networks.',wifi_no_networks:'No networks in range.',wifi_ssid:'Network',wifi_signal:'Signal',wifi_ip:'IP address',wifi_actions:'Actions',wifi_disconnect:'Disconnect',wifi_connect:'Connect',wifi_connect_to:'Connect to',wifi_connecting:'Connecting…',wifi_connected:'CONNECTED',wifi_connected_ok:'Connected.',wifi_saved_tag:'SAVED',wifi_open:'OPEN',wifi_forget:'Forget',wifi_confirm_forget:'Forget network',wifi_password:'Password',wifi_hidden:'Hidden network (SSID not broadcast)',wifi_add_hidden:'Hidden network',wifi_scan:'Scan',wifi_refresh:'Refresh',wifi_radio_off:'Disable WiFi',wifi_radio_on:'Enable WiFi',wifi_warn_lose_access:'If connected to the dashboard via WiFi, changing networks may temporarily disconnect you. Make sure you have a backup access path (Ethernet or known good network).',wifi_reconnect_hint:'Disconnect only drops the active profile — NetworkManager can reconnect automatically. Use Disable WiFi to keep the radio off on purpose.',wifi_err_no_ssid:'SSID required',cancel:'Cancel',sys_sensors:'Host Hardware Sensors',sys_sensors_empty:'No sensors detected on this host.',sys_rf:'RF Hardware (SoapySDR)',sys_autorefresh:'Auto-refresh 5s',
     profile_edit_title:'Edit Config Profile',profile_edit_btn:'Edit',
@@ -8367,7 +8377,7 @@ const LANGS={
     confirm_shutdown:'Oprire Bost FlowStation?\nServiciul se va opri și trebuie repornit manual.',
     confirm_logout:'Deconectare?',
     saved:'✓ Salvat — repornire pentru aplicare.',save_fail:'✗ Salvare eșuată',conn_error:'Eroare de conexiune.',
-    update:'Update',update_available:'Actualizare disponibilă',update_title:'Update OTA — github.com/Aitorrio/bost-flowstation',
+    update:'Update',update_available:'Actualizare disponibilă',update_title:'Update OTA',
     update_confirm:'Descarcă ultima versiune din ramura bost și recompilează?\nServiciul va reporni automat.',
     cr_enhanced:'Versiune îmbunătățită de Aitor, EA4HBL',
     geo_lat:'Latitudine Bost FlowStation',geo_lon:'Longitudine Bost FlowStation',
@@ -8542,7 +8552,7 @@ const LANGS={
     confirm_shutdown:'Bost FlowStation herunterfahren?\nDer Dienst wird gestoppt und muss manuell neu gestartet werden.',
     confirm_logout:'Abmelden?',
     saved:'✓ Gespeichert — Neustart zum Anwenden.',save_fail:'✗ Fehler beim Speichern',conn_error:'Verbindungsfehler.',
-    update:'Update',update_available:'Update verfügbar',update_title:'OTA-Update — github.com/Aitorrio/bost-flowstation',
+    update:'Update',update_available:'Update verfügbar',update_title:'OTA-Update',
     update_confirm:'Neueste Version vom bost-Branch holen und neu bauen?\nDer Dienst startet automatisch neu.',
     cr_enhanced:'Verbesserte Version von Aitor, EA4HBL',
     geo_lat:'Bost FlowStation Breitengrad',geo_lon:'Bost FlowStation Längengrad',
@@ -8576,7 +8586,7 @@ const LANGS={
     update_done_err:'✗ Update fehlgeschlagen. Siehe Log unten.',
     update_close:'Schließen',
     system:'System',sys_info:'Systeminfo',sys_hostname:'Hostname',sys_uptime:'Laufzeit',
-    sys_os:'OS',sys_version:'Bost-Version',sys_config:'Aktive Konfig',
+    sys_os:'OS',sys_version:'Bost-Version',sys_source:'Installiert von',ota_channel_installed:'Installiertes Repository',ota_channel_custom:'Eigene Git-URL',ota_custom_repo:'Git-URL',ota_custom_branch:'Branch',ota_source_line:'Updates kommen von {repo} · {branch}.',ota_source_no_check:'Nicht auf GitHub: keine Update-Prüfung, das Update selbst geht trotzdem.',ota_custom_missing:'Zuerst Git-URL und Branch eintragen.',ota_channel_help:'Standard: das Repository und der Branch, von dem die Station installiert wurde (auch ein Fork). Stable/Beta = Original-Repository main/beta. Eigene Git-URL = beliebiges Repository mit Branch.',sys_config:'Aktive Konfig',
     sys_cpu:'CPU',sys_cpu_load:'CPU-Auslastung',sys_ram:'RAM',sys_temp:'CPU-Temp',
     network:'Netzwerk',network_links:'Verbindungen',network_ethernet:'Ethernet',network_wifi_sec:'WLAN',network_primary_hint:'Die Standardroute-Adresse nutzen U-STATUS und ausgehender Verkehr. Das Dashboard ist über jede gelistete IP erreichbar.',network_default_route:'STANDARDROUTE',network_iface:'Schnittstelle',network_kind:'Typ',network_state:'Status',network_no_links:'Keine Netzwerkschnittstellen gefunden.',network_kind_ethernet:'Ethernet',network_kind_wifi:'WLAN',network_kind_other:'Andere',network_conn_wired:'Kabelverbindung',network_nm_connected:'Verbunden',network_nm_disconnected:'Getrennt',network_nm_unavailable:'Nicht verfügbar',network_nm_connecting:'Verbinden',network_nm_disconnecting:'Trennen',network_nm_unmanaged:'Nicht verwaltet',network_nm_deactivating:'Deaktivieren',eth_warn_lose_access:'Wenn Sie per Ethernet verbunden sind, kann das Trennen des Profils diese Sitzung unterbrechen. Halten Sie WLAN oder einen anderen Weg bereit.',eth_no_saved:'Keine gespeicherten Ethernet-Profile.',eth_connected:'VERBUNDEN',wifi_status:'Aktuelle Verbindung',wifi_saved:'Gespeicherte Netzwerke',wifi_visible:'Verfügbare Netzwerke',wifi_loading:'Wird geladen…',wifi_scanning:'Suche läuft…',wifi_no_device:'Kein WLAN-Gerät erkannt.',wifi_radio_disabled:'WLAN-Funk ist deaktiviert.',wifi_not_connected:'Mit keinem Netzwerk verbunden.',wifi_no_saved:'Keine gespeicherten Netzwerke.',wifi_no_networks:'Keine Netzwerke in Reichweite.',wifi_ssid:'Netzwerk',wifi_signal:'Signal',wifi_ip:'IP-Adresse',wifi_actions:'Aktionen',wifi_disconnect:'Trennen',wifi_connect:'Verbinden',wifi_connect_to:'Verbinden mit',wifi_connecting:'Verbinde…',wifi_connected:'VERBUNDEN',wifi_connected_ok:'Verbunden.',wifi_saved_tag:'GESPEICHERT',wifi_open:'OFFEN',wifi_forget:'Vergessen',wifi_confirm_forget:'Netzwerk vergessen',wifi_password:'Passwort',wifi_hidden:'Verstecktes Netzwerk (SSID nicht gesendet)',wifi_add_hidden:'Verstecktes Netzwerk',wifi_scan:'Suchen',wifi_refresh:'Aktualisieren',wifi_radio_off:'WLAN deaktivieren',wifi_radio_on:'WLAN aktivieren',wifi_warn_lose_access:'Wenn Sie über WLAN mit dem Dashboard verbunden sind, kann ein Netzwerkwechsel die Verbindung trennen. Stellen Sie sicher, dass Sie einen alternativen Zugang haben.',wifi_err_no_ssid:'SSID erforderlich',cancel:'Abbrechen',sys_sensors:'Host-Hardware-Sensoren',sys_sensors_empty:'Keine Sensoren erkannt.',sys_rf:'RF-Hardware (SoapySDR)',sys_autorefresh:'Auto-Aktualisierung 5s',
     profile_edit_title:'Konfigprofil bearbeiten',profile_edit_btn:'Bearbeiten',
@@ -8879,12 +8889,12 @@ const LANGS={
     cfg_help_brew_lip:'Reenvía cada informe LIP UL a Brew hacia el ISSI de abajo, digan lo que digan las radios como destino.',
     cfg_help_brew_lip_issi:'ISSI de destino en Brew para LIP capturado (1–16777215).',
     cfg_brew_sds:'Reenvío SDS',cfg_brew_rssi:'Exportar RSSI',cfg_brew_lip:'Reenvío de LIP',cfg_brew_lip_issi:'ISSI de destino de LIP a través de Brew',
-    update:'Actualizar',update_available:'Actualización disponible',update_title:'Actualización OTA — github.com/Aitorrio/bost-flowstation',
+    update:'Actualizar',update_available:'Actualización disponible',update_title:'Actualización OTA',
     update_confirm:'¿Obtener lo último del canal {channel} (rama {branch}) y recompilar?\nEl servicio se reiniciará automáticamente si hace falta una build nueva.',
     ota_channel_title:'Canal OTA',
-    ota_channel_stable:'Estable (main)',
+    ota_channel_stable:'Estable (main)',ota_channel_installed:'Repositorio instalado',ota_channel_custom:'URL git propia',ota_custom_repo:'URL git',ota_custom_branch:'Rama',ota_source_line:'Las actualizaciones vienen de {repo} · {branch}.',ota_source_no_check:'No está en GitHub: sin comprobación de actualizaciones, la actualización funciona igual.',ota_custom_missing:'Introduce primero la URL git y la rama.',
     ota_channel_beta:'Beta',
-    ota_channel_help:'Estable sigue la rama git main (antes bost). Beta = novedades. Próximo rebrand a PTBS (Personal Tetra Base Station) — haz OTA una vez con esta versión puente.',
+    ota_channel_help:'Por defecto: el repositorio y la rama desde los que se instaló la estación (también un fork). Estable/Beta = repositorio original main/beta. URL git propia = cualquier repositorio y rama.',
     ota_channel_saved:'✓ Canal guardado — las comprobaciones usan {channel} ({branch}).',
     ota_channel_save_fail:'✗ No se pudo guardar el canal OTA',
     ota_check:'Comprobar actualizaciones',
@@ -8931,7 +8941,7 @@ const LANGS={
     restart_wait_retry:'Reintentar / Recargar',
     restart_wait_timeout:'La estación no ha vuelto a tiempo. Revisa la alimentación y ejecuta: systemctl status bluestation-bs — luego Reintentar. Solo corta la corriente como último recurso.',
     system:'Sistema',sys_info:'Info del Sistema',sys_hostname:'Hostname',sys_uptime:'Tiempo activo',
-    sys_os:'OS',sys_version:'Versión Bost',sys_config:'Config Activa',
+    sys_os:'OS',sys_version:'Versión Bost',sys_source:'Instalado desde',sys_config:'Config Activa',
     sys_cpu:'CPU',sys_cpu_load:'Carga CPU',sys_ram:'RAM',sys_temp:'Temp CPU',
     network:'Red',network_links:'Enlaces',network_ethernet:'Ethernet',network_wifi_sec:'WiFi',network_primary_hint:'La dirección de la ruta por defecto es la que usan U-STATUS y el tráfico saliente. Puedes abrir el dashboard con cualquiera de las IPs listadas.',network_default_route:'RUTA POR DEFECTO',network_iface:'Interfaz',network_kind:'Tipo',network_state:'Estado',network_no_links:'No se encontraron interfaces de red.',network_kind_ethernet:'Ethernet',network_kind_wifi:'WiFi',network_kind_other:'Otra',network_conn_wired:'Conexión cableada',network_nm_connected:'Conectado',network_nm_disconnected:'Desconectado',network_nm_unavailable:'No disponible',network_nm_connecting:'Conectando',network_nm_disconnecting:'Desconectando',network_nm_unmanaged:'Sin gestionar',network_nm_deactivating:'Desactivando',eth_warn_lose_access:'Si estás conectado por Ethernet, desconectar el perfil cableado puede cortar esta sesión. Mantén WiFi u otra vía disponible.',eth_no_saved:'Sin perfiles Ethernet guardados.',eth_connected:'CONECTADO',wifi_status:'Conexión actual',wifi_saved:'Redes guardadas',wifi_visible:'Redes disponibles',wifi_loading:'Cargando…',wifi_scanning:'Escaneando…',wifi_no_device:'No se detectó dispositivo WiFi.',wifi_radio_disabled:'Radio WiFi desactivada.',wifi_not_connected:'No conectado a ninguna red.',wifi_no_saved:'Sin redes guardadas.',wifi_no_networks:'Sin redes en rango.',wifi_ssid:'Red',wifi_signal:'Señal',wifi_ip:'Dirección IP',wifi_actions:'Acciones',wifi_disconnect:'Desconectar',wifi_connect:'Conectar',wifi_connect_to:'Conectar a',wifi_connecting:'Conectando…',wifi_connected:'CONECTADO',wifi_connected_ok:'Conectado.',wifi_saved_tag:'GUARDADO',wifi_open:'ABIERTO',wifi_forget:'Olvidar',wifi_confirm_forget:'Olvidar red',wifi_password:'Contraseña',wifi_hidden:'Red oculta (SSID no difundido)',wifi_add_hidden:'Red oculta',wifi_scan:'Escanear',wifi_refresh:'Actualizar',wifi_radio_off:'Desactivar WiFi',wifi_radio_on:'Activar WiFi',wifi_warn_lose_access:'Si estás conectado al dashboard vía WiFi, cambiar de red puede desconectarte temporalmente. Asegúrate de tener una vía de acceso alternativa.',wifi_reconnect_hint:'Desconectar solo baja el perfil activo - NetworkManager puede reconectar solo. Usa Desactivar WiFi para dejar la radio apagada a proposito.',wifi_err_no_ssid:'SSID requerido',cancel:'Cancelar',sys_sensors:'Sensores del Sistema',sys_sensors_empty:'No se detectaron sensores.',sys_rf:'Hardware RF (SoapySDR)',sys_autorefresh:'Auto-actualización 5s',
     profile_edit_title:'Editar Perfil Config',profile_edit_btn:'Editar',
@@ -9003,7 +9013,7 @@ const LANGS={
     confirm_shutdown:'Leállítja a Bost FlowStation-t?\nA szolgáltatást kézzel kell újraindítani.',
     confirm_logout:'Kijelentkezik?',
     saved:'✓ Mentve — újraindítás szükséges az alkalmazáshoz.',save_fail:'✗ Mentési hiba',conn_error:'Kapcsolódási hiba.',
-    update:'Frissítés',update_available:'Elérhető frissítés',update_title:'OTA frissítés — github.com/Aitorrio/bost-flowstation',
+    update:'Frissítés',update_available:'Elérhető frissítés',update_title:'OTA frissítés',
     update_confirm:'Letölti a legújabb verziót a bost ágból és újraépíti?\nA szolgáltatás automatikusan újraindul.',
     cr_enhanced:'Fejlesztett verzió: Aitor, EA4HBL',
     geo_lat:'Bost FlowStation szélesség',geo_lon:'Bost FlowStation hosszúság',
@@ -9091,7 +9101,7 @@ const LANGS={
     confirm_shutdown:'确定关闭 Bost FlowStation？\n服务将停止，需要手动重启。',
     confirm_logout:'确定注销吗？',
     saved:'✓ 已保存 — 重启后生效',save_fail:'✗ 保存失败',conn_error:'连接错误',
-    update:'更新',update_available:'有可用更新',update_title:'OTA 在线更新 — github.com/Aitorrio/bost-flowstation',
+    update:'更新',update_available:'有可用更新',update_title:'OTA 在线更新',
     update_confirm:'是否从 bost 分支拉取最新代码并重新构建？\n服务将自动重启。',
     cr_enhanced:'改进版本：Aitor, EA4HBL',
     geo_lat:'Bost FlowStation 纬度',geo_lon:'Bost FlowStation 经度',
@@ -9843,7 +9853,7 @@ const LANGS={
     "cfg_updated": "✓ Perfil guardado",
     "update": "Atualizar",
     "update_available": "Atualização disponível",
-    "update_title": "Atualização OTA — github.com/Aitorrio/bost-flowstation",
+    "update_title": "Atualização OTA",
     "update_confirm": "Obter a versão mais recente do canal {channel} (branch {branch}) e recompilar?\nO serviço reiniciará automaticamente se for necessária uma nova compilação.",
     "ota_channel_title": "Canal OTA",
     "ota_channel_stable": "Estável (main)",
@@ -11104,7 +11114,7 @@ const LANGS={
     "cfg_updated": "✓ Profil enregistré",
     "update": "Mettre à jour",
     "update_available": "Mise à jour disponible",
-    "update_title": "Mise à jour OTA — github.com/Aitorrio/bost-flowstation",
+    "update_title": "Mise à jour OTA",
     "update_confirm": "Récupérer la dernière version du canal {channel} (branche {branch}) et recompiler ?\nLe service redémarrera automatiquement si une nouvelle compilation est nécessaire.",
     "ota_channel_title": "Canal OTA",
     "ota_channel_stable": "Stable (main)",
@@ -18414,24 +18424,23 @@ async function checkOtaInModal(){
   setOtaChannelHintKey('ota_checking');
   try{
     const sel=document.getElementById('ota-channel-select');
-    const channel=(sel&&sel.value)||'stable';
+    const body=otaChannelBody();
+    const channel=body.channel;
+    if(channel==='custom'&&(!body.repo||!body.branch)){setOtaChannelHintKey('ota_custom_missing');return;}
     const saveR=await fetch('/api/update/channel',{
       method:'POST',
       credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({channel}),
+      body:JSON.stringify(body),
     });
-    if(!saveR.ok)throw new Error('channel save failed');
+    if(!saveR.ok)throw new Error('channel save failed: '+(await saveR.text().catch(()=>'')));
     const saved=await saveR.json();
-    otaChannelCache={channel:saved.channel||channel,branch:saved.branch||(channel==='beta'?'beta':'main')};
+    otaApplyChannelInfo(saved,channel);
 
     const r=await fetch('/api/update/check?refresh=1&notes=1',{credentials:'same-origin',cache:'no-store'});
     if(!r.ok)throw new Error('check http '+r.status);
     const d=await r.json();
-    if(d&&d.channel){
-      otaChannelCache={channel:d.channel,branch:d.branch||(d.channel==='beta'?'beta':'main')};
-      if(sel)sel.value=otaChannelCache.channel;
-    }
+    if(d&&d.channel)otaApplyChannelInfo({channel:d.channel,branch:d.branch});
     applyUpdateCheckUi(d);
     if(d.check_failed){
       setOtaChannelHintKey('ota_check_failed');
@@ -19630,6 +19639,16 @@ function renderSystemInfo(opts){
   opts=opts||{};
     document.getElementById('sysHostname').textContent=sysData.hostname||'—';
     document.getElementById('sysVersion').textContent=sysData.stack_version||'—';
+    const srcEl=document.getElementById('sysSource');
+    if(srcEl){
+      const repo=sysData.source_repo||'', br=sysData.source_branch||'';
+      if(!repo){srcEl.textContent='—';}
+      else{
+        const web=/^https:\/\//.test(repo)?repo+(br?'/tree/'+encodeURI(br):''):'';
+        const label=escHtml(repo.replace(/^https:\/\//,''))+(br?' · <b>'+escHtml(br)+'</b>':'');
+        srcEl.innerHTML=web?'<a href="'+escHtmlAttr(web)+'" target="_blank" rel="noopener">'+label+'</a>':label;
+      }
+    }
     document.getElementById('sysOs').textContent=sysData.os||'—';
     document.getElementById('sysConfigPath').textContent=sysData.config_path||'—';
 
@@ -21059,7 +21078,7 @@ window.addEventListener('resize', () => {
 // Best-effort: query GitHub for the latest OTA tip once at boot (and when System
 // is opened). If a newer version exists, show the sidebar glance badge + System
 // banner and highlight the Update button. Failures are silent.
-let otaChannelCache={channel:'stable',branch:'main'};
+let otaChannelCache={channel:'installed',branch:'main'};
 let otaLastCheck=null;
 function applyUpdateCheckUi(d){
   if(d)otaLastCheck=d;
@@ -21082,35 +21101,88 @@ function applyUpdateCheckUi(d){
     if(btnLabel)btnLabel.textContent=t('update');
   }
 }
+// OTA source: channel plus, for "custom", git URL and branch. The server answers with the
+// resolved source (repo, branch) and the installed checkout.
+function otaChannelBody(){
+  const sel=document.getElementById('ota-channel-select');
+  const channel=(sel&&sel.value)||'installed';
+  const body={channel};
+  if(channel==='custom'){
+    body.repo=(document.getElementById('ota-custom-repo')?.value||'').trim();
+    body.branch=(document.getElementById('ota-custom-branch')?.value||'').trim();
+  }
+  return body;
+}
+function otaApplyChannelInfo(d,fallback){
+  if(!d)return;
+  const prev=otaChannelCache||{};
+  otaChannelCache={
+    channel:d.channel||fallback||prev.channel||'installed',
+    branch:d.branch||prev.branch||'main',
+    repo:d.repo!==undefined?d.repo:prev.repo,
+    installed_repo:d.installed_repo!==undefined?d.installed_repo:prev.installed_repo,
+    installed_branch:d.installed_branch!==undefined?d.installed_branch:prev.installed_branch,
+    github:d.github!==undefined?d.github:prev.github,
+  };
+  const sel=document.getElementById('ota-channel-select');
+  if(sel)sel.value=otaChannelCache.channel;
+  const inst=sel&&sel.querySelector('option[value="installed"]');
+  if(inst){
+    const r=otaChannelCache.installed_repo, b=otaChannelCache.installed_branch;
+    inst.textContent=t('ota_channel_installed')+(r?' — '+r.replace(/^https:\/\//,'')+(b?' · '+b:''):'');
+  }
+  const repoIn=document.getElementById('ota-custom-repo'), brIn=document.getElementById('ota-custom-branch');
+  if(repoIn&&d.custom_repo!==undefined&&document.activeElement!==repoIn)repoIn.value=d.custom_repo||'';
+  if(brIn&&d.custom_branch!==undefined&&document.activeElement!==brIn)brIn.value=d.custom_branch||'';
+  otaShowCustomFields();
+  const line=document.getElementById('ota-source-line');
+  if(line&&otaChannelCache.repo){
+    line.textContent=t('ota_source_line',{repo:otaChannelCache.repo.replace(/^https:\/\//,''),branch:otaChannelCache.branch})
+      +(otaChannelCache.github===false?' '+t('ota_source_no_check'):'');
+  }
+}
+function otaShowCustomFields(){
+  const sel=document.getElementById('ota-channel-select');
+  const box=document.getElementById('ota-custom-fields');
+  if(box)box.style.display=(sel&&sel.value==='custom')?'block':'none';
+}
+function onOtaChannelSelect(){
+  otaShowCustomFields();
+  const b=otaChannelBody();
+  // A custom source is saved once URL and branch are filled in.
+  if(b.channel==='custom'&&(!b.repo||!b.branch)){document.getElementById('ota-custom-repo')?.focus();return;}
+  saveOtaChannel();
+}
 async function loadOtaChannel(){
   try{
     const r=await fetch('/api/update/channel',{credentials:'same-origin',cache:'no-store'});
     if(!r.ok)return;
     const d=await r.json();
     if(!d||!d.channel)return;
-    otaChannelCache={channel:d.channel,branch:d.branch||(d.channel==='beta'?'beta':'main')};
-    const sel=document.getElementById('ota-channel-select');
-    if(sel)sel.value=otaChannelCache.channel;
+    otaApplyChannelInfo(d);
   }catch{/* silent */}
 }
 async function saveOtaChannel(){
   const sel=document.getElementById('ota-channel-select');
   if(!sel)return;
-  const channel=sel.value||'stable';
+  const body=otaChannelBody();
+  const channel=body.channel;
+  if(channel==='custom'&&(!body.repo||!body.branch))return;
   try{
     const r=await fetch('/api/update/channel',{
       method:'POST',
       credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({channel}),
+      body:JSON.stringify(body),
     });
     if(!r.ok){
-      await dashAlert(t('notice'),t('ota_channel_save_fail'));
+      const why=await r.text().catch(()=>'');
+      await dashAlert(t('notice'),t('ota_channel_save_fail')+(why?' ('+why+')':''));
       await loadOtaChannel();
       return;
     }
     const d=await r.json();
-    otaChannelCache={channel:d.channel||channel,branch:d.branch||(channel==='beta'?'beta':'main')};
+    otaApplyChannelInfo(d,channel);
     const modalOpen=document.getElementById('update-modal')?.classList.contains('open');
     if(!modalOpen){
       setOtaChannelHintKey('ota_channel_saved',{channel:otaChannelCache.channel,branch:otaChannelCache.branch});
@@ -21137,11 +21209,7 @@ async function checkUpdate(opts){
       const r=await fetch(url,{credentials:'same-origin',cache:'no-store'});
       if(!r.ok)return;
       const d=await r.json();
-      if(d&&d.channel){
-        otaChannelCache={channel:d.channel,branch:d.branch||(d.channel==='beta'?'beta':'main')};
-        const sel=document.getElementById('ota-channel-select');
-        if(sel)sel.value=otaChannelCache.channel;
-      }
+      if(d&&d.channel)otaApplyChannelInfo({channel:d.channel,branch:d.branch});
       applyUpdateCheckUi(d);
     }catch{/* silent */}
   })();
