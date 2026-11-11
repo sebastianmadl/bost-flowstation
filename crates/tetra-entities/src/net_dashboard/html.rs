@@ -5757,7 +5757,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 </div>
                 <div class="card-body">
                   <div class="group-list">
-                    <label class="field"><span data-i18n="cfg_tx">Downlink TX (MHz)</span><input type="text" inputmode="decimal" id="vc-tx-freq" class="form-input" placeholder="438.025000" onblur="normalizeMhzField(this)" onkeydown="if(event.key==='Enter'){normalizeMhzField(this);this.blur();}"></label>
+                    <label class="field"><span data-i18n="cfg_tx">Downlink TX (MHz)</span><input type="text" inputmode="decimal" id="vc-tx-freq" class="form-input" placeholder="438.025000" onblur="autoCalcIfTx()" onkeydown="if(event.key==='Enter'){this.blur();}"></label>
                     <label class="field"><span data-i18n="cfg_rx">Uplink RX (MHz)</span><input type="text" inputmode="decimal" id="vc-rx-freq" class="form-input" placeholder="430.800000" onblur="normalizeMhzField(this)" onkeydown="if(event.key==='Enter'){normalizeMhzField(this);this.blur();}"></label>
                     <label class="field"><span data-i18n="cfg_colour">Colour code</span><input type="number" id="vc-colour" class="form-input" min="0" max="63"></label>
                   </div>
@@ -5778,8 +5778,8 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                         <div class="vc-dual-hint" id="vc-dual-hint">—</div>
                       </div>
                       <label class="field"><span><span data-i18n="ui_freq_band">Freq band</span></span><input type="number" id="vc-freq-band" class="form-input" value="4"></label>
-                      <label class="field"><span><span data-i18n="ui_duplex_spacing_id">Duplex spacing id</span></span><input type="number" id="vc-duplex-id" class="form-input" value="4"></label>
-                      <label class="field"><span data-i18n="cfg_custom_duplex">Custom duplex (MHz)</span><input type="text" inputmode="decimal" id="vc-custom-duplex" class="form-input" placeholder="7.600000" onblur="normalizeMhzField(this,{min:0.025,max:100,allowEmpty:true,invalidKey:'cfg_duplex_invalid'})" onkeydown="if(event.key==='Enter'){normalizeMhzField(this,{min:0.025,max:100,allowEmpty:true,invalidKey:'cfg_duplex_invalid'});this.blur();}"></label>
+                      <label class="field"><span><span data-i18n="ui_duplex_spacing_id">Duplex spacing id</span></span><input type="number" id="vc-duplex-id" class="form-input" value="4" min="0" max="7" onchange="autoCalcIfTx()"></label>
+                      <label class="field"><span data-i18n="cfg_custom_duplex">Custom duplex (MHz)</span><input type="text" inputmode="decimal" id="vc-custom-duplex" class="form-input" placeholder="7.600000" onblur="if(Number.isFinite(normalizeMhzField(this,{min:0.025,max:100,allowEmpty:true,invalidKey:'cfg_duplex_invalid'}))||this.value==='')autoCalcIfTx()" onkeydown="if(event.key==='Enter'){this.blur();}"></label>
                       <label class="field"><span><span data-i18n="ui_freq_offset_hz">Freq offset (Hz)</span></span>
                         <select id="vc-freq-offset" class="form-input">
                           <option value="0">0</option>
@@ -8147,13 +8147,16 @@ const LANGS={
     cfg_sec_rf:'RF',cfg_rf_title:'Frequencies',cfg_auto:'Auto RX + carrier',cfg_tx:'Downlink TX (MHz)',cfg_rx:'Uplink RX (MHz)',cfg_colour:'Colour code',cfg_rf_adv:'Advanced RF',cfg_hw_rf:'Hardware RF',cfg_hw_rf_help:'SDR device comes from Setup. Gains/antennas depend on that driver. Use comma or dot; leave empty for device defaults (key omitted from config).',cfg_hw_device:'Device',cfg_hw_ppm_ph:'e.g. 0 or -1.2',cfg_hw_ppm_hint:'Frequency correction in PPM (comma or dot).',cfg_hw_gain_ph:'e.g. {ex} — empty = default',cfg_hw_gain_hint:'Soapy gain stage in dB (comma or dot). Empty omits the key — device default. Example only; range is hardware-specific.',cfg_hw_num_invalid:'Enter a number (e.g. 9 or 9,5), or leave empty for device default.',cfg_hw_ant_default:'(default)',cfg_freq_invalid:'Enter a valid frequency in MHz (e.g. 438.025 or 438,025).',cfg_custom_duplex:'Custom duplex (MHz)',cfg_duplex_invalid:'Enter a valid duplex spacing in MHz (e.g. 7.6 or 7,6), or leave empty.',
     cfg_sec_network:'Network',cfg_net_title:'TETRA identity',cfg_la:'Location area',cfg_net_adv:'Advanced network / timers',
     cfg_timers_hint:'Timers: empty/reset = engine default. Tap «?» on each field for details. Call timeout 0 = unlimited; T351 0 = off.',
-    cfg_help_tx:'BS downlink (TX) frequency in MHz. Must match radios’ RX. Use Auto RX + carrier after setting TX when possible.',
+    cfg_help_tx:'BS downlink (TX) frequency in MHz. Must match radios’ RX. When you leave the field, band, offset, main carrier and RX are calculated from it (with the duplex spacing below); Auto RX + carrier does the same.',
     cfg_help_rx:'BS uplink (RX) frequency in MHz. Usually TX minus duplex. Auto RX + carrier can fill this from TX.',
     cfg_help_colour:'TETRA colour code 0–63. All radios on this cell must use the same value.',
     cfg_help_main_carrier:'TETRA carrier number for the main control channel. Prefer Auto RX + carrier unless you know the value.',
     cfg_help_freq_band:'Frequency band id (ETSI). Default 4 is typical for 400 MHz amateur cells — change only if you know your band plan.',
-    cfg_help_duplex_id:'Duplex spacing table id. Leave default unless you use a non-standard duplex; prefer Custom duplex (MHz) when needed.',
-    cfg_help_custom_duplex:'Optional duplex spacing in MHz (e.g. 7.6). Empty = use duplex spacing id. Overrides the table id when set.',
+    cfg_help_duplex_id:'Duplex spacing table id (0-7), sent to the radios. In band 4 (400 MHz): 0 = 10 MHz, 1 = 7 MHz, 3 = 8 MHz, 4 = 5 MHz, 5 = 9.5 MHz. For a spacing not in the table use the id your radios have it under (e.g. 7) and set Custom duplex (MHz).',
+    cfg_help_custom_duplex:'Optional duplex spacing in MHz (e.g. 7.6, saved as 7600000 Hz). Empty = use the table value of the duplex spacing id. When set, it is used instead of the table value; the id is still sent.',
+    cfg_auto_result_full:'Calculated: band {band}, offset {offset} Hz, main_carrier {carrier}, RX {frequency} MHz',
+    cfg_auto_no_table_duplex:'Duplex spacing id {id} has no table value in band {band}. Enter Custom duplex (MHz).',
+    cfg_auto_band_range:'TX frequency is outside the TETRA bands (100-1000 MHz).',
     cfg_help_freq_offset:'Fine carrier offset in Hz (±6250 / ±12500). Usually 0.',
     cfg_help_reverse:'Swap UL/DL sense of the duplex. Rare; leave off unless your plan requires reverse operation.',
     cfg_rxlev_min:'Min. access level (dBm)',cfg_rxlev_default:'Default (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN in SYSINFO (ETSI table 21.65): radios below this level cannot use the cell, and a higher value makes them reselect a better neighbour earlier. −125 to −50 dBm in 5 dB steps; default −110. Use the same value on neighbouring stations or set it per neighbour. See Docs/cell-reselection.md.',cfg_migration:'Migration supported',cfg_help_migration:'BS service details in SYSINFO: migration is supported by this cell (ETSI 18.5.2.1), for radios of another network (other MCC/MNC). Radios of another network are accepted only when [multi_network] is on and lists their network: they get a (V)ASSI (ETSI 16.4.1.1 b, 16.4.7). Otherwise every migrating registration is rejected with cause 12 “Migration not supported”. Turned on by itself while [multi_network] is on. Default off.',cfg_migration_auto:'On by itself: [multi_network] is enabled.',
@@ -8561,6 +8564,13 @@ const LANGS={
     telegram:'Telegram',cfg_sec_profiles:'Profile',cfg_profiles_title:'Szenarien',cfg_apply_restart:'Anwenden & neu starten',
     cfg_cell_profile:'Cell (RF + Netz)',cfg_brew_profile:'Brew-Backhaul',cfg_sec_live:'Live-Einstellungen',cfg_live_title:'In laufende config.toml schreiben',cfg_save_live:'Live speichern',
     cfg_sec_rf:'RF',cfg_rf_title:'Frequenzen',cfg_auto:'Auto RX + Carrier',
+    cfg_help_duplex_id:'Duplex-Tabellen-ID (0-7), wird an die Funkgeräte gesendet. Band 4 (400 MHz): 0 = 10 MHz, 1 = 7 MHz, 3 = 8 MHz, 4 = 5 MHz, 5 = 9,5 MHz. Für einen Abstand außerhalb der Tabelle die ID nehmen, unter der ihn die Funkgeräte haben (z. B. 7), und Eigener Duplex (MHz) setzen.',
+    cfg_help_custom_duplex:'Optionaler Duplexabstand in MHz (z. B. 7,6, gespeichert als 7600000 Hz). Leer = Tabellenwert der Duplex-ID. Gesetzt wird er statt des Tabellenwerts verwendet; die ID wird weiter gesendet.',
+    cfg_custom_duplex:'Eigener Duplex (MHz)',
+    cfg_help_tx:'Downlink-(TX-)Frequenz der BS in MHz. Muss zum RX der Funkgeräte passen. Beim Verlassen des Felds werden Band, Offset, Main Carrier und RX daraus berechnet (mit dem Duplex unten); Auto RX + Carrier macht dasselbe.',
+    cfg_auto_result_full:'Berechnet: Band {band}, Offset {offset} Hz, main_carrier {carrier}, RX {frequency} MHz',
+    cfg_auto_no_table_duplex:'Duplex-ID {id} hat in Band {band} keinen Tabellenwert. Eigenen Duplex (MHz) eintragen.',
+    cfg_auto_band_range:'TX-Frequenz liegt außerhalb der TETRA-Bänder (100-1000 MHz).',
     update_running:'Aktualisierung läuft… Fenster nicht schließen.',
     update_done_ok:'✓ Update abgeschlossen. Neustart…',
     update_done_err:'✗ Update fehlgeschlagen. Siehe Log unten.',
@@ -8824,13 +8834,16 @@ const LANGS={
     svc_standby_will_start:'El servicio está en espera. “{action}” lo iniciará de nuevo. ¿Continuar?',
     saved:'✓ Guardado — reinicia para aplicar.',save_fail:'✗ Error al guardar',conn_error:'Error de conexión.',
     cfg_timers_hint:'Temporizadores: vacío/reset = default del motor. Pulsa «?» en cada campo para detalles. Call timeout 0 = ilimitado; T351 0 = off.',
-    cfg_help_tx:'Frecuencia de bajada (TX) de la BTS en MHz. Debe coincidir con el RX de las radios. Tras fijar TX, usa Auto RX + carrier si puedes.',
+    cfg_help_tx:'Frecuencia de bajada (TX) de la BTS en MHz. Debe coincidir con el RX de las radios. Al salir del campo se calculan banda, offset, main carrier y RX (con el dúplex de abajo); Auto RX + carrier hace lo mismo.',
     cfg_help_rx:'Frecuencia de subida (RX) de la BTS en MHz. Suele ser TX menos el dúplex. Auto RX + carrier puede calcularla.',
     cfg_help_colour:'Colour code TETRA 0–63. Todas las radios de la celda deben usar el mismo.',
     cfg_help_main_carrier:'Número de portadora del canal de control principal. Prefiere Auto RX + carrier salvo que sepas el valor.',
     cfg_help_freq_band:'Id de banda (ETSI). El 4 es habitual en 400 MHz amateur — cámbialo solo si conoces tu plan.',
-    cfg_help_duplex_id:'Id de tabla de dúplex. Déjalo por defecto salvo dúplex no estándar; si hace falta usa Dúplex personalizado (MHz).',
-    cfg_help_custom_duplex:'Separación de dúplex en MHz (p. ej. 7,6). Vacío = usar el id de tabla. Si lo rellenas, manda sobre el id.',
+    cfg_help_duplex_id:'Id de tabla de dúplex (0-7), se envía a las radios. En banda 4 (400 MHz): 0 = 10 MHz, 1 = 7 MHz, 3 = 8 MHz, 4 = 5 MHz, 5 = 9,5 MHz. Para una separación fuera de la tabla usa el id que tengan tus radios (p. ej. 7) y rellena Dúplex personalizado (MHz).',
+    cfg_help_custom_duplex:'Separación de dúplex en MHz (p. ej. 7,6, se guarda como 7600000 Hz). Vacío = valor de tabla del id. Si lo rellenas se usa en lugar del valor de tabla; el id se sigue enviando.',
+    cfg_auto_result_full:'Calculado: banda {band}, offset {offset} Hz, main_carrier {carrier}, RX {frequency} MHz',
+    cfg_auto_no_table_duplex:'El id de dúplex {id} no tiene valor de tabla en la banda {band}. Rellena Dúplex personalizado (MHz).',
+    cfg_auto_band_range:'La frecuencia TX está fuera de las bandas TETRA (100-1000 MHz).',
     cfg_help_freq_offset:'Offset fino de portadora en Hz (±6250 / ±12500). Normalmente 0.',
     cfg_help_reverse:'Invierte el sentido UL/DL del dúplex. Raro; déjalo apagado salvo que tu plan lo exija.',
     cfg_rxlev_min:'Nivel mín. de acceso (dBm)',cfg_rxlev_default:'Por defecto (−110)',cfg_help_rxlev_min:'RXLEV_ACCESS_MIN en SYSINFO (ETSI tabla 21.65): las radios por debajo de este nivel no pueden usar la celda, y un valor más alto hace que reseleccionen antes una vecina mejor. −125 a −50 dBm en pasos de 5 dB; por defecto −110. Usa el mismo valor en las estaciones vecinas o ajústalo por vecina. Ver Docs/cell-reselection.md.',cfg_migration:'Migración admitida',cfg_help_migration:'Detalles de servicio en SYSINFO: esta celda admite migración (ETSI 18.5.2.1), para radios de otra red (otro MCC/MNC). Las radios de otra red solo se aceptan si [multi_network] está activo y lista su red: reciben una (V)ASSI (ETSI 16.4.1.1 b, 16.4.7). Si no, todo registro migrante se rechaza con la causa 12 “Migration not supported”. Se activa solo mientras [multi_network] está activo. Apagado por defecto.',cfg_migration_auto:'Activa sola: [multi_network] está habilitado.',
@@ -16495,23 +16508,59 @@ async function applyRawConfigAndRestart(){
     beginServiceRestartWait();
   }catch(e){setConfigMsg(String(e),false);}
 }
-function autoCalcCarrier(){
+// Duplex spacing table in kHz, [duplex_spacing id][freq_band], same as
+// TETRA_DUPLEX_SPACING in tetra-core freqs.rs. null = no value in the table.
+const TETRA_DUPLEX_KHZ=[
+  [null,1600,10000,10000,10000,10000,10000,null,null,null,null,null,null,null,null,null],
+  [null,4500,null,36000,7000,null,null,null,45000,45000,null,null,null,null,null,null],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  [null,null,null,8000,8000,null,null,null,18000,18000,null,null,null,null,null,null],
+  [null,null,null,18000,5000,null,30000,30000,null,39000,null,null,null,null,null,null],
+  [null,null,null,null,9500,null,null,null,null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]];
+const TETRA_FREQ_OFFSETS=[0,6250,-6250,12500];
+// TX (downlink) frequency -> freq_band, freq_offset, main_carrier and RX.
+// DL = band*100 MHz + carrier*25 kHz + offset, UL = DL -/+ duplex (reverse).
+// quiet: run from a field blur; then only a result or a real problem is shown.
+function autoCalcCarrier(quiet){
   const txMhz=normalizeMhzField(document.getElementById('vc-tx-freq'));
-  const band=vcNum('vc-freq-band')??4;
-  const reverse=!!document.getElementById('vc-reverse')?.checked;
-  const offset=vcNum('vc-freq-offset')??0;
+  if(txMhz===null){if(!quiet)vcMsg('vc-rf-msg',t("ui_tx_freq_required"),false);return;}
+  if(!Number.isFinite(txMhz))return;
   const duplexMhz=normalizeMhzField(document.getElementById('vc-custom-duplex'),{min:0.025,max:100,allowEmpty:true,invalidKey:'cfg_duplex_invalid'});
   if(duplexMhz!==null&&!Number.isFinite(duplexMhz))return;
-  const duplex=duplexMhz===null?5000000:Math.round(duplexMhz*1e6);
-  if(txMhz===null||!Number.isFinite(txMhz)){vcMsg('vc-rf-msg',t("ui_tx_freq_required"),false);return;}
-  if(band!==4){vcMsg('vc-rf-msg',t('cfg_auto_band_required'),false);return;}
-  if(reverse){vcMsg('vc-rf-msg',t('cfg_auto_reverse_required'),false);return;}
+  const reverse=!!document.getElementById('vc-reverse')?.checked;
   const tx=Math.round(txMhz*1e6);
-  const main=(tx-400000000-offset)/25000;
-  if(!Number.isInteger(main)){vcMsg('vc-rf-msg',t("ui_main_carrier_is_not_an_integer"),false);return;}
+  const band=Math.floor(tx/1e8);
+  if(band<1||band>15){vcMsg('vc-rf-msg',t('cfg_auto_band_range'),false);return;}
+  const curOffset=vcNum('vc-freq-offset')??0;
+  const offsets=[curOffset].concat(TETRA_FREQ_OFFSETS.filter(o=>o!==curOffset));
+  let main=null,offset=0;
+  for(const o of offsets){
+    const c=(tx-band*1e8-o)/25000;
+    if(Number.isInteger(c)&&c>=0&&c<=3999){main=c;offset=o;break;}
+  }
+  if(main===null){vcMsg('vc-rf-msg',t("ui_main_carrier_is_not_an_integer"),false);return;}
+  const dupId=vcNum('vc-duplex-id')??4;
+  let duplex;
+  if(duplexMhz!==null){duplex=Math.round(duplexMhz*1e6);}
+  else{
+    const khz=(TETRA_DUPLEX_KHZ[dupId]||[])[band];
+    if(khz==null){vcMsg('vc-rf-msg',t('cfg_auto_no_table_duplex',{id:dupId,band:band}),false);return;}
+    duplex=khz*1000;
+  }
+  const rx=reverse?tx+duplex:tx-duplex;
+  vcSet('vc-freq-band',band);
+  vcSet('vc-freq-offset',String(offset));
   vcSet('vc-main-carrier',main);
-  vcSet('vc-rx-freq',hzToMhzDisplay(tx-duplex));
-  vcMsg('vc-rf-msg',t('cfg_auto_result',{carrier:main,frequency:hzToMhzDisplay(tx-duplex)}),true);
+  onVcMainCarrierChange();
+  vcSet('vc-rx-freq',hzToMhzDisplay(rx));
+  vcMsg('vc-rf-msg',t('cfg_auto_result_full',{carrier:main,band:band,offset:offset,frequency:hzToMhzDisplay(rx)}),true);
+}
+// Recalculate when TX or the duplex settings change and a TX is entered.
+function autoCalcIfTx(){
+  const el=document.getElementById('vc-tx-freq');
+  if(el&&el.value.trim()!=='')autoCalcCarrier(true);
 }
 async function openCellProfileSheet(mode){
   if(cfgSheetKind){vcMsg('vc-profiles-msg',t('cfg_sheet_busy'),false);return;}
@@ -21220,11 +21269,23 @@ async function maybeShowSetupWizard(){
     setupStateCache=d;
     if(d.setup && d.setup.setup_complete===false){
       openSetupWizard(false);
+    }else if(!STATION_LANG){
+      // Station set up before the language step existed: ask once after the next login,
+      // so [dashboard] language need not be edited by hand.
+      openLanguageOnlyWizard();
     }
   }catch(e){/* silent */}
 }
 
+let wizLangOnly=false;
+function openLanguageOnlyWizard(){
+  wizLangOnly=true;wizStep=0;
+  const w=document.getElementById('setup-wizard');
+  if(w){w.classList.add('open');}
+  wizShowStep();
+}
 function openSetupWizard(manual){
+  wizLangOnly=false;
   wizStep=0;
   const w=document.getElementById('setup-wizard');
   if(w){w.classList.add('open');}
@@ -21255,6 +21316,7 @@ async function wizLangContinue(){
     const r=await fetch('/api/setup/language',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:currentLang})});
     if(!r.ok){setText('wiz-lang-msg',await r.text());return;}
   }catch(e){setText('wiz-lang-msg',String(e));return;}
+  if(wizLangOnly){wizLangOnly=false;closeSetupWizard();return;}
   wizNext();
 }
 function wizPrev(){wizStep=Math.max(0,wizStep-1);wizShowStep();}

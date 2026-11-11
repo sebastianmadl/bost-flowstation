@@ -168,6 +168,24 @@ if [[ "${BOST_FORCE_CLEAN:-0}" == "1" && -e "$SRC_ROOT" ]]; then
   rm -rf "$SRC_ROOT"
 fi
 
+# The checkout belongs to $SERVICE_USER (chown below), but this script and the dashboard update
+# run git as root. Newer git refuses such a repository ("dubious ownership") unless it is listed
+# as safe.directory, so register it once for all users (system config, root's as fallback).
+mark_safe_directory() {
+  local dir="$1" scope
+  for scope in --system --global; do
+    if git config "$scope" --get-all safe.directory 2>/dev/null | grep -qxF "$dir"; then
+      return 0
+    fi
+    if git config "$scope" --add safe.directory "$dir" 2>/dev/null; then
+      log "Registered $dir as git safe.directory ($scope)"
+      return 0
+    fi
+  done
+  warn "Could not register $dir as git safe.directory; run: git config --global --add safe.directory $dir"
+}
+mark_safe_directory "$SRC_ROOT"
+
 if [[ -d "$SRC_ROOT/.git" ]]; then
   log "Updating $SRC_ROOT → origin/$BRANCH"
   if ! git -C "$SRC_ROOT" remote get-url origin >/dev/null 2>&1; then
@@ -443,7 +461,7 @@ echo " Login:      admin / 1234"
 echo " Config:     ${CFG_PATH}"
 echo " Setup:      open the Setup tab / first-run wizard"
 echo " RF starts disabled (backend=None) until you finish Setup."
-echo " Repo:       https://github.com/Aitorrio/bost-flowstation (branch ${BRANCH}, OTA ${OTA_CHANNEL})"
+echo " Repo:       ${REPO_URL%.git} (branch ${BRANCH}, OTA ${OTA_CHANNEL})"
 if [[ "$WITH_ASTERISK_FEATURE" == "1" ]]; then
   echo " Voice:      libtetra-codec installed (LST Dispatch ACELP linked)"
 else
