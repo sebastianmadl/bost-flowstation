@@ -334,11 +334,11 @@ mod tests {
 
     #[test]
     fn installed_is_the_default_and_follows_the_fork() {
-        let s = resolve_from("[dashboard]\nport = 1\n", inst("https://github.com/sebastianmadl/bost-flowstation.git", "handover"));
+        let s = resolve_from("[dashboard]\nport = 1\n", inst("https://github.com/someone/bost-flowstation.git", "handover"));
         assert_eq!(s.channel, "installed");
         assert_eq!(s.branch, "handover");
-        assert_eq!(s.github_slug.as_deref(), Some("sebastianmadl/bost-flowstation"));
-        assert_eq!(s.repo_display, "https://github.com/sebastianmadl/bost-flowstation");
+        assert_eq!(s.github_slug.as_deref(), Some("someone/bost-flowstation"));
+        assert_eq!(s.repo_display, "https://github.com/someone/bost-flowstation");
     }
 
     #[test]
