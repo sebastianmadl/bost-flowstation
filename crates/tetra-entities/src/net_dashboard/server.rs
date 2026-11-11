@@ -1368,8 +1368,22 @@ fn ota_worktree_is_clean(src_dir: &std::path::Path) -> Result<(), String> {
 }
 
 /// `checkout -B` also overwrites an existing channel branch, which may differ from HEAD.
-/// Require both histories to be contained in the fetched channel before resetting either.
+/// Require both histories to be published before resetting either: every commit must be on a
+/// remote-tracking branch (the fetched channel, or the branch the station was installed or last
+/// updated from). That keeps commits made on the station safe, and still lets an operator move
+/// the station to another branch or repository (e.g. from a fork back to `main`) from the
+/// dashboard, because the commits it leaves are on GitHub and can be fetched again.
 fn ota_local_commits_are_preserved(src_dir: &std::path::Path, remote_ref: &str, branch: &str) -> Result<(), String> {
+    // Fail closed when the fetched channel is missing.
+    let remote_ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(src_dir)
+        .args(["rev-parse", "--verify", "--quiet", &format!("{remote_ref}^{{commit}}")])
+        .output()
+        .map_err(|e| format!("cannot inspect OTA source history: {e}"))?;
+    if !remote_ok.status.success() {
+        return Err("cannot compare OTA source history; refusing to change the checkout".into());
+    }
     let target_branch = format!("refs/heads/{branch}");
     let target_exists = std::process::Command::new("git")
         .arg("-C")
@@ -1385,11 +1399,11 @@ fn ota_local_commits_are_preserved(src_dir: &std::path::Path, remote_ref: &str, 
         refs.push(&target_branch);
     }
     for local_ref in refs {
-        let range = format!("{remote_ref}..{local_ref}");
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(src_dir)
-            .args(["rev-list", "--count", &range])
+            .args(["rev-list", "--count", local_ref, remote_ref])
+            .args(["--not", "--remotes"])
             .output()
             .map_err(|e| format!("cannot compare OTA source history: {e}"))?;
         if !output.status.success() {
@@ -1401,7 +1415,7 @@ fn ota_local_commits_are_preserved(src_dir: &std::path::Path, remote_ref: &str, 
             .map_err(|_| "invalid OTA history comparison; refusing to change the checkout".to_string())?;
         if count != 0 {
             return Err(format!(
-                "{local_ref} contains {count} local commit(s) absent from {remote_ref}; preserve and integrate them before OTA. No sources were changed and RF remains online"
+                "{local_ref} contains {count} local commit(s) absent from {remote_ref} and every other remote branch; preserve and integrate them before OTA. No sources were changed and RF remains online"
             ));
         }
     }
@@ -9907,6 +9921,22 @@ mod tests {
         assert!(error.contains("local commit(s)"));
         assert_eq!(repo.git(&["rev-parse", "HEAD"]), local_head, "preflight must preserve local history");
         assert_eq!(std::fs::read_to_string(repo.0.join("source.txt")).unwrap(), "local station extension\n");
+    }
+
+    #[test]
+    fn ota_preflight_lets_a_station_switch_from_a_fork_branch_back_to_main() {
+        let repo = OtaTestRepository::new();
+        let original = repo.git(&["rev-parse", "HEAD"]);
+        // Station runs the fork branch `handover`, which has commits main does not have.
+        repo.commit_change("fork feature\n");
+        repo.git(&["update-ref", "refs/remotes/origin/handover", "HEAD"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", &original]);
+        repo.git(&["checkout", "--quiet", "-B", "handover"]);
+        super::ota_local_commits_are_preserved(&repo.0, "origin/main", "main").unwrap();
+        // A commit made on the station itself is still protected.
+        repo.commit_change("station-only change\n");
+        let error = super::ota_local_commits_are_preserved(&repo.0, "origin/main", "main").unwrap_err();
+        assert!(error.contains("1 local commit(s)"), "{error}");
     }
 
     #[test]
