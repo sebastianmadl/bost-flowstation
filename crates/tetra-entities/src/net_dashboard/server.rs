@@ -3950,6 +3950,18 @@ fn handle_connection(
             },
             Err(e) => http_response(inner, 400, &format!("invalid JSON: {e}")),
         }
+    } else if req_line.contains("POST /api/setup/frequency") {
+        let (inner, body_str) = read_post_body(stream);
+        match serde_json::from_str::<serde_json::Value>(&body_str)
+            .map_err(|e| format!("invalid JSON: {e}"))
+            .and_then(|v| crate::net_dashboard::setup::set_station_frequency(&config_path, &v))
+        {
+            Ok(()) => {
+                tracing::info!("Dashboard setup: frequency saved");
+                http_json_response(inner, 200, r#"{"ok":true}"#);
+            }
+            Err(e) => http_response(inner, 400, &e),
+        }
     } else if req_line.contains("POST /api/setup/language") {
         let (inner, body_str) = read_post_body(stream);
         let lang = serde_json::from_str::<serde_json::Value>(&body_str)

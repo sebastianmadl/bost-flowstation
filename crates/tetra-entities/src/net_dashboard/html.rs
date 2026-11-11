@@ -3841,6 +3841,12 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
 .setup-lang.selected{border-color:var(--accent,#2563eb);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent,#2563eb) 30%,transparent);}
 .setup-lang.selected b{color:var(--accent,#2563eb);}
 .setup-wiz-nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:22px;justify-content:flex-end;}
+.wiz-field-stack{display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;}
+.wiz-field-stack .form-input{width:100%;}
+.wiz-field-stack small{color:var(--muted);font-size:12px;text-align:right;}
+.wiz-freq-result{margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:13px;line-height:1.7;}
+.wiz-freq-result .muted{color:var(--muted);}
+.wiz-freq-result.err{border-color:var(--danger);color:var(--danger);}
 .setup-device-list{display:flex;flex-direction:column;gap:8px;margin:12px 0;}
 .setup-device{
   text-align:left;padding:12px 14px;border:1px solid var(--border);border-radius:10px;
@@ -7372,6 +7378,25 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
       </div>
     </div>
     <div class="setup-wiz-step" data-step="3">
+      <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_freq_title">Frequency</h2>
+      <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_freq_help">Enter the downlink (TX) frequency of this station. Band, offset, main carrier and the uplink (RX) are calculated from it.</p>
+      <div class="group-list">
+        <label class="field"><span data-i18n="cfg_tx">Downlink TX (MHz)</span><input type="text" inputmode="decimal" id="wiz-tx" class="form-input" placeholder="438.025000" onblur="normalizeMhzField(this);wizFreqCalc()" onkeydown="if(event.key==='Enter'){this.blur();}"></label>
+        <label class="field"><span data-i18n="wiz_dup">Duplex spacing</span><select id="wiz-dup" class="form-input" onchange="wizFreqCalc()"></select></label>
+        <label class="field"><span data-i18n="cfg_custom_duplex">Custom duplex (MHz)</span><span class="wiz-field-stack"><input type="text" inputmode="decimal" id="wiz-custom-dup" class="form-input" placeholder="7.600000" onblur="normalizeMhzField(this,{min:0.025,max:100,allowEmpty:true,invalidKey:'cfg_duplex_invalid'});wizFreqCalc()" onkeydown="if(event.key==='Enter'){this.blur();}"><small data-i18n="wiz_custom_dup_hint">7.6 is filled to 7.600000 (7600000 Hz). Empty = table value.</small></span></label>
+        <label class="field" style="align-items:center;cursor:pointer"><span data-i18n="wiz_reverse">Reverse operation (RX above TX)</span><span class="field-control"><span class="sw"><input type="checkbox" id="wiz-rev" onchange="wizFreqCalc()"><i></i></span></span></label>
+        <label class="field"><span data-i18n="cfg_colour">Colour code</span><input type="number" id="wiz-cc" class="form-input" min="0" max="63" value="1"></label>
+        <label class="field"><span data-i18n="wiz_la">Location area</span><input type="number" id="wiz-la" class="form-input" min="1" max="16383" value="1"></label>
+      </div>
+      <div class="wiz-freq-result" id="wiz-freq-result">—</div>
+      <p class="help-text" style="margin-top:10px" data-i18n="wiz_freq_more">All RF settings are under Config → RF later.</p>
+      <div class="config-msg" id="wiz-freq-msg"></div>
+      <div class="setup-wiz-nav">
+        <button class="btn" onclick="wizPrev()" data-i18n="wiz_back">Atrás</button>
+        <button class="btn btn-primary" onclick="wizSaveFrequency()" data-i18n="wiz_next">Siguiente</button>
+      </div>
+    </div>
+    <div class="setup-wiz-step" data-step="4">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_params_title">RF / Red / Brew</h2>
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_params_help">
         Usa los formularios de Config para editar todo, o mantén los valores por defecto.
@@ -7383,7 +7408,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <button class="btn btn-primary" onclick="wizNext()" data-i18n="wiz_next">Siguiente</button>
       </div>
     </div>
-    <div class="setup-wiz-step" data-step="4">
+    <div class="setup-wiz-step" data-step="5">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_rf_title">Activar RF</h2>
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_rf_help">
         Pone <code>phy_io.backend = SoapySdr</code>, guarda el device y reinicia el servicio.
@@ -7395,7 +7420,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <button class="btn" onclick="wizNext()" data-i18n="wiz_skip_now">Omitir por ahora</button>
       </div>
     </div>
-    <div class="setup-wiz-step" data-step="5">
+    <div class="setup-wiz-step" data-step="6">
       <h2 style="margin:0 0 8px;font-size:20px" data-i18n="wiz_auto_title">Arranque automático</h2>
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px" data-i18n="wiz_auto_help">Asegura que la unidad systemd esté enabled para volver tras un reinicio.</p>
       <div class="config-msg" id="wiz-systemd-msg"></div>
@@ -7921,6 +7946,7 @@ const LANGS={
     wiz_sdr_title:'Select SDR',wiz_sdr_help:'Scan SoapySDR devices or install a driver (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Device args',
     wiz_reboot_title:'Rebooting Pi…',wiz_reboot_body:'µCell needs a reboot so the device-tree overlay can load. The page will come back on its own.',
     wiz_reboot_confirm:'µCell driver installed. Reboot the Pi now so the board can be opened?',
+    wiz_freq_title:'Frequency',wiz_freq_help:'Enter the downlink (TX) frequency of this station. Band, offset, main carrier and the uplink (RX) are calculated from it.',wiz_dup:'Duplex spacing',wiz_dup_custom:'custom (radio table)',wiz_custom_dup_hint:'7.6 is filled to 7.600000 (7600000 Hz). Empty = table value.',wiz_reverse:'Reverse operation (RX above TX)',wiz_la:'Location area',wiz_freq_more:'All RF settings are under Config → RF later.',wiz_freq_line:'Band {band} · Offset {offset} Hz · Main carrier {carrier}',
     wiz_params_title:'RF / Network / Brew',wiz_params_help:'Use the Config tab forms for full editing, or keep the example defaults for now.',
     wiz_use_defaults:'Use current config defaults',wiz_open_config:'Open Config forms',
     wiz_rf_title:'Enable RF',wiz_rf_help:'Sets phy_io.backend = SoapySdr, writes the device string, and restarts the service.',
@@ -8567,6 +8593,7 @@ const LANGS={
     wiz_sdr_title:'SDR wählen',wiz_sdr_help:'SoapySDR-Geräte scannen oder Treiber installieren (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Device-Argumente',
     wiz_reboot_title:'Pi wird neu gestartet…',wiz_reboot_body:'µCell braucht einen Neustart, damit das Device-Tree-Overlay geladen wird. Die Seite kommt von selbst zurück.',
     wiz_reboot_confirm:'µCell-Treiber installiert. Pi jetzt neu starten, damit das Board geöffnet werden kann?',
+    wiz_freq_title:'Frequenz',wiz_freq_help:'Downlink-(TX-)Frequenz dieser Station eingeben. Band, Offset, Main Carrier und Uplink (RX) werden daraus berechnet.',wiz_dup:'Duplexabstand',wiz_dup_custom:'eigener (Tabelle im Funkgerät)',wiz_custom_dup_hint:'7,6 wird zu 7.600000 (7600000 Hz). Leer = Tabellenwert.',wiz_reverse:'Reverse operation (RX über TX)',wiz_la:'Location Area',wiz_freq_more:'Alle RF-Einstellungen später unter Config → RF.',wiz_freq_line:'Band {band} · Offset {offset} Hz · Main Carrier {carrier}',
     wiz_params_title:'RF / Netz / Brew',wiz_params_help:'Nutze die Config-Formulare für volle Bearbeitung oder behalte die Standardwerte.',
     wiz_use_defaults:'Aktuelle Standardwerte verwenden',wiz_open_config:'Config öffnen',
     wiz_rf_title:'RF aktivieren',wiz_rf_help:'Setzt phy_io.backend = SoapySdr, speichert device und startet den Dienst neu.',
@@ -8647,6 +8674,7 @@ const LANGS={
     wiz_sdr_title:'Seleccionar SDR',wiz_sdr_help:'Escanea dispositivos SoapySDR o instala un driver (SXceiver / Lime / µCell / USRP / Pluto).',wiz_device_args:'Argumentos device',
     wiz_reboot_title:'Reiniciando la Pi…',wiz_reboot_body:'µCell necesita reiniciar para cargar el overlay del device-tree. La página volverá sola.',
     wiz_reboot_confirm:'Driver µCell instalado. ¿Reiniciar la Pi ahora para que la placa se pueda abrir?',
+    wiz_freq_title:'Frecuencia',wiz_freq_help:'Introduce la frecuencia de bajada (TX) de esta estación. Banda, offset, main carrier y subida (RX) se calculan a partir de ella.',wiz_dup:'Separación dúplex',wiz_dup_custom:'propia (tabla de la radio)',wiz_custom_dup_hint:'7,6 se completa a 7.600000 (7600000 Hz). Vacío = valor de tabla.',wiz_reverse:'Operación inversa (RX por encima de TX)',wiz_la:'Location area',wiz_freq_more:'Todos los ajustes RF, más tarde en Config → RF.',wiz_freq_line:'Banda {band} · Offset {offset} Hz · Main carrier {carrier}',
     wiz_params_title:'RF / Red / Brew',wiz_params_help:'Usa los formularios de Config para editar todo, o mantén los valores por defecto.',
     wiz_use_defaults:'Usar valores actuales por defecto',wiz_open_config:'Abrir Config',
     wiz_rf_title:'Activar RF',wiz_rf_help:'Pone phy_io.backend = SoapySdr, guarda el device y reinicia el servicio.',
@@ -21367,11 +21395,12 @@ function closeSetupWizard(){
 }
 function wizShowStep(){
   if(wizStep===0)wizRenderLangs();
+  if(wizStep===3)wizFreqLoad();
   document.querySelectorAll('.setup-wiz-step').forEach(el=>{
     el.classList.toggle('active', String(el.getAttribute('data-step'))===String(wizStep));
   });
 }
-function wizNext(){wizStep=Math.min(5,wizStep+1);wizShowStep();}
+function wizNext(){wizStep=Math.min(6,wizStep+1);wizShowStep();}
 // Step 0: station language ([dashboard] language). Picking one switches the page at once;
 // Continue stores it as the station default.
 function wizRenderLangs(){
@@ -21388,6 +21417,90 @@ async function wizLangContinue(){
   wizNext();
 }
 function wizPrev(){wizStep=Math.max(0,wizStep-1);wizShowStep();}
+// Step 3: frequency. TX → band, offset, main carrier, RX (DL = band*100 MHz + carrier*25 kHz
+// + offset, UL = DL ∓ duplex), duplex from the table id or the custom value.
+function tetraFreqCalc(txHz,dupId,customHz,reverse,offsetPref){
+  const band=Math.floor(txHz/1e8);
+  if(band<1||band>15)return {err:t('cfg_auto_band_range')};
+  const offsets=[offsetPref||0].concat(TETRA_FREQ_OFFSETS.filter(o=>o!==(offsetPref||0)));
+  let carrier=null,offset=0;
+  for(const o of offsets){const c=(txHz-band*1e8-o)/25000;if(Number.isInteger(c)&&c>=0&&c<=3999){carrier=c;offset=o;break;}}
+  if(carrier===null)return {err:t('ui_main_carrier_is_not_an_integer')};
+  let duplex;
+  if(customHz!=null)duplex=customHz;
+  else{const k=(TETRA_DUPLEX_KHZ[dupId]||[])[band];if(k==null)return {err:t('cfg_auto_no_table_duplex',{id:dupId,band})};duplex=k*1000;}
+  return {band,offset,carrier,duplex,rx:reverse?txHz+duplex:txHz-duplex};
+}
+let wizFreqOffset=0,wizFreqLoaded=false;
+function wizDupOptions(band){
+  const sel=document.getElementById('wiz-dup');if(!sel)return;
+  const cur=sel.value===''?'4':sel.value;
+  let html='';
+  for(let id=0;id<8;id++){
+    const k=(TETRA_DUPLEX_KHZ[id]||[])[band];
+    html+='<option value="'+id+'">'+id+' · '+(k==null?escHtml(t('wiz_dup_custom')):(k/1000)+' MHz')+'</option>';
+  }
+  sel.innerHTML=html;sel.value=cur;
+}
+async function wizFreqLoad(){
+  if(wizFreqLoaded){wizFreqCalc();return;}
+  wizDupOptions(4);
+  try{
+    const r=await fetch('/api/visual-config',{credentials:'same-origin'});
+    if(r.ok){
+      const d=await r.json();
+      const soapy=d?.phy_io?.soapysdr||{}, cell=d?.cell_info||{};
+      if(soapy.tx_freq)vcSet('wiz-tx',hzToMhzDisplay(soapy.tx_freq));
+      vcSet('wiz-dup',String(cell.duplex_spacing??4));
+      vcSet('wiz-custom-dup',cell.custom_duplex_spacing?hzToMhzDisplay(cell.custom_duplex_spacing):'');
+      const rev=document.getElementById('wiz-rev');if(rev)rev.checked=!!cell.reverse_operation;
+      if(cell.colour_code!=null)vcSet('wiz-cc',cell.colour_code);
+      if(cell.location_area!=null)vcSet('wiz-la',cell.location_area);
+      wizFreqOffset=Number(cell.freq_offset)||0;
+    }
+  }catch(e){/* keep defaults */}
+  wizFreqLoaded=true;
+  wizFreqCalc();
+}
+function wizFreqInputs(){
+  const tx=parseMhzInput(document.getElementById('wiz-tx')?.value||'');
+  const cd=parseMhzInput(document.getElementById('wiz-custom-dup')?.value||'');
+  return {
+    txHz:(tx==null||!Number.isFinite(tx))?null:Math.round(tx*1e6),
+    customHz:(cd==null||!Number.isFinite(cd))?null:Math.round(cd*1e6),
+    dupId:Number(document.getElementById('wiz-dup')?.value||4),
+    reverse:!!document.getElementById('wiz-rev')?.checked,
+  };
+}
+function wizFreqCalc(){
+  const box=document.getElementById('wiz-freq-result');if(!box)return null;
+  const v=wizFreqInputs();
+  if(v.txHz==null){box.className='wiz-freq-result';box.textContent='—';wizDupOptions(4);return null;}
+  wizDupOptions(Math.floor(v.txHz/1e8));
+  const r=tetraFreqCalc(v.txHz,v.dupId,v.customHz,v.reverse,wizFreqOffset);
+  if(r.err){box.className='wiz-freq-result err';box.textContent=r.err;return null;}
+  box.className='wiz-freq-result';
+  box.innerHTML='<div><b>'+escHtml(t('cfg_rx').replace(/\s*\(MHz\)/,''))+'</b>: '+hzToMhzDisplay(r.rx)+' MHz</div>'
+    +'<div class="muted">'+escHtml(t('wiz_freq_line',{band:r.band,offset:r.offset,carrier:r.carrier}))+'</div>';
+  return r;
+}
+async function wizSaveFrequency(){
+  const v=wizFreqInputs();
+  const msg=document.getElementById('wiz-freq-msg');
+  if(v.txHz==null){wizNext();return;} // nothing entered: keep the config as it is
+  const r=wizFreqCalc();
+  if(!r)return;
+  const cc=Number(document.getElementById('wiz-cc')?.value), la=Number(document.getElementById('wiz-la')?.value);
+  try{
+    const resp=await fetch('/api/setup/frequency',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tx_freq:v.txHz,rx_freq:r.rx,freq_band:r.band,main_carrier:r.carrier,freq_offset:r.offset,
+        duplex_spacing:v.dupId,custom_duplex_spacing:v.customHz,reverse_operation:v.reverse,colour_code:cc,location_area:la})});
+    if(!resp.ok){if(msg)msg.textContent=await resp.text();return;}
+  }catch(e){if(msg)msg.textContent=String(e);return;}
+  if(msg)msg.textContent='';
+  wizNext();
+}
+
 
 async function setupScanSdr(inWizard){
   const msg=document.getElementById(inWizard?'wiz-sdr-msg':'setup-page-msg');
