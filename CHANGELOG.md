@@ -4,8 +4,9 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
-## Pendiente de publicar — Correcciones
+## Pendiente de publicar — Telemetría y control remoto en el dashboard, correcciones
 
+- **Telemetría y control remoto desde el dashboard.** Al final de la página Infrastructure hay dos secciones desplegables nuevas, «Telemetry» (`[telemetry]`: servidor, puerto, TLS, usuario, contraseña, nombre del sitio, latitud y longitud) y «Remote command / control» (`[command]`: servidor, puerto, TLS, usuario, contraseña), cada una con un interruptor. Apagado, los valores quedan en la configuración con la nueva clave `enabled = false` y la estación no se conecta; sin la clave la sección sigue activa como antes. La contraseña nunca se muestra: vacía conserva la guardada. Una telemetría sin configurar empieza con la posición de Viena (48.2083, 16.3725; 4 decimales, unos 11 m). Guardar comprueba la configuración y reinicia la estación.
 - **El dashboard muestra quién habla cuando el turno llega de la red.** Si otra radio tomaba la palabra por Brew (otra estación, la app TetraLink) durante el hangtime de una llamada de grupo en curso, la estación daba la palabra correctamente en el aire, pero el dashboard seguía mostrando al primer hablante y «Last Heard» no listaba los turnos siguientes. Solo con un hangtime corto y una pausa (llamada nueva) aparecía el segundo. Ahora cada turno de la red se comunica al dashboard: el hablante actual se actualiza y cada turno entra en «Last Heard». El aire no cambia. Probado en simulación con 10 estaciones y 30 radios.
 
 ## v0.5.7 — SC3 (TEA2), grupos gestionados y correcciones

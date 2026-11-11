@@ -2,8 +2,9 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
-## Not yet released — Fixes
+## Not yet released — Telemetry and remote control in the dashboard, fixes
 
+- **Telemetry and remote control from the dashboard.** The bottom of the Infrastructure page has two new collapsible sections, "Telemetry" (`[telemetry]`: server, port, TLS, username, password, site name, latitude and longitude) and "Remote command / control" (`[command]`: server, port, TLS, username, password), each with an on/off switch. Switched off, the values stay in the config with the new key `enabled = false` and the station does not connect; without the key the section is on as before. The password is never shown: left empty, the saved one is kept. A telemetry link that is not configured yet starts with the position of Vienna (48.2083, 16.3725; 4 decimals, about 11 m). Saving checks the config and restarts the station.
 - **The dashboard shows who is talking when the over comes from the network.** When another radio took the floor over Brew (another station, the TetraLink app) during the hang time of a running group call, the station granted it correctly on the air, but the dashboard kept showing the first speaker and Last Heard did not list the later overs. Only with a short hang time and a pause (a new call) did the second one appear. Every network over is now reported to the dashboard: the current speaker is updated and every over goes into Last Heard. Nothing changes on the air. Tested in a simulation with 10 stations and 30 radios.
 
 ## v0.5.7 — SC3 (TEA2), managed talkgroups and fixes
