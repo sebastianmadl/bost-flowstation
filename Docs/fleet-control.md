@@ -108,6 +108,8 @@ more at the end:
 the restart the station connects again and its `StationHello` carries the new
 version: that is how the server knows the update finished.
 
+A station that is already up to date answers `StartUpdate` with `ok` and then reports `up_to_date`; the server skips it.
+
 The OTA state is one per process (`net_dashboard::ota_remote`): a run started
 by the server shows on the dashboard and the other way round, and only one
 run can be active.
