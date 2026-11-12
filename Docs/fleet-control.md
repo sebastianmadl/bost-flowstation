@@ -199,7 +199,9 @@ start, in `main`).
 - **`GetConfig`** → `ConfigInfo {hash, config, text, pending}`: `config` is
   the Infrastructure view (the same JSON as `GET /api/roaming`, without the
   server's cell directory) plus the Brew link, cell SDR devices and the OTA
-  source; passwords only as `password_set`. `text` is the file with passwords
+  source, `home_mode_display` (the `[cell_info.home_mode_display]` table or
+  null) and `access` (`issi_whitelist`, `whitelist_mode`); passwords only as
+  `password_set`. `text` is the file with passwords
   and keys as `***`.
 - **`SetConfig {base_hash, changes, confirm_secs, during_call, by}`**: refused
   with `conflict` (the file is not `base_hash`), `invalid` (unknown key or
@@ -207,7 +209,10 @@ start, in `main`).
   `busy` (update running or a change already waits). Accepted keys:
   `reselect`, `rxlev_access_min_dbm`, `migration`, `presence_check_secs`,
   `multi_network_enabled`, `networks`, `telemetry`, `command`, `cells`,
-  `cells_add`, `cells_remove`, `brew`, `ota`, `net_info`. An empty password
+  `cells_add`, `cells_remove`, `brew`, `ota`, `net_info`, `raw`. `raw`:
+  `[{path, value?, remove?}]`, single values of the file (the server's config
+  editor, Home Mode Display and ISSI whitelist cards), applied last; paths
+  through a password or key name and `***` values are refused. An empty password
   keeps the old one; a new carrier moves the cell's SoapySDR frequencies. On
   `ok` the station saves `<config>.fleet-backup`, writes
   `<config>.fleet-pending.json` (old/new hash, window, who, when), writes the

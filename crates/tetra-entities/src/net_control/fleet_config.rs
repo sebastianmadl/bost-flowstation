@@ -311,6 +311,14 @@ pub fn config_json(config: &str, shared: Option<&SharedConfig>) -> Result<JsonVa
         "effective_repo": source.repo_display,
         "effective_branch": source.branch,
     });
+    // Edited through `raw` patches (the server's Home Mode Display and ISSI whitelist cards).
+    let ci = table.get("cell_info").and_then(|c| c.as_table());
+    v["home_mode_display"] = ci.and_then(|c| c.get("home_mode_display")).map(|h| serde_json::to_value(h).unwrap_or(JsonValue::Null)).unwrap_or(JsonValue::Null);
+    let sec = table.get("security").and_then(|s| s.as_table());
+    v["access"] = json!({
+        "issi_whitelist": sec.and_then(|s| s.get("issi_whitelist")).map(|l| serde_json::to_value(l).unwrap_or(JsonValue::Null)).unwrap_or(json!([])),
+        "whitelist_mode": sec.and_then(|s| s.get("whitelist_mode")).and_then(|m| m.as_str()).unwrap_or("auto"),
+    });
     v["net_info"] = json!({
         "mcc": table.get("net_info").and_then(|n| n.get("mcc")).and_then(|x| x.as_integer()),
         "mnc": table.get("net_info").and_then(|n| n.get("mnc")).and_then(|x| x.as_integer()),
@@ -340,7 +348,7 @@ fn carrier_locked(table: &Table) -> Option<&'static str> {
 const ROAMING_KEYS: &[&str] =
     &["reselect", "rxlev_access_min_dbm", "migration", "presence_check_secs", "multi_network_enabled", "networks", "telemetry", "command", "cells"];
 /// Keys only Fleet Control adds.
-const FLEET_KEYS: &[&str] = &["cells_add", "cells_remove", "brew", "ota", "net_info"];
+const FLEET_KEYS: &[&str] = &["cells_add", "cells_remove", "brew", "ota", "net_info", "raw"];
 
 /// Apply a `SetConfig.changes` object to the config text; returns the new text, checked like a
 /// local save. Every key is optional:
@@ -354,7 +362,10 @@ const FLEET_KEYS: &[&str] = &["cells_add", "cells_remove", "brew", "ota", "net_i
 /// - `brew: {host, port, tls, username, password}`: the classic `[brew]` link (with `[networks]`
 ///   the links are set per network);
 /// - `net_info: {mcc, mnc}` (classic config only);
-/// - `ota: {channel, repo?, branch?}` (`[dashboard] ota_channel` / `ota_repo` / `ota_branch`).
+/// - `ota: {channel, repo?, branch?}` (`[dashboard] ota_channel` / `ota_repo` / `ota_branch`);
+/// - `raw: [{path: [key | index, ..], value?, remove?}]`: single values of the config file (the
+///   server's config editor and the Home Mode Display / ISSI whitelist cards send only what
+///   changed), applied last. Keys and passwords are refused here.
 ///
 /// An empty password keeps the saved one. A key this station does not know is refused, so an
 /// older station never drops part of a change silently.
@@ -429,9 +440,90 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
         text = ota_channel::ota_source_text(&text, channel, o.get("repo").and_then(|v| v.as_str()), o.get("branch").and_then(|v| v.as_str()))?;
     }
 
+    if let Some(list) = obj.get("raw").filter(|r| !r.is_null()) {
+        let mut table: Table = toml::from_str(&text).map_err(|e| format!("config does not parse: {e}"))?;
+        apply_raw(&mut table, list)?;
+        text = toml::to_string(&table).map_err(|e| e.to_string())?;
+    }
+
     cells::validated(&text)?;
     Ok(text)
 }
+
+/// One step of a `raw` path: a table key or an array index.
+enum Step<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// Apply `raw` patches (see [`apply_changes`]). Missing tables on the way are created; an index
+/// must exist (arrays are replaced as a whole, or element by element when the length stays).
+fn apply_raw(table: &mut Table, list: &JsonValue) -> Result<(), String> {
+    let list = list.as_array().ok_or("raw must be a list")?;
+    let mut root = TomlValue::Table(std::mem::take(table));
+    let result = apply_raw_to(&mut root, list);
+    if let TomlValue::Table(t) = root {
+        *table = t;
+    }
+    result
+}
+
+fn apply_raw_to(root: &mut TomlValue, list: &[JsonValue]) -> Result<(), String> {
+    for (i, p) in list.iter().enumerate() {
+        let what = format!("raw[{i}]");
+        let steps: Vec<Step> = p
+            .get("path")
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty())
+            .ok_or(format!("{what}.path is required"))?
+            .iter()
+            .map(|s| match s {
+                JsonValue::String(k) if !k.is_empty() => Ok(Step::Key(k.as_str())),
+                JsonValue::Number(n) if n.as_u64().is_some() => Ok(Step::Index(n.as_u64().unwrap_or(0) as usize)),
+                _ => Err(format!("{what}.path: keys and indexes only")),
+            })
+            .collect::<Result<_, _>>()?;
+        let name = p["path"].as_array().map(|a| a.iter().map(|s| s.as_str().map(str::to_owned).unwrap_or_else(|| s.to_string())).collect::<Vec<_>>().join(".")).unwrap_or_default();
+        if steps.iter().any(|s| matches!(s, Step::Key(k) if is_secret_key(k))) {
+            return Err(format!("{name}: keys and passwords are not changed this way"));
+        }
+        let remove = p.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
+        let value = if remove {
+            None
+        } else {
+            let v = p.get("value").filter(|v| !v.is_null()).ok_or(format!("{what}.value is required"))?;
+            if v.to_string().contains("\"***\"") {
+                return Err(format!("{name}: a hidden value (***) cannot be written back"));
+            }
+            Some(TomlValue::try_from(v.clone()).map_err(|e| format!("{name}: {e}"))?)
+        };
+        let (last, parents) = steps.split_last().expect("not empty");
+        let mut cur: &mut TomlValue = &mut *root;
+        for s in parents {
+            cur = match (s, cur) {
+                (Step::Key(k), TomlValue::Table(t)) => t.entry(k.to_string()).or_insert_with(|| TomlValue::Table(Table::new())),
+                (Step::Index(n), TomlValue::Array(a)) => a.get_mut(*n).ok_or(format!("{name}: no element {n}"))?,
+                _ => return Err(format!("{name}: the path does not fit the config")),
+            };
+        }
+        match (last, cur, value) {
+            (Step::Key(k), TomlValue::Table(t), Some(v)) => {
+                t.insert(k.to_string(), v);
+            }
+            (Step::Key(k), TomlValue::Table(t), None) => {
+                t.remove(*k);
+            }
+            (Step::Index(n), TomlValue::Array(a), Some(v)) if *n < a.len() => a[*n] = v,
+            (Step::Index(n), TomlValue::Array(a), Some(v)) if *n == a.len() => a.push(v),
+            (Step::Index(n), TomlValue::Array(a), None) if *n < a.len() => {
+                a.remove(*n);
+            }
+            _ => return Err(format!("{name}: the path does not fit the config")),
+        }
+    }
+    Ok(())
+}
+
 
 /// `main_carrier` / `colour_code` of one `cells[]` entry. A new carrier also moves the cell's SDR
 /// frequencies (the primary's band plan, like a new cell on the Cells card).
@@ -781,6 +873,45 @@ fleet_control = true
         assert!(read_pending(&cfg).is_none() && !std::path::Path::new(&backup_path(&cfg)).exists(), "notes removed");
         assert!(restore_files(&cfg).is_err(), "nothing left to restore");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn raw_patches_change_single_values_and_never_secrets() {
+        let base = format!("{BASE}\n[security]\nissi_whitelist = [1001]\n");
+        let text = apply_changes(&base, &json!({"raw": [
+            {"path": ["cell_info", "home_mode_display", "text"], "value": "OE4XXX"},
+            {"path": ["cell_info", "home_mode_display", "interval_multiframes"], "value": 60},
+            {"path": ["security", "issi_whitelist"], "value": [1001, 1002]},
+            {"path": ["security", "whitelist_mode"], "value": "enforce"},
+        ]})).unwrap();
+        let t: Table = toml::from_str(&text).unwrap();
+        assert_eq!(t["cell_info"]["home_mode_display"]["text"].as_str(), Some("OE4XXX"));
+        assert_eq!(t["cell_info"]["home_mode_display"]["interval_multiframes"].as_integer(), Some(60));
+        assert_eq!(t["security"]["issi_whitelist"].as_array().unwrap().len(), 2);
+        assert_eq!(t["brew"]["password"].as_str(), Some("topsecret"), "untouched values stay");
+        let removed = apply_changes(&text, &json!({"raw": [{"path": ["cell_info", "home_mode_display"], "remove": true}]})).unwrap();
+        assert!(!removed.contains("home_mode_display"));
+        for bad in [
+            json!({"raw": [{"path": ["brew", "password"], "value": "x"}]}),
+            json!({"raw": [{"path": ["security", "sck"], "value": "00"}]}),
+            json!({"raw": [{"path": ["brew", "host"], "value": "***"}]}),
+            json!({"raw": [{"path": ["cell_info", "main_carrier", "x"], "value": 1}]}),
+        ] {
+            assert!(apply_changes(&base, &bad).is_err(), "{bad}");
+        }
+        assert!(apply_changes(&base, &json!({"raw": [{"path": ["cell_info", "colour_code"], "value": "red"}]})).is_err(), "the result is validated");
+    }
+
+    #[test]
+    fn config_json_shows_home_mode_display_and_whitelist() {
+        let dir = std::env::temp_dir().join(format!("fleet-cfg-hmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, format!("{BASE}\n[cell_info.home_mode_display]\ntext = \"Hello\"\n\n[security]\nissi_whitelist = [5]\nwhitelist_mode = \"enforce\"\n")).unwrap();
+        let v = config_json(path.to_str().unwrap(), None).unwrap();
+        assert_eq!(v["home_mode_display"]["text"], "Hello");
+        assert_eq!(v["access"], json!({"issi_whitelist": [5], "whitelist_mode": "enforce"}));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
