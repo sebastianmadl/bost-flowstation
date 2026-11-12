@@ -232,38 +232,75 @@ fn login_html_body() -> &'static str {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq)]
-enum UpdatePhase {
+pub(crate) enum UpdatePhase {
     Idle,
     Running,
     Done { success: bool },
 }
 
-struct UpdateState {
-    phase: UpdatePhase,
-    log: String,
+pub(crate) struct UpdateState {
+    pub(crate) phase: UpdatePhase,
+    pub(crate) log: String,
+    /// Step of the run, for Fleet Control progress reports (`ota_remote`).
+    pub(crate) stage: crate::net_dashboard::ota_remote::OtaStage,
+    /// `Compiling …` lines seen in the build step.
+    pub(crate) compiled: u32,
+    /// Expected number of compiled units (last successful build, else the packages in `Cargo.lock`).
+    pub(crate) units_expected: u32,
+    /// When the run started (Fleet Control reports the elapsed time).
+    pub(crate) started: Option<std::time::Instant>,
 }
 
 impl UpdateState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         UpdateState {
             phase: UpdatePhase::Idle,
             log: String::new(),
+            stage: crate::net_dashboard::ota_remote::OtaStage::Download,
+            compiled: 0,
+            units_expected: 0,
+            started: None,
         }
     }
     fn append(&mut self, line: &str) {
+        if self.stage == crate::net_dashboard::ota_remote::OtaStage::Build && line.trim_start().starts_with("Compiling ") {
+            self.compiled += 1;
+        }
         self.log.push_str(line);
         self.log.push('\n');
     }
-    fn start(&mut self) {
+    pub(crate) fn start(&mut self) {
         self.phase = UpdatePhase::Running;
         self.log.clear();
+        self.stage = crate::net_dashboard::ota_remote::OtaStage::Download;
+        self.compiled = 0;
+        self.units_expected = 0;
+        self.started = Some(std::time::Instant::now());
     }
     fn finish(&mut self, success: bool) {
         self.phase = UpdatePhase::Done { success };
+        if !success {
+            self.stage = crate::net_dashboard::ota_remote::OtaStage::Failed;
+        }
+    }
+    fn set_stage(&mut self, stage: crate::net_dashboard::ota_remote::OtaStage) {
+        self.stage = stage;
+    }
+    #[cfg(test)]
+    pub(crate) fn set_stage_for_test(&mut self, stage: crate::net_dashboard::ota_remote::OtaStage) {
+        self.set_stage(stage);
+    }
+    #[cfg(test)]
+    pub(crate) fn finish_for_test(&mut self, success: bool) {
+        self.finish(success);
+    }
+    #[cfg(test)]
+    pub(crate) fn append_for_test(&mut self, line: &str) {
+        self.append(line);
     }
 }
 
-type SharedUpdateState = Arc<Mutex<UpdateState>>;
+pub(crate) type SharedUpdateState = Arc<Mutex<UpdateState>>;
 
 /// In-memory session store for cookie-based authentication.
 ///
@@ -1463,7 +1500,7 @@ impl<F: FnOnce()> Drop for OtaRfRecoveryGuard<F> {
 ///   5. Skip rebuild/install/restart when the running binary already matches HEAD
 ///   6. cargo build --release (incremental; never `cargo clean`)
 ///   7. install binary (+ future `ptbs` name) + systemctl restart
-fn run_update(update: SharedUpdateState, config_path: String, source_dir_override: Option<String>) {
+pub(crate) fn run_update(update: SharedUpdateState, config_path: String, source_dir_override: Option<String>) {
     macro_rules! log {
         ($update:expr, $($arg:tt)*) => {{
             let line = format!($($arg)*);
@@ -1808,7 +1845,11 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
                 " (no libtetra-codec — signalling only)"
             }
         );
-        update.lock().unwrap().finish(true);
+        {
+            let mut u = update.lock().unwrap();
+            u.set_stage(crate::net_dashboard::ota_remote::OtaStage::UpToDate);
+            u.finish(true);
+        }
         return;
     }
 
@@ -1838,6 +1879,11 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
     // root-owned target/ stalls and OOM on Pi (compiling tetra-entities html.rs is heavy).
     // Output is streamed live so a long compile shows progress instead of looking hung (FH-BUG-035).
     // Never run `cargo clean` — incremental `target/` is intentional.
+    {
+        let mut u = update.lock().unwrap();
+        u.set_stage(crate::net_dashboard::ota_remote::OtaStage::Build);
+        u.units_expected = crate::net_dashboard::ota_remote::expected_units(&src_dir);
+    }
     log!(update, "--- cargo build --release ---");
     let cargo = find_cargo(&src_dir);
     if cargo == std::path::Path::new("cargo") {
@@ -1902,7 +1948,11 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
         return;
     }
 
+    // Remember how many units this build compiled: the next run estimates its progress from it.
+    crate::net_dashboard::ota_remote::remember_units(&src_dir, update.lock().unwrap().compiled);
+
     // Step 7: install the new binary where systemd actually runs it.
+    update.lock().unwrap().set_stage(crate::net_dashboard::ota_remote::OtaStage::Install);
     log!(update, "--- Installing release binary ---");
     if !install_built_binary(&src_dir, &update) {
         return;
@@ -1925,7 +1975,11 @@ fn run_update(update: SharedUpdateState, config_path: String, source_dir_overrid
         update,
         "Dashboard will disconnect briefly — wait for automatic reload (do not power-cycle yet)."
     );
-    update.lock().unwrap().finish(true);
+    {
+        let mut u = update.lock().unwrap();
+        u.set_stage(crate::net_dashboard::ota_remote::OtaStage::Restart);
+        u.finish(true);
+    }
 
     crate::service_control::schedule_service_action(
         crate::service_control::ServiceAction::Restart,
@@ -1981,7 +2035,8 @@ impl DashboardServer {
             shared_config: None,
             cmd_tx: None,
             mm_cmd_tx: None,
-            update_state: Arc::new(Mutex::new(UpdateState::new())),
+            // One OTA state per process, shared with Fleet Control (`ota_remote`).
+            update_state: crate::net_dashboard::ota_remote::shared_update_state(),
             source_dir_override: None,
             auth: Arc::new(RwLock::new(None)),
             public_overview: false,
@@ -2043,6 +2098,12 @@ impl DashboardServer {
     }
 
     pub fn start(&mut self, bind: &str, http_port: u16, https_port: u16) {
+        // Fleet Control may start the same OTA as the Update button (`ota_remote`).
+        crate::net_dashboard::ota_remote::register(
+            self.config_path.clone(),
+            self.source_dir_override.clone(),
+            Arc::clone(&self.state),
+        );
         let state = Arc::clone(&self.state);
         let clients = Arc::clone(&self.clients);
         let config_path = self.config_path.clone();
@@ -5663,6 +5724,18 @@ fn radio_names_json(radioid: &crate::net_dashboard::radioid::RadioIdCache) -> St
 /// Query: `?refresh=1` bypasses success cache; `?notes=1` also fetches changelog text
 /// (OTA modal). Boot/badge should omit notes to keep the Pi responsive.
 fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool, with_notes: bool) {
+    let body = update_check_json(config_path, refresh, with_notes);
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
+/// The update check as JSON (see [`serve_update_check`]); blocking (GitHub). Also used by Fleet
+/// Control (`ota_remote::check`).
+pub(crate) fn update_check_json(config_path: &str, refresh: bool, with_notes: bool) -> String {
     let source = crate::net_dashboard::ota_channel::resolve_ota_source(config_path);
     // Cache/coalescing key: the same source and branch give the same answer.
     let channel = format!("{}|{}|{}", source.channel, source.git_url, source.branch);
@@ -5792,14 +5865,7 @@ fn serve_update_check(mut stream: PrefixedConn, config_path: &str, refresh: bool
 
     // Even when git HEAD matches, keep "update available" if this binary has no ACELP link —
     // so the GUI can install libtetra-codec without SSH.
-    let body = enrich_update_check_for_voice(body);
-
-    let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
+    enrich_update_check_for_voice(body)
 }
 
 fn enrich_update_check_for_voice(body: String) -> String {

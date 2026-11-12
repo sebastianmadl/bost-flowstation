@@ -57,7 +57,9 @@ Only on a control connection whose HTTP 101 names `fleet-control`:
 - `StationHello {protocol: 1, version, brew_login, mcc, mnc, fleet_control,
   capabilities}` right after connecting and whenever the switch changes (also
   to off, so the server can drop the station from its list and log it).
-  `capabilities` is `["fleet-v1"]` while the switch is on, empty while off.
+  `capabilities` is `["fleet-v1", "update-v1"]` while the switch is on
+  (`update-v1` only while the dashboard runs, because the OTA lives there),
+  empty while off. A hello is sent again when `update-v1` appears later.
 - `CommandResult {handle, ok, code, message}` for every Fleet Control command.
 
 Commands understood (`fleet-v1`):
@@ -65,8 +67,50 @@ Commands understood (`fleet-v1`):
 - `FleetPing {handle}`: answered by the control worker with `CommandResult`
   `ok` / `fleet_control_off`.
 
+Commands understood (`update-v1`, phase 2, remote update): see the next section.
+
 A server that does not offer `fleet-control` (older brew-server, TetraPack)
 never sees any of this.
+
+## Remote update (phase 2, `update-v1`)
+
+The server can check for and start the same OTA as the dashboard's Update
+button. The station always updates from **its own OTA source**
+(`[dashboard] ota_channel`, by default `installed` = the repository and branch
+it was installed from); the server never chooses a repository or branch.
+
+| Command (server → station) | Answer |
+| --- | --- |
+| `CheckUpdate {handle}` | `UpdateInfo {handle, ok, current, latest, update_available, channel, repo, branch, message}` when the check is done (fresh, no cache; it asks GitHub, so it can take some seconds) |
+| `StartUpdate {handle, during_call}` | `CommandResult` at once: `ok`, `busy` (an update is already running), `call_active` (a call is in progress and `during_call` is false), `unavailable` (no dashboard, so no OTA), `fleet_control_off` |
+
+`during_call` defaults to false. `repo` never carries credentials.
+
+While an OTA runs (whoever started it: server or dashboard), the station sends
+
+```json
+{"UpdateProgress": {"stage": "build", "percent": 42, "message": "   Compiling tetra-entities v0.1.0", "version": "v0.5.9-8d7a363", "elapsed_secs": 312}}
+```
+
+when the stage or the percentage changes and at least every 10 s, and once
+more at the end:
+
+| `stage` | Meaning | `percent` |
+| --- | --- | --- |
+| `download` | checking the source, `git fetch` | 5 |
+| `build` | `cargo build`; **the radio is off the air from here on** (the OTA frees the SDR for the build, `rf_status::request_ota_rf_off`) | 10–90, estimated: compiled units against the last successful build (`target/.ota-build-units`, else the packages in `Cargo.lock`) |
+| `install` | the new program is put in place | 92 |
+| `restart` | built and installed, the service restarts in 5 s | 100 |
+| `up_to_date` | nothing to do, the running build is the newest of the source | 100 |
+| `failed` | stopped with an error (`message` = last log line); the old version stays or is restarted | 0 |
+
+`version` is the software running now (the old one until the restart). After
+the restart the station connects again and its `StationHello` carries the new
+version: that is how the server knows the update finished.
+
+The OTA state is one per process (`net_dashboard::ota_remote`): a run started
+by the server shows on the dashboard and the other way round, and only one
+run can be active.
 
 ## HTTP API (dashboard)
 
@@ -83,5 +127,8 @@ never sees any of this.
 - `crates/tetra-entities/src/net_control/worker.rs`: offer check on connect,
   hello on connect and on switch changes, `FleetPing`.
 - `crates/tetra-entities/src/net_dashboard/fleet.rs`: switch, dialog, status.
+- `crates/tetra-entities/src/net_dashboard/ota_remote.rs`: remote update (check,
+  start, progress) on the dashboard's OTA (`server.rs` `run_update`,
+  `update_check_json`, `UpdateState.stage`).
 - `crates/tetra-config/src/bluestation/sec_control.rs` (`fleet_control`),
   `state.rs` (`FleetControlState`: enabled, offered, connected).

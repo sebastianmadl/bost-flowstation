@@ -10,6 +10,7 @@ pub mod fleet;
 pub mod geoalarm;
 pub mod html;
 pub mod ota_channel;
+pub mod ota_remote;
 pub mod profiles;
 pub mod roaming;
 pub mod radioid;

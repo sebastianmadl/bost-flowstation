@@ -39,10 +39,18 @@ pub struct ControlWorker<T: NetworkTransport> {
     fleet_offered: bool,
     /// The switch value the last hello on this connection announced (`None`: none sent yet).
     hello_announced: Option<bool>,
+    /// Whether that hello listed `update-v1` (an OTA was available).
+    hello_ota: bool,
+    /// Answers produced off the loop (update checks), sent by the loop.
+    async_tx: std::sync::mpsc::Sender<ControlResponse>,
+    async_rx: std::sync::mpsc::Receiver<ControlResponse>,
+    /// Stage and percent of the last `UpdateProgress` sent on this connection, with the time.
+    last_progress: Option<(String, u8, Instant)>,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
     pub fn new(dispatchers: HashMap<TetraEntity, CommandDispatcher>, transport: T) -> Self {
+        let (async_tx, async_rx) = std::sync::mpsc::channel();
         Self {
             dispatchers,
             transport,
@@ -51,6 +59,10 @@ impl<T: NetworkTransport> ControlWorker<T> {
             shared: None,
             fleet_offered: false,
             hello_announced: None,
+            hello_ota: false,
+            async_tx,
+            async_rx,
+            last_progress: None,
         }
     }
 
@@ -69,6 +81,8 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 self.poll_commands();
                 self.collect_responses();
                 self.announce_switch_change();
+                self.send_async_answers();
+                self.report_update_progress();
             } else {
                 // Not connected — sleep briefly to avoid busy-spinning
                 std::thread::sleep(POLL_TIMEOUT);
@@ -121,6 +135,22 @@ impl<T: NetworkTransport> ControlWorker<T> {
         if let Some(response) = fleet::answer(&command, self.fleet_enabled()) {
             self.send_response(&response);
             return;
+        }
+        let ota = crate::net_dashboard::ota_remote::available();
+        match fleet::update_command(&command, self.fleet_enabled(), ota, crate::net_dashboard::ota_remote::start) {
+            Some(fleet::UpdateAction::Reply(response)) => {
+                self.send_response(&response);
+                return;
+            }
+            Some(fleet::UpdateAction::Check { handle }) => {
+                // The check asks GitHub (seconds): run it off the loop, the loop sends the answer.
+                let tx = self.async_tx.clone();
+                let _ = std::thread::Builder::new().name("fleet-update-check".into()).spawn(move || {
+                    let _ = tx.send(fleet::update_info(handle, crate::net_dashboard::ota_remote::check()));
+                });
+                return;
+            }
+            None => {}
         }
         let target = Self::route_control_command(&command);
         match self.dispatchers.get(&target) {
@@ -176,6 +206,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
     fn set_fleet_link(&mut self, connected: bool) {
         if !connected {
             self.hello_announced = None;
+            self.last_progress = None;
         }
         if let Some(shared) = &self.shared {
             let mut state = shared.state_write();
@@ -195,15 +226,39 @@ impl<T: NetworkTransport> ControlWorker<T> {
         }
         let Some(shared) = self.shared.clone() else { return };
         let enabled = shared.state_read().fleet_control.enabled;
-        if self.hello_announced == Some(enabled) {
+        // The capabilities change too when the dashboard (and with it the OTA) comes up later.
+        let ota = crate::net_dashboard::ota_remote::available();
+        if self.hello_announced == Some(enabled) && (!enabled || self.hello_ota == ota) {
             return;
         }
         let hello = fleet::station_hello(&shared);
-        if self.hello_announced.is_some() {
+        if self.hello_announced.is_some_and(|was| was != enabled) {
             tracing::info!("Fleet Control switched {} on this station, telling the server", if enabled { "on" } else { "off" });
         }
         self.hello_announced = Some(enabled);
+        self.hello_ota = ota;
         self.send_response(&hello);
+    }
+
+    /// Send the answers of finished update checks.
+    fn send_async_answers(&mut self) {
+        while let Ok(response) = self.async_rx.try_recv() {
+            self.send_response(&response);
+        }
+    }
+
+    /// Report the OTA progress to a server offering Fleet Control while the switch is on.
+    fn report_update_progress(&mut self) {
+        if !self.connected || !self.fleet_offered || !self.fleet_enabled() {
+            return;
+        }
+        let Some(p) = crate::net_dashboard::ota_remote::progress() else { return };
+        let now = Instant::now();
+        if !fleet::progress_due(&p, self.last_progress.as_ref(), now) {
+            return;
+        }
+        self.last_progress = Some((p.stage.as_str().to_string(), p.percent, now));
+        self.send_response(&fleet::update_progress(&p));
     }
 
     fn try_connect(&mut self) {

@@ -107,6 +107,21 @@ pub enum ControlCommand {
     /// Fleet Control (`fleet-v1`): round-trip check. The control worker answers it itself with a
     /// [`ControlResponse::CommandResult`]: `ok` while Fleet Control is on, else `fleet_control_off`.
     FleetPing { handle: u32 },
+
+    /// Fleet Control (`update-v1`): run the update check against the station's own OTA source
+    /// (fresh, no cache). Answered by the control worker with a [`ControlResponse::UpdateInfo`]
+    /// when the check is done (it asks GitHub, so it can take some seconds).
+    CheckUpdate { handle: u32 },
+
+    /// Fleet Control (`update-v1`): start the OTA like the dashboard's Update button, from the
+    /// station's own OTA source. Answered at once with a [`ControlResponse::CommandResult`]
+    /// (`ok`, `busy`, `call_active`, `unavailable`, `fleet_control_off`); the run then reports
+    /// [`ControlResponse::UpdateProgress`]. `during_call`: start even while a call is in progress.
+    StartUpdate {
+        handle: u32,
+        #[serde(default)]
+        during_call: bool,
+    },
 }
 
 impl ControlCommand {
@@ -126,7 +141,9 @@ impl ControlCommand {
             | Self::AmbienceListen { .. }
             | Self::TestCmdB { .. }
             // Answered by the control worker before routing; never reaches CMCE.
-            | Self::FleetPing { .. } => TetraEntity::Cmce,
+            | Self::FleetPing { .. }
+            | Self::CheckUpdate { .. }
+            | Self::StartUpdate { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -167,5 +184,39 @@ pub enum ControlResponse {
         code: String,
         /// Short English text for the server's dashboard.
         message: String,
+    },
+
+    /// Fleet Control (`update-v1`): the answer to [`ControlCommand::CheckUpdate`].
+    UpdateInfo {
+        handle: u32,
+        /// The check reached the repository.
+        ok: bool,
+        /// Running software (`STACK_VERSION`).
+        current: String,
+        /// Newest version of the source, when known.
+        latest: Option<String>,
+        /// A newer version is available (the server only updates such stations).
+        update_available: bool,
+        /// OTA source of the station: `installed`, `stable`, `beta` or `custom`.
+        channel: String,
+        /// Repository (without credentials) and branch the station updates from.
+        repo: String,
+        branch: String,
+        message: String,
+    },
+
+    /// Fleet Control (`update-v1`): progress of an OTA run (whoever started it), sent when the step
+    /// or the percentage changes and at least every 10 s while it runs.
+    UpdateProgress {
+        /// `download`, `build`, `install`, `restart`, `up_to_date`, `failed`.
+        stage: String,
+        /// 0–100, estimated.
+        percent: u8,
+        /// Last line of the update log.
+        message: String,
+        /// Software that is running now (the old one until the restart).
+        version: String,
+        /// Seconds since the run started.
+        elapsed_secs: u64,
     },
 }
