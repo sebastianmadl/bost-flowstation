@@ -167,6 +167,13 @@ The dashboard reads both from `GET /api/fleet-control` (`maintenance`:
 `{by, reason, left_secs}` or null; `live_update`: `{stage, percent}` or null),
 every 5 s.
 
+The banner also shows **without a login**: on the login page and on the public
+overview. For that, `GET /api/fleet-banner` is open without a session (not on
+the private HTTP listener, which stays fully gated) and returns only
+`{maintenance, live_update}` as above: no server address, no login, no switch
+state. The public overview falls back to it when `/api/fleet-control` answers
+401; the login page polls it every 5 s.
+
 ## Restart (`restart-v1`)
 
 `RestartStation {handle, host, during_call}` → `CommandResult`: `ok` (the

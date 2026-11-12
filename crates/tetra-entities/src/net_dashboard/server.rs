@@ -3665,6 +3665,13 @@ fn handle_connection(
                 return;
             }
 
+            // The red maintenance banner must also show on the login page and the public
+            // overview, so its narrow status (no addresses, no logins) is open without a session.
+            if !require_http_auth && is_fleet_banner_request(&req_line) {
+                http_json_response(inner, 200, &crate::net_dashboard::fleet::banner_json(shared_config.as_ref()).to_string());
+                return;
+            }
+
             // For GET / (the dashboard SPA): redirect to /login so the browser navigates.
             // For API requests: 401 so JS code can detect and refresh.
             if is_root {
@@ -4458,6 +4465,10 @@ fn handle_connection(
     } else if req_line.contains("POST /api/roaming") {
         let (inner, body_str) = read_post_body(stream);
         serve_roaming_save(inner, &config_path, &body_str);
+    } else if is_fleet_banner_request(&req_line) {
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        http_json_response(s, 200, &crate::net_dashboard::fleet::banner_json(shared_config.as_ref()).to_string());
     } else if req_line.contains("GET /api/fleet-control") {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -8545,6 +8556,11 @@ fn request_path(req_line: &str) -> Option<&str> {
     req_line.split_whitespace().nth(1)
 }
 
+/// GET /api/fleet-banner (with or without a query string).
+fn is_fleet_banner_request(req_line: &str) -> bool {
+    req_line.starts_with("GET /api/fleet-banner ") || req_line.starts_with("GET /api/fleet-banner?")
+}
+
 fn is_tpg2200_action_request(req_line: &str) -> bool {
     let mut parts = req_line.split_whitespace();
     let method = parts.next().unwrap_or("");
@@ -9845,6 +9861,9 @@ mod tests {
         struct Fixture {
             server: DashboardServer,
             commands: crossbeam_channel::Receiver<ControlCommand>,
+            /// true: the private-HTTP listener (`require_http_auth`); false: the normal dashboard
+            /// listener with its cookie login.
+            private: bool,
         }
 
         impl Fixture {
@@ -9864,7 +9883,15 @@ mod tests {
                 server.set_public_overview(true);
                 let (sender, commands) = crossbeam_channel::unbounded();
                 server.set_cmd_sender(sender);
-                Self { server, commands }
+                Self { server, commands, private: true }
+            }
+
+            /// The normal dashboard listener (login page, cookie session); `public_overview` as given.
+            fn dashboard(public_overview: bool) -> Self {
+                let mut fixture = Self::new(&[]);
+                fixture.server.set_public_overview(public_overview);
+                fixture.private = false;
+                fixture
             }
 
             fn connect(&self) -> (TcpStream, std::thread::JoinHandle<()>) {
@@ -9881,16 +9908,18 @@ mod tests {
                 let sessions = Arc::clone(&self.server.sessions);
                 let throttle = Arc::clone(&self.server.login_throttle);
                 let radioid = self.server.radioid.clone();
+                let private = self.private;
+                let public_overview = self.server.public_overview;
                 let (admitted, ready) = std::sync::mpsc::channel();
                 let thread = std::thread::spawn(move || {
                     let (stream, peer) = listener.accept().unwrap();
-                    let admission = primary_http_admission(true, &shared_config, &auth, Some(peer.ip()));
+                    let admission = if private { primary_http_admission(true, &shared_config, &auth, Some(peer.ip())) } else { Some(false) };
                     admitted.send(()).unwrap();
                     let Some(require_http_auth) = admission else {
                         serve_https_redirect_plain(stream, 443);
                         return;
                     };
-                    assert!(require_http_auth);
+                    assert_eq!(require_http_auth, private);
                     handle_connection(
                         ConnStream::plain(stream),
                         state,
@@ -9905,7 +9934,7 @@ mod tests {
                         sessions,
                         throttle,
                         radioid,
-                        true,
+                        public_overview,
                         None,
                         require_http_auth,
                         None,
@@ -10014,6 +10043,27 @@ mod tests {
             websocket.close(None).unwrap();
             drop(websocket);
             thread.join().unwrap();
+        }
+
+        #[test]
+        fn fleet_banner_is_open_without_a_session_and_narrow() {
+            // Login page and public overview show the maintenance banner, so its status is open
+            // to visitors with or without the public overview, and carries only the banner fields.
+            for public_overview in [false, true] {
+                let fixture = Fixture::dashboard(public_overview);
+                let response = fixture.request("GET", "/api/fleet-banner", "", "");
+                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                let body: serde_json::Value = serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                let keys: Vec<&str> = body.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                assert_eq!(keys, ["live_update", "maintenance"], "nothing but the banner status");
+                let control = fixture.request("GET", "/api/fleet-control", "", "");
+                assert!(control.starts_with("HTTP/1.1 401"), "the full Fleet Control status stays behind the login");
+            }
+            // The private HTTP listener stays fully gated.
+            let response = Fixture::new(&["127.0.0.1"]).request("GET", "/api/fleet-banner", "", "");
+            assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+            assert!(is_fleet_banner_request("GET /api/fleet-banner?t=1 HTTP/1.1"));
+            assert!(!is_fleet_banner_request("GET /api/fleet-bannerx HTTP/1.1"));
         }
 
         #[test]

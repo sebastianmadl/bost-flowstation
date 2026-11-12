@@ -19260,7 +19260,15 @@ async function fleetCmdSave(){
 }
 async function refreshFleetControl(){
   if(document.hidden)return;
-  try{const r=await fetch('/api/fleet-control',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;fleetState=await r.json();}catch{return;}
+  try{
+    const r=await fetch('/api/fleet-control',{credentials:'same-origin',cache:'no-store'});
+    if(r.ok)fleetState=await r.json();
+    else if(r.status===401){
+      // Public overview without a session: only the banner status is open to visitors.
+      const p=await fetch('/api/fleet-banner',{credentials:'same-origin',cache:'no-store'});if(!p.ok)return;
+      fleetState=await p.json();
+    }else return;
+  }catch{return;}
   renderFleetBadge();
   renderMaintBanner();
 }
@@ -22200,9 +22208,22 @@ input:focus{border-color:var(--accent2);background:var(--bg4);}
   input[type="text"],input[type="password"]{font-size:16px;padding:14px 14px;}
   .btn-login{font-size:15px;padding:14px 16px;min-height:48px;}
 }
+/* Fleet Control maintenance / live-update banner (same look as in the dashboard). */
+.maint-banner{position:fixed;top:0;left:0;right:0;z-index:50;display:none;align-items:center;gap:12px;
+  padding:12px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+  background:repeating-linear-gradient(135deg,#c62828 0 18px,#b71c1c 18px 36px);color:#fff;
+  box-shadow:0 4px 14px rgba(0,0,0,.25);}
+.maint-banner svg{width:26px;height:26px;flex-shrink:0;}
+.maint-title{font-size:16px;font-weight:800;letter-spacing:.02em;text-transform:uppercase;}
+.maint-sub{font-size:13px;font-weight:500;opacity:.95;margin-top:3px;}
+@media (max-width:640px){.maint-title{font-size:14px;}.maint-sub{font-size:12px;}}
 </style>
 </head>
 <body>
+<div id="maint-banner" class="maint-banner" role="alert">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  <div><div class="maint-title" id="maint-title"></div><div class="maint-sub" id="maint-sub"></div></div>
+</div>
 <div class="login-card">
   <div class="logo-wrap">
     <div class="logo-mark">
@@ -22316,6 +22337,35 @@ form.addEventListener('submit', async (e) => {
 if (window.innerWidth > 600) {
   document.getElementById('username').focus();
 }
+// Fleet Control banner: the server's maintenance flag or a live update (RF on) must be visible
+// before login too. /api/fleet-banner is open without a session and carries only this status.
+const MAINT_I18N={
+  en:{t:'Maintenance: work on this base station in progress',by:'Set by {by} from the Brew server · ends in {min} min',noby:'Set from the Brew server · ends in {min} min',lt:'Live system update: RF on!',ls:'The station is building a new version and stays on the air; the service restarts when it is done.'},
+  es:{t:'Mantenimiento: se está trabajando en esta estación base',by:'Activado por {by} desde el servidor Brew · termina en {min} min',noby:'Activado desde el servidor Brew · termina en {min} min',lt:'Actualización en vivo: ¡RF activa!',ls:'La estación compila una nueva versión y sigue en el aire; el servicio se reinicia al terminar.'},
+  de:{t:'Wartung: Es wird an der Basisstation gearbeitet',by:'Gesetzt von {by} am Brew-Server · endet in {min} min',noby:'Gesetzt am Brew-Server · endet in {min} min',lt:'Live-Systemupdate: RF an!',ls:'Die Station baut eine neue Version und bleibt auf Sendung; danach startet der Dienst neu.'},
+};
+const M=MAINT_I18N[_lang]||MAINT_I18N.en;
+async function refreshMaintBanner(){
+  if(document.hidden)return;
+  let f;
+  try{const r=await fetch('/api/fleet-banner',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;f=await r.json();}catch(e){return;}
+  const b=document.getElementById('maint-banner');
+  const live=f.live_update,m=f.maintenance;
+  if(!live&&!m){b.style.display='none';document.body.style.paddingTop='';return;}
+  const title=document.getElementById('maint-title'),sub=document.getElementById('maint-sub');
+  if(live){
+    title.textContent=M.lt;
+    sub.textContent=M.ls+(live.percent!=null?' · '+live.percent+' %':'');
+  }else{
+    const min=String(Math.max(1,Math.ceil((m.left_secs||0)/60)));
+    title.textContent=M.t;
+    sub.textContent=(m.by?M.by.replace('{by}',m.by):M.noby).replace('{min}',min)+(m.reason?' · '+m.reason:'');
+  }
+  b.style.display='flex';
+  document.body.style.paddingTop=(b.offsetHeight+20)+'px';
+}
+refreshMaintBanner();
+setInterval(refreshMaintBanner,5000);
 </script>
 </body>
 </html>

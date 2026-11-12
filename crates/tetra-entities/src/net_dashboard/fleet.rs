@@ -49,6 +49,17 @@ pub fn status_json(table: &Table, cfg: &StackConfig, shared: Option<&SharedConfi
     })
 }
 
+/// GET /api/fleet-banner: only what the red maintenance banner needs. This route is open to
+/// visitors without a session (login page, public overview), so it carries nothing else: no
+/// server address, no login, no switch state.
+pub fn banner_json(shared: Option<&SharedConfig>) -> JsonValue {
+    let enabled = shared.is_some_and(|s| s.state_read().fleet_control.enabled);
+    json!({
+        "maintenance": banner_maintenance(enabled, crate::net_control::fleet::maintenance(), std::time::Instant::now()),
+        "live_update": crate::net_dashboard::ota_remote::live_running().map(|p| json!({"stage": p.stage.as_str(), "percent": p.percent})),
+    })
+}
+
 /// `maintenance` for the dashboard banner: `{by, reason, left_secs}` while the server's flag is
 /// on (and Fleet Control is on), else null.
 pub fn banner_maintenance(enabled: bool, m: Option<crate::net_control::fleet::Maintenance>, now: std::time::Instant) -> JsonValue {
