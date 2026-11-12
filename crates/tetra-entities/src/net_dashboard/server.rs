@@ -6149,7 +6149,7 @@ fn serve_roaming_save(stream: PrefixedConn, config_path: &str, body: &str) {
         Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
     };
     match crate::net_dashboard::roaming::apply_roaming(&original, &req) {
-        Ok(text) => apply_cells_config(stream, config_path, &text, "roaming settings saved".to_string()),
+        Ok(text) => apply_cells_config(stream, config_path, &text, "Infrastructure settings saved".to_string()),
         Err(e) => http_response(stream, 400, &e),
     }
 }
