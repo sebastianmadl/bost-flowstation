@@ -2396,6 +2396,11 @@ body{
   box-shadow:0 1px 0 rgba(255,255,255,0.03), 0 6px 18px -14px rgba(0,0,0,0.7);
 }
 .topbar-title{font-size:16px;font-weight:800;letter-spacing:-0.015em;}
+/* Phones: no frosted glass. iOS Safari draws a top bar with backdrop-filter blurred until
+   something repaints it (opening the menu), and nothing scrolls under the bar anyway. */
+@media(max-width:700px){
+  #topbar{background:var(--bg2);-webkit-backdrop-filter:none;backdrop-filter:none;}
+}
 
 /* ── Content rhythm ── */
 #content{padding:24px;padding-bottom:max(24px, env(safe-area-inset-bottom));}

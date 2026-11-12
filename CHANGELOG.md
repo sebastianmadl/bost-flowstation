@@ -6,6 +6,7 @@ English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
 ## Sin publicar — Fleet Control (fases 1 a 5)
 
+- **Corrección: barra superior borrosa en el móvil.** En iPhone la barra superior se veía borrosa hasta abrir el menú (efecto de cristal esmerilado de Safari). En pantallas estrechas la barra es ahora opaca, sin ese efecto.
 - **Corrección: cambio de grupo durante una llamada de red.** Si la última radio de un grupo cambiaba a otro grupo mientras alguien hablaba por la red, la voz de esa llamada seguía llegando al mismo intervalo de tiempo y se mezclaba con la siguiente llamada que lo usaba (audio entrecortado, bloques de voz descartados). Ahora la llamada queda en espera correctamente en Brew y vuelve con entrada tardía al volver al grupo.
 - **Fleet Control: más ajustes desde el servidor.** `SetConfig` acepta ahora `raw`: valores sueltos del archivo de configuración (el editor de configuración del servidor envía solo lo que cambió). Nunca contraseñas ni claves. `GetConfig` incluye además el Home Mode Display y la lista blanca de ISSI.
 - **Página Infrastructure: mensaje al guardar.** Guardar ahora muestra «Infrastructure settings saved» en lugar de «roaming settings saved».

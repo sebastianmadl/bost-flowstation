@@ -153,6 +153,16 @@ mod tests {
     }
 
     #[test]
+    fn phone_top_bar_has_no_frosted_glass() {
+        // iOS Safari showed the frosted top bar blurred until the menu was opened (Sebastian
+        // 2026-11-12); on phones it is plain.
+        let css = crate::net_dashboard::html::DASHBOARD_HTML;
+        let glass = css.find("backdrop-filter:saturate(160%) blur(12px);").unwrap();
+        let phone = css.find("#topbar{background:var(--bg2);-webkit-backdrop-filter:none;backdrop-filter:none;}").unwrap();
+        assert!(phone > glass, "the phone rule comes after the glass rule and wins");
+    }
+
+    #[test]
     fn switch_on_without_control_channel_asks_for_it() {
         let base = BASE.replace("[command]", "[command_unused]");
         assert_eq!(apply(&base, &json!({"enabled": true}), Some("x")).unwrap(), FleetChange::NeedCommand);

@@ -4,6 +4,7 @@ Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), whi
 
 ## Unreleased — Fleet Control (phases 1 to 5)
 
+- **Fix: blurry top bar on phones.** On iPhones the top bar looked blurred until the menu was opened (Safari's frosted-glass effect). On narrow screens the bar is now plain, without that effect.
 - **Fix: group change during a network call.** When the last radio of a group switched to another group while someone was talking from the network, that call's voice kept going to the same timeslot and was mixed into the next call using it (choppy audio, dropped voice blocks). The call is now put on hold at Brew properly and comes back with late entry when the radio returns to the group.
 - **Fleet Control: more settings from the server.** `SetConfig` now accepts `raw`: single values of the config file (the server's config editor sends only what changed). Never passwords or keys. `GetConfig` now also carries the Home Mode Display and the ISSI whitelist.
 - **Infrastructure page: save message.** Saving now says "Infrastructure settings saved" instead of "roaming settings saved".
