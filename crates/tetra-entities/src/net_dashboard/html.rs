@@ -2775,6 +2775,17 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
   animation:fs-breathe 2.5s ease-in-out infinite;
 }
 @keyframes fs-breathe{0%,100%{opacity:1;}50%{opacity:.45;}}
+/* Fleet Control maintenance / live update: loud, solid red, on every page under the topbar. */
+.maint-banner{
+  display:flex;align-items:center;gap:14px;flex-shrink:0;
+  padding:14px 20px;background:#c62828;color:#fff;
+  border-bottom:3px solid #8e0000;
+  background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.07) 0 14px,transparent 14px 28px);
+}
+.maint-banner .maint-ico{width:26px;height:26px;flex-shrink:0;color:#fff;}
+.maint-banner .maint-title{font-size:16px;font-weight:800;letter-spacing:.02em;text-transform:uppercase;}
+.maint-banner .maint-sub{font-size:13px;font-weight:500;opacity:.95;margin-top:3px;}
+@media (max-width:640px){.maint-banner{padding:10px 12px;gap:10px;}.maint-banner .maint-title{font-size:14px;}.maint-banner .maint-sub{font-size:12px;}}
 
 /* ── Empty state (one component for the duplicated stubs) ──
    v3 flex layout; keeps the legacy .empty-icon/.empty-text children working
@@ -4380,6 +4391,16 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
       </div>
       <!-- Login: shown only in anonymous public-overview mode (FH-FEAT-033). -->
       <button class="logout-btn" id="login-btn" onclick="window.location='/login'" title="Log in" aria-label="Log in" style="display:none"><span class="ico18" data-icon="login"></span></button>
+    </div>
+  </div>
+
+  <!-- Fleet Control: maintenance by the server / live update with RF on (Docs/fleet-control.md).
+       Shown on every page while the server's flag is on or a live update runs. -->
+  <div id="maint-banner" class="maint-banner" role="alert" style="display:none">
+    <span class="maint-ico" data-icon="alert"></span>
+    <div class="banner-body">
+      <div class="maint-title" id="maint-title"></div>
+      <div class="maint-sub" id="maint-sub"></div>
     </div>
   </div>
 
@@ -8121,6 +8142,7 @@ const LANGS={
     roam_svc_registration:'registration',roam_svc_deregistration:'deregistration',roam_svc_system_wide_services:'system wide services',roam_svc_voice_service:'voice',roam_svc_circuit_mode_data_service:'circuit data',roam_svc_sndcp_service:'packet data',roam_svc_aie_service:'air encryption',roam_svc_advanced_link:'advanced link',roam_svc_priority_cell:'priority cell',roam_svc_no_minimum_mode:'no minimum mode',roam_svc_migration:'migration',
     roam_services_none:'none (radios may not use it)',roam_th_server:'On the server',roam_pick:'Fill in from the server\'s cell list',roam_dir_title:'Cells on the Brew server',roam_dir_help:'The cells of the other stations on the Brew server, with what they broadcast (brew-server extension cell-directory). A neighbour entry is matched by network, downlink frequency and location area. A radio uses its serving cell\'s list to choose which cells to scan (clause 18.3.4.1), so both cells should list each other.',roam_th_state:'State',roam_th_levels:'Access / MS power',roam_th_listed_here:'Neighbour of',roam_th_lists_us:'Lists this station',roam_dir_add:'Add as neighbour',roam_dir_none:'none',roam_dir_empty:'No other cells on the server.',roam_dir_count:'{n} cells of other stations on the server.',roam_dir_off:'The Brew server does not send its cell list (needs a brew-server with the cell-directory extension).',roam_dir_wait:'The server offers its cell list, it has not arrived yet (it comes right after connecting).',roam_dir_unknown:'not known to the server',roam_online:'online',roam_offline:'offline',roam_not_mutual:'{id} does not list this cell: radios there are not told to scan for it',roam_diff_rxlev:'min. access level: listed {list} dBm, the cell broadcasts {cell} dBm',roam_diff_txpwr:'max. MS power: listed {list} dBm, the cell broadcasts {cell} dBm',roam_diff_services:'services differ: {list}',roam_auto_sibling:'Cell of this station (automatic)',roam_nb_none:'No neighbours.',roam_nb_count:'{n} of 7 neighbour entries',roam_need_id_carrier:'Cell identifier and carrier are required.',roam_need_la:'The primary cell needs a location area.',roam_unsaved:'Changed, not saved yet.',roam_confirm_save:'Save the roaming settings and restart the station?',
     roam_brew_off:'Brew is not configured: roaming between stations is off, cells of this station still work.',roam_link_up:'connected',roam_link_down:'not connected',roam_ext:'Server features',roam_feat_roam:'Roaming',roam_feat_calls:'Calls',roam_feat_cells:'Cells',roam_feat_groups:'Groups',roam_feat_net:'Multi Network',roam_feat_other:'Other',roam_feat_fleet:'Fleet Control',
+    maint_title:'Maintenance: work on this base station in progress',maint_sub:'Set by {by} from the Brew server · ends in {min} min',maint_sub_noby:'Set from the Brew server · ends in {min} min',maint_live_title:'Live system update: RF on!',maint_live_sub:'The station is building a new version and stays on the air; the service restarts when it is done. Do not change settings now.',
     fleet_desc:'Station management by SwMI (BrewServer)',fleet_key:'Fleet Control',fleet_on:'on',fleet_off:'off',fleet_not_connected:'control channel not connected',
     fleet_cmd_title:'Fleet Control: control channel',fleet_cmd_help:'Fleet Control runs over the control channel to the Brew server, which is not configured yet. Enter the server; the user is your Brew login, an empty password takes the Brew password. Saving restarts the service.',
     fleet_cmd_server:'Server (IP address or DNS name)',fleet_cmd_pass_ph:'empty = Brew password',fleet_cmd_save:'Save and restart',fleet_need_host:'Please enter the server.',
@@ -8605,6 +8627,7 @@ const LANGS={
     tg_cat_backhaul:'Backhaul Brew up/down',tg_cat_logs:'Log critic (avertismente/erori)',
   },
   de:{
+    maint_title:'Wartung: Es wird an der Basisstation gearbeitet',maint_sub:'Gesetzt von {by} am Brew-Server · endet in {min} min',maint_sub_noby:'Gesetzt am Brew-Server · endet in {min} min',maint_live_title:'Live-Systemupdate: RF an!',maint_live_sub:'Die Station baut eine neue Version und bleibt auf Sendung; danach startet der Dienst neu. Jetzt keine Einstellungen ändern.',
     secp_class_locked:"Dieser Dienst verlangt SC3. Für SC1/SC2 zuerst --require-sc3 aus der Startzeile entfernen und neu starten.",
     secp_aie_title_v109:"Luftschnittstellen-Verschlüsselung",
     secp_class_label:"Sicherheitsklasse",
@@ -8778,6 +8801,7 @@ const LANGS={
     roam_svc_registration:'registro',roam_svc_deregistration:'baja',roam_svc_system_wide_services:'servicios de todo el sistema',roam_svc_voice_service:'voz',roam_svc_circuit_mode_data_service:'datos en circuito',roam_svc_sndcp_service:'datos en paquetes',roam_svc_aie_service:'cifrado de aire',roam_svc_advanced_link:'enlace avanzado',roam_svc_priority_cell:'celda prioritaria',roam_svc_no_minimum_mode:'sin modo mínimo',roam_svc_migration:'migración',
     roam_services_none:'ninguno (las radios no pueden usarla)',roam_th_server:'En el servidor',roam_pick:'Rellenar desde la lista de celdas del servidor',roam_dir_title:'Celdas en el servidor Brew',roam_dir_help:'Las celdas de las otras estaciones del servidor Brew, con lo que anuncian (extensión cell-directory de brew-server). Una vecina se identifica por red, frecuencia de bajada y área de localización. Una radio usa la lista de su celda servidora para elegir qué celdas explorar (cláusula 18.3.4.1), así que ambas celdas deberían anunciarse mutuamente.',roam_th_state:'Estado',roam_th_levels:'Acceso / potencia MS',roam_th_listed_here:'Vecina de',roam_th_lists_us:'Anuncia esta estación',roam_dir_add:'Añadir como vecina',roam_dir_none:'ninguna',roam_dir_empty:'No hay otras celdas en el servidor.',roam_dir_count:'{n} celdas de otras estaciones en el servidor.',roam_dir_off:'El servidor Brew no envía su lista de celdas (requiere un brew-server con la extensión cell-directory).',roam_dir_wait:'El servidor ofrece su lista de celdas, aún no ha llegado (llega justo después de conectar).',roam_dir_unknown:'desconocida en el servidor',roam_online:'en línea',roam_offline:'fuera de línea',roam_not_mutual:'{id} no anuncia esta celda: a las radios allí no se les indica que la busquen',roam_diff_rxlev:'nivel mín. de acceso: anunciado {list} dBm, la celda emite {cell} dBm',roam_diff_txpwr:'potencia máx. MS: anunciada {list} dBm, la celda emite {cell} dBm',roam_diff_services:'servicios distintos: {list}',roam_auto_sibling:'Celda de esta estación (automática)',roam_nb_none:'Sin vecinas.',roam_nb_count:'{n} de 7 entradas de vecina',roam_need_id_carrier:'Faltan el identificador de celda y la portadora.',roam_need_la:'La celda primaria necesita un área de localización.',roam_unsaved:'Cambiado, aún sin guardar.',roam_confirm_save:'¿Guardar los ajustes de roaming y reiniciar la estación?',
     roam_brew_off:'Brew no está configurado: el roaming entre estaciones está apagado, las celdas de esta estación siguen funcionando.',roam_link_up:'conectado',roam_link_down:'sin conexión',roam_ext:'Funciones del servidor',roam_feat_roam:'Roaming',roam_feat_calls:'Llamadas',roam_feat_cells:'Celdas',roam_feat_groups:'Grupos',roam_feat_net:'Multi Network',roam_feat_other:'Otras',roam_feat_fleet:'Fleet Control',
+    maint_title:'Mantenimiento: se está trabajando en esta estación base',maint_sub:'Activado por {by} desde el servidor Brew · termina en {min} min',maint_sub_noby:'Activado desde el servidor Brew · termina en {min} min',maint_live_title:'Actualización en vivo: ¡RF activa!',maint_live_sub:'La estación compila una nueva versión y sigue en el aire; el servicio se reinicia al terminar. No cambie la configuración ahora.',
     fleet_desc:'Gestión de la estación por la SwMI (BrewServer)',fleet_key:'Fleet Control',fleet_on:'activado',fleet_off:'desactivado',fleet_not_connected:'canal de control sin conexión',
     fleet_cmd_title:'Fleet Control: canal de control',fleet_cmd_help:'Fleet Control funciona por el canal de control al servidor Brew, que aún no está configurado. Introduce el servidor; el usuario es tu login de Brew, una contraseña vacía usa la contraseña de Brew. Al guardar se reinicia el servicio.',
     fleet_cmd_server:'Servidor (dirección IP o nombre DNS)',fleet_cmd_pass_ph:'vacía = contraseña de Brew',fleet_cmd_save:'Guardar y reiniciar',fleet_need_host:'Introduce el servidor.',
@@ -19238,6 +19262,22 @@ async function refreshFleetControl(){
   if(document.hidden)return;
   try{const r=await fetch('/api/fleet-control',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;fleetState=await r.json();}catch{return;}
   renderFleetBadge();
+  renderMaintBanner();
+}
+function renderMaintBanner(){
+  const b=document.getElementById('maint-banner');if(!b)return;
+  const f=fleetState||{};const live=f.live_update,m=f.maintenance;
+  if(!live&&!m){b.style.display='none';return;}
+  const title=document.getElementById('maint-title'),sub=document.getElementById('maint-sub');
+  if(live){
+    title.textContent=t('maint_live_title');
+    sub.textContent=t('maint_live_sub')+(live.percent!=null?' · '+live.percent+' %':'');
+  }else{
+    title.textContent=t('maint_title');
+    const min=Math.max(1,Math.ceil((m.left_secs||0)/60));
+    sub.textContent=(m.by?t('maint_sub',{by:m.by,min:min}):t('maint_sub_noby',{min:min}))+(m.reason?' · '+m.reason:'');
+  }
+  b.style.display='flex';
 }
 function renderFleetBadge(){
   // Sidebar under Health: only when the server supports Fleet Control; green on, red off.
@@ -19248,7 +19288,7 @@ function renderFleetBadge(){
   b.style.display='flex';
   b.title='Fleet Control: '+t(f.enabled?'fleet_on':'fleet_off')+(f.connected?'':'\n'+t('fleet_not_connected'));
 }
-setInterval(refreshFleetControl,10000);
+setInterval(refreshFleetControl,5000);
 setTimeout(refreshFleetControl,1500);
 function roamRenderCells(){
   const tb=document.getElementById('roam-cells-tbody');if(!tb)return;

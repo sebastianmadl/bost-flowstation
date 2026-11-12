@@ -14,6 +14,14 @@
 //! the dashboard's OTA from the station's own source (`net_dashboard::ota_remote`), answered with
 //! [`ControlResponse::UpdateInfo`] / [`ControlResponse::CommandResult`]; every OTA run reports
 //! [`ControlResponse::UpdateProgress`].
+//!
+//! Maintenance (`maintenance-v1`): [`ControlCommand::SetMaintenance`] switches a flag with an
+//! expiry; while it is on, the dashboard shows a red banner on every page. A live update shows
+//! its own banner without a flag. Restart (`restart-v1`): [`ControlCommand::RestartStation`]
+//! restarts the service or reboots the host.
+
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tetra_config::bluestation::SharedConfig;
 
@@ -30,12 +38,20 @@ pub const CAP_FLEET: &str = "fleet-v1";
 /// Capability of phase 2: `CheckUpdate`, `StartUpdate`, `UpdateInfo`, `UpdateProgress`. Listed only
 /// while the station can run an OTA (its dashboard is running).
 pub const CAP_UPDATE: &str = "update-v1";
+/// Live update: `StartUpdate` with `source`, the station runs its installer with that repository
+/// and branch and keeps the radio on until the service restart. Listed with `update-v1`.
+pub const CAP_UPDATE_LIVE: &str = "update-live-v1";
+/// Maintenance flag (`SetMaintenance`, banner on the dashboard).
+pub const CAP_MAINTENANCE: &str = "maintenance-v1";
+/// Restart of the service or reboot of the host (`RestartStation`).
+pub const CAP_RESTART: &str = "restart-v1";
 
 /// Capability names the station lists in its hello while the switch is on.
 pub fn capabilities(ota_available: bool) -> Vec<String> {
-    let mut caps = vec![CAP_FLEET.to_string()];
+    let mut caps = vec![CAP_FLEET.to_string(), CAP_MAINTENANCE.to_string(), CAP_RESTART.to_string()];
     if ota_available {
         caps.push(CAP_UPDATE.to_string());
+        caps.push(CAP_UPDATE_LIVE.to_string());
     }
     caps
 }
@@ -52,6 +68,8 @@ pub mod code {
     pub const CALL_ACTIVE: &str = "call_active";
     /// Refused: this station cannot do it (no dashboard, so no OTA).
     pub const UNAVAILABLE: &str = "unavailable";
+    /// Refused: the live update source is not a plain https repository and branch name.
+    pub const INVALID_SOURCE: &str = "invalid_source";
 }
 
 /// Does this server offer Fleet Control (its `X-Brew-Extensions`)?
@@ -83,7 +101,83 @@ pub fn answer(command: &ControlCommand, enabled: bool) -> Option<ControlResponse
         } else {
             off(*handle)
         }),
+        ControlCommand::SetMaintenance { handle, on, minutes, by, reason } => Some(if enabled {
+            let mut slot = MAINTENANCE.lock().unwrap_or_else(|e| e.into_inner());
+            let text = apply_maintenance(&mut slot, *on, *minutes, by, reason, Instant::now());
+            tracing::info!("Fleet Control: {text}");
+            result(*handle, true, code::OK, &text)
+        } else {
+            off(*handle)
+        }),
         _ => None,
+    }
+}
+
+/// Longest maintenance time per `SetMaintenance`.
+pub const MAX_MAINTENANCE_MIN: u32 = 240;
+/// Maintenance time when `minutes` is 0.
+pub const DEFAULT_MAINTENANCE_MIN: u32 = 10;
+
+/// The maintenance flag set by the server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Maintenance {
+    pub by: String,
+    pub reason: String,
+    pub until: Instant,
+}
+
+static MAINTENANCE: Mutex<Option<Maintenance>> = Mutex::new(None);
+
+/// Switch the flag in `slot`; returns the text for the answer.
+pub fn apply_maintenance(slot: &mut Option<Maintenance>, on: bool, minutes: u32, by: &str, reason: &str, now: Instant) -> String {
+    if !on {
+        *slot = None;
+        return "Maintenance off".into();
+    }
+    let minutes = if minutes == 0 { DEFAULT_MAINTENANCE_MIN } else { minutes.min(MAX_MAINTENANCE_MIN) };
+    let clip = |s: &str| s.trim().chars().take(120).collect::<String>();
+    *slot = Some(Maintenance { by: clip(by), reason: clip(reason), until: now + Duration::from_secs(minutes as u64 * 60) });
+    format!("Maintenance on for {minutes} min")
+}
+
+/// The flag in `slot` if it has not run out (a run-out flag is cleared).
+pub fn current_maintenance(slot: &mut Option<Maintenance>, now: Instant) -> Option<Maintenance> {
+    if slot.as_ref().is_some_and(|m| m.until <= now) {
+        *slot = None;
+    }
+    slot.clone()
+}
+
+/// The station's maintenance flag now (`None`: off or run out).
+pub fn maintenance() -> Option<Maintenance> {
+    current_maintenance(&mut MAINTENANCE.lock().unwrap_or_else(|e| e.into_inner()), Instant::now())
+}
+
+/// Handle `RestartStation` (`None` for every other command). `calls`: calls in progress;
+/// `updating`: an OTA runs; `restart(host)` schedules it (the real one: [`schedule_restart`]).
+pub fn restart_command(command: &ControlCommand, enabled: bool, calls: usize, updating: bool, restart: impl FnOnce(bool)) -> Option<ControlResponse> {
+    let ControlCommand::RestartStation { handle, host, during_call } = command else { return None };
+    let handle = *handle;
+    if !enabled {
+        return Some(off(handle));
+    }
+    if updating {
+        return Some(result(handle, false, code::BUSY, "An update is running"));
+    }
+    if calls > 0 && !during_call {
+        return Some(result(handle, false, code::CALL_ACTIVE, "A call is in progress"));
+    }
+    restart(*host);
+    Some(result(handle, true, code::OK, if *host { "Host reboot in 5 s" } else { "Service restart in 5 s" }))
+}
+
+/// Restart the service or reboot the host in 5 s (time for the answer to leave).
+pub fn schedule_restart(host: bool) {
+    tracing::warn!("Fleet Control: {} requested by the Brew server", if host { "host reboot" } else { "service restart" });
+    if host {
+        crate::service_control::schedule_host_reboot(Duration::from_secs(5));
+    } else {
+        crate::service_control::schedule_service_action(crate::service_control::ServiceAction::Restart, Duration::from_secs(5));
     }
 }
 
@@ -103,7 +197,7 @@ pub fn update_command(
     command: &ControlCommand,
     enabled: bool,
     ota_available: bool,
-    start: impl FnOnce(bool) -> Result<(), crate::net_dashboard::ota_remote::StartRefused>,
+    start: impl FnOnce(bool, Option<&crate::net_control::commands::UpdateSource>) -> Result<(), crate::net_dashboard::ota_remote::StartRefused>,
 ) -> Option<UpdateAction> {
     use crate::net_dashboard::ota_remote::StartRefused;
     let handle = match command {
@@ -118,8 +212,9 @@ pub fn update_command(
     }
     Some(match command {
         ControlCommand::CheckUpdate { .. } => UpdateAction::Check { handle },
-        ControlCommand::StartUpdate { during_call, .. } => UpdateAction::Reply(match start(*during_call) {
-            Ok(()) => result(handle, true, code::OK, "Update started"),
+        ControlCommand::StartUpdate { during_call, source, .. } => UpdateAction::Reply(match start(*during_call, source.as_ref()) {
+            Ok(()) => result(handle, true, code::OK, if source.is_some() { "Live update started" } else { "Update started" }),
+            Err(StartRefused::InvalidSource) => result(handle, false, code::INVALID_SOURCE, "Live update: only a plain https:// repository and branch name"),
             Err(StartRefused::Busy) => result(handle, false, code::BUSY, "An update is already running"),
             Err(StartRefused::CallActive) => result(handle, false, code::CALL_ACTIVE, "A call is in progress"),
             Err(StartRefused::Unavailable) => result(handle, false, code::UNAVAILABLE, "No OTA on this station"),
@@ -176,6 +271,7 @@ fn result(handle: u32, ok: bool, code: &str, message: &str) -> ControlResponse {
 mod tests {
     use super::*;
     use crate::net_control::codec::ControlCodecJson;
+    use crate::net_control::commands::UpdateSource;
 
     #[test]
     fn ping_is_answered_only_while_the_switch_is_on() {
@@ -203,10 +299,10 @@ mod tests {
 
     #[test]
     fn update_commands_need_the_switch_and_an_ota() {
-        let never = |_| -> Result<(), StartRefused> { panic!("must not start") };
-        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 1, during_call: false }, false, true, never)), (false, "fleet_control_off".into()));
+        let never = |_, _: Option<&UpdateSource>| -> Result<(), StartRefused> { panic!("must not start") };
+        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 1, during_call: false, source: None }, false, true, never)), (false, "fleet_control_off".into()));
         assert_eq!(code_of(update_command(&ControlCommand::CheckUpdate { handle: 2 }, false, true, never)), (false, "fleet_control_off".into()));
-        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false }, true, false, never)), (false, "unavailable".into()));
+        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false, source: None }, true, false, never)), (false, "unavailable".into()));
         assert!(matches!(update_command(&ControlCommand::CheckUpdate { handle: 4 }, true, true, never), Some(UpdateAction::Check { handle: 4 })));
         assert!(update_command(&ControlCommand::FleetPing { handle: 5 }, true, true, never).is_none());
     }
@@ -214,22 +310,81 @@ mod tests {
     #[test]
     fn start_update_outcomes() {
         let mut seen = None;
-        let ok = update_command(&ControlCommand::StartUpdate { handle: 1, during_call: true }, true, true, |d| {
-            seen = Some(d);
+        let ok = update_command(&ControlCommand::StartUpdate { handle: 1, during_call: true, source: None }, true, true, |d, s| {
+            seen = Some((d, s.cloned()));
             Ok(())
         });
         assert_eq!(code_of(ok), (true, "ok".into()));
-        assert_eq!(seen, Some(true), "during_call is passed on");
-        let busy = update_command(&ControlCommand::StartUpdate { handle: 2, during_call: false }, true, true, |_| Err(StartRefused::Busy));
+        assert_eq!(seen, Some((true, None)), "during_call is passed on");
+        let busy = update_command(&ControlCommand::StartUpdate { handle: 2, during_call: false, source: None }, true, true, |_, _| Err(StartRefused::Busy));
         assert_eq!(code_of(busy), (false, "busy".into()));
-        let call = update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false }, true, true, |_| Err(StartRefused::CallActive));
+        let call = update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false, source: None }, true, true, |_, _| Err(StartRefused::CallActive));
         assert_eq!(code_of(call), (false, "call_active".into()));
+        let src = UpdateSource { repo: "https://github.com/sebastianmadl/bost-flowstation".into(), branch: "fleet-control".into() };
+        let mut got = None;
+        let live = update_command(&ControlCommand::StartUpdate { handle: 4, during_call: false, source: Some(src.clone()) }, true, true, |_, s| {
+            got = s.cloned();
+            Ok(())
+        });
+        assert_eq!(code_of(live), (true, "ok".into()));
+        assert_eq!(got, Some(src.clone()), "the live source is passed on");
+        let bad = update_command(&ControlCommand::StartUpdate { handle: 5, during_call: false, source: Some(src) }, true, true, |_, _| Err(StartRefused::InvalidSource));
+        assert_eq!(code_of(bad), (false, "invalid_source".into()));
+    }
+
+    #[test]
+    fn maintenance_flag_runs_out_and_is_bounded() {
+        let t0 = Instant::now();
+        let mut slot = None;
+        assert_eq!(apply_maintenance(&mut slot, true, 0, " admin ", "new carrier", t0), "Maintenance on for 10 min");
+        let m = current_maintenance(&mut slot, t0 + Duration::from_secs(60)).unwrap();
+        assert_eq!((m.by.as_str(), m.reason.as_str()), ("admin", "new carrier"));
+        assert!(current_maintenance(&mut slot, t0 + Duration::from_secs(600)).is_none(), "runs out after 10 min");
+        assert!(slot.is_none(), "a run-out flag is cleared");
+        assert_eq!(apply_maintenance(&mut slot, true, 9999, "", "", t0), "Maintenance on for 240 min");
+        assert_eq!(apply_maintenance(&mut slot, false, 0, "", "", t0), "Maintenance off");
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn set_maintenance_needs_the_switch() {
+        let cmd = ControlCommand::SetMaintenance { handle: 3, on: true, minutes: 5, by: "admin".into(), reason: String::new() };
+        let off = answer(&cmd, false).unwrap();
+        assert!(matches!(off, ControlResponse::CommandResult { ok: false, ref code, .. } if code == code::FLEET_CONTROL_OFF));
+        assert!(maintenance().is_none(), "switch off: nothing set");
+        let on = answer(&cmd, true).unwrap();
+        assert!(matches!(on, ControlResponse::CommandResult { handle: 3, ok: true, .. }));
+        assert_eq!(maintenance().map(|m| m.by), Some("admin".to_string()));
+        answer(&ControlCommand::SetMaintenance { handle: 4, on: false, minutes: 0, by: String::new(), reason: String::new() }, true);
+        assert!(maintenance().is_none());
+        let codec = ControlCodecJson;
+        let c = codec.decode_command(br#"{"SetMaintenance":{"handle":5,"on":true}}"#).unwrap();
+        assert!(matches!(c, ControlCommand::SetMaintenance { handle: 5, on: true, minutes: 0, .. }));
+    }
+
+    #[test]
+    fn restart_outcomes() {
+        let never = |_| panic!("must not restart");
+        let cmd = |host, during_call| ControlCommand::RestartStation { handle: 1, host, during_call };
+        assert_eq!(code_of(restart_command(&cmd(true, false), false, 0, false, never).map(UpdateAction::Reply)), (false, "fleet_control_off".into()));
+        assert_eq!(code_of(restart_command(&cmd(true, false), true, 0, true, never).map(UpdateAction::Reply)), (false, "busy".into()));
+        assert_eq!(code_of(restart_command(&cmd(true, false), true, 2, false, never).map(UpdateAction::Reply)), (false, "call_active".into()));
+        let mut asked = None;
+        assert_eq!(code_of(restart_command(&cmd(true, true), true, 2, false, |h| asked = Some(h)).map(UpdateAction::Reply)), (true, "ok".into()));
+        assert_eq!(asked, Some(true), "reboot during a call when asked to");
+        let mut asked = None;
+        assert_eq!(code_of(restart_command(&cmd(false, false), true, 0, false, |h| asked = Some(h)).map(UpdateAction::Reply)), (true, "ok".into()));
+        assert_eq!(asked, Some(false), "service restart");
+        assert!(restart_command(&ControlCommand::FleetPing { handle: 1 }, true, 0, false, never).is_none());
+        let codec = ControlCodecJson;
+        let c = codec.decode_command(br#"{"RestartStation":{"handle":7,"host":true}}"#).unwrap();
+        assert!(matches!(c, ControlCommand::RestartStation { handle: 7, host: true, during_call: false }));
     }
 
     #[test]
     fn capabilities_list_update_only_with_an_ota() {
-        assert_eq!(capabilities(false), vec!["fleet-v1"]);
-        assert_eq!(capabilities(true), vec!["fleet-v1", "update-v1"]);
+        assert_eq!(capabilities(false), vec!["fleet-v1", "maintenance-v1", "restart-v1"]);
+        assert_eq!(capabilities(true), vec!["fleet-v1", "maintenance-v1", "restart-v1", "update-v1", "update-live-v1"]);
     }
 
     fn prog(running: bool, stage: OtaStage, percent: u8) -> Progress {
@@ -256,9 +411,16 @@ mod tests {
         let c = codec.decode_command(br#"{"CheckUpdate":{"handle":9}}"#).unwrap();
         assert!(matches!(c, ControlCommand::CheckUpdate { handle: 9 }));
         let s = codec.decode_command(br#"{"StartUpdate":{"handle":10}}"#).unwrap();
-        assert!(matches!(s, ControlCommand::StartUpdate { handle: 10, during_call: false }), "during_call defaults to false");
+        assert!(matches!(s, ControlCommand::StartUpdate { handle: 10, during_call: false, source: None }), "during_call defaults to false");
         let s = codec.decode_command(br#"{"StartUpdate":{"handle":11,"during_call":true}}"#).unwrap();
-        assert!(matches!(s, ControlCommand::StartUpdate { handle: 11, during_call: true }));
+        assert!(matches!(s, ControlCommand::StartUpdate { handle: 11, during_call: true, source: None }));
+        let s = codec.decode_command(br#"{"StartUpdate":{"handle":12,"source":{"repo":"https://github.com/sebastianmadl/bost-flowstation","branch":"fleet-control"}}}"#).unwrap();
+        match s {
+            ControlCommand::StartUpdate { handle: 12, during_call: false, source: Some(src) } => {
+                assert_eq!((src.repo.as_str(), src.branch.as_str()), ("https://github.com/sebastianmadl/bost-flowstation", "fleet-control"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         let info = update_info(
             9,
             CheckOutcome {

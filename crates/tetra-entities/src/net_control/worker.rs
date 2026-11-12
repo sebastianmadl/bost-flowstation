@@ -136,6 +136,13 @@ impl<T: NetworkTransport> ControlWorker<T> {
             self.send_response(&response);
             return;
         }
+        let updating = crate::net_dashboard::ota_remote::progress().is_some_and(|p| p.running);
+        if let Some(response) =
+            fleet::restart_command(&command, self.fleet_enabled(), crate::net_dashboard::ota_remote::active_calls(), updating, fleet::schedule_restart)
+        {
+            self.send_response(&response);
+            return;
+        }
         let ota = crate::net_dashboard::ota_remote::available();
         match fleet::update_command(&command, self.fleet_enabled(), ota, crate::net_dashboard::ota_remote::start) {
             Some(fleet::UpdateAction::Reply(response)) => {
@@ -461,7 +468,7 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string()]), (false, vec![])]);
     }
 
     #[test]

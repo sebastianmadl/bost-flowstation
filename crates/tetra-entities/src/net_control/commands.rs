@@ -121,7 +121,47 @@ pub enum ControlCommand {
         handle: u32,
         #[serde(default)]
         during_call: bool,
+        /// Live update (capability `update-live-v1`): install this repository and branch with the
+        /// installer, radio kept on until the service restart. `None`: the normal OTA from the
+        /// station's own source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<UpdateSource>,
     },
+
+    /// Fleet Control (`maintenance-v1`): switch the maintenance flag. While it is on, every page
+    /// of the dashboard shows a red banner "work on this base station in progress". `minutes`:
+    /// how long it stays on without being sent again (default 10, at most 240), so a closed
+    /// browser on the server never leaves it on. `by` / `reason` are shown in the banner.
+    /// Answered with a [`ControlResponse::CommandResult`].
+    SetMaintenance {
+        handle: u32,
+        on: bool,
+        #[serde(default)]
+        minutes: u32,
+        #[serde(default)]
+        by: String,
+        #[serde(default)]
+        reason: String,
+    },
+
+    /// Fleet Control (`restart-v1`): restart the service (`host` false) or reboot the host
+    /// (`host` true), 5 s after the answer. Answered with a [`ControlResponse::CommandResult`]:
+    /// `ok`, `busy` (an update is running), `call_active` (a call is in progress and
+    /// `during_call` is false), `fleet_control_off`.
+    RestartStation {
+        handle: u32,
+        #[serde(default)]
+        host: bool,
+        #[serde(default)]
+        during_call: bool,
+    },
+}
+
+/// Repository and branch of a live update (`StartUpdate.source`).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct UpdateSource {
+    pub repo: String,
+    pub branch: String,
 }
 
 impl ControlCommand {
@@ -143,7 +183,9 @@ impl ControlCommand {
             // Answered by the control worker before routing; never reaches CMCE.
             | Self::FleetPing { .. }
             | Self::CheckUpdate { .. }
-            | Self::StartUpdate { .. } => TetraEntity::Cmce,
+            | Self::StartUpdate { .. }
+            | Self::SetMaintenance { .. }
+            | Self::RestartStation { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }

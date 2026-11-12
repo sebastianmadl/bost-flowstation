@@ -82,7 +82,7 @@ it was installed from); the server never chooses a repository or branch.
 | Command (server → station) | Answer |
 | --- | --- |
 | `CheckUpdate {handle}` | `UpdateInfo {handle, ok, current, latest, update_available, channel, repo, branch, message}` when the check is done (fresh, no cache; it asks GitHub, so it can take some seconds) |
-| `StartUpdate {handle, during_call}` | `CommandResult` at once: `ok`, `busy` (an update is already running), `call_active` (a call is in progress and `during_call` is false), `unavailable` (no dashboard, so no OTA), `fleet_control_off` |
+| `StartUpdate {handle, during_call, source?}` | `CommandResult` at once: `ok`, `busy` (an update is already running), `call_active` (a call is in progress and `during_call` is false), `unavailable` (no dashboard, so no OTA), `invalid_source` (live update only), `fleet_control_off`. With `source`: live update, see below |
 
 `during_call` defaults to false. `repo` never carries credentials. `latest` has the form of the running version: the source's version number plus the commit of its tip (`v0.5.9-d081d936`), or `branch@commit` when the version number cannot be read.
 
@@ -114,11 +114,75 @@ The OTA state is one per process (`net_dashboard::ota_remote`): a run started
 by the server shows on the dashboard and the other way round, and only one
 run can be active.
 
+### Live update (`update-live-v1`)
+
+`StartUpdate` with a `source` asks for a **live update**:
+
+```json
+{"StartUpdate": {"handle": 12, "during_call": false, "source": {"repo": "https://github.com/sebastianmadl/bost-flowstation", "branch": "fleet-control"}}}
+```
+
+The station runs its installer, the same as
+`sudo BOST_REPO=<repo> BOST_BRANCH=<branch> bash contrib/install/install-bost.sh`
+in a terminal (`server.rs` `run_live_update`), and **keeps the radio on during
+the build**. Only the service restart at the end (5 s after the install) takes
+it off the air. Details:
+
+- `repo` must be a plain `https://` URL without credentials and `branch` a plain
+  branch name (letters, digits, `-._/`); anything else is refused with
+  `invalid_source`. Both go to the installer as environment variables, never
+  through a shell line. stdin is closed, so the installer never waits for input.
+- The service runs with real-time scheduling (`CPUSchedulingPolicy=fifo` in the
+  unit) and children inherit it. The installer is started as a normal task
+  (`SCHED_OTHER`, nice 10), like a terminal session, so the build does not take
+  CPU time from the radio.
+- The installer sets `[dashboard] ota_channel = "installed"` and the git origin
+  to `repo`, so the station's normal OTA follows this source afterwards.
+- No check is needed first, and coming back with the same version counts as
+  done (reinstalled).
+- Progress: the same `UpdateProgress` stages, taken from the installer's log
+  (`==> Building bluestation-bs` → `build`, `==> Installed` → `install`).
+  A failed run leaves the old version running and the radio on.
+- The station lists `update-live-v1` together with `update-v1`. A server must
+  send `source` only to stations that list it: an older station ignores the
+  field and would run a normal OTA (radio off) instead.
+
+## Maintenance banner (`maintenance-v1`)
+
+`SetMaintenance {handle, on, minutes, by, reason}` → `CommandResult` (`ok`,
+`fleet_control_off`). While the flag is on, **every page** of the dashboard
+shows a solid red banner under the top bar: "Maintenance: work on this base
+station in progress", with who set it, the minutes left and the note
+(`reason`). `minutes` (default 10, at most 240) is how long the flag stays on
+without being sent again, so a closed browser on the server never leaves it on;
+the server sends it again after the station reconnects (e.g. after a restart)
+while its own copy has time left. The flag lives in memory only
+(`net_control::fleet::maintenance`); it is shown only while Fleet Control is on.
+
+A **live update** shows its own red banner on every page, without a flag:
+"Live system update: RF on!" with the build percentage, until the service
+restarts.
+
+The dashboard reads both from `GET /api/fleet-control` (`maintenance`:
+`{by, reason, left_secs}` or null; `live_update`: `{stage, percent}` or null),
+every 5 s.
+
+## Restart (`restart-v1`)
+
+`RestartStation {handle, host, during_call}` → `CommandResult`: `ok` (the
+service restarts, `host` false, or the host reboots, `host` true, 5 s later),
+`busy` (an update is running), `call_active` (a call is in progress and
+`during_call` is false), `fleet_control_off`. The service runs as root
+(`User=root` in the unit the installer writes), so the reboot
+(`service_control::schedule_host_reboot`, `systemctl reboot`) needs no sudo or
+polkit rule and works right after a fresh install. The server knows the
+station is back from its next `StationHello`.
+
 ## HTTP API (dashboard)
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /api/fleet-control` | – | `{offered, enabled, connected, command: "on"/"off"/"missing", brew_login}` |
+| `GET /api/fleet-control` | – | `{offered, enabled, connected, command: "on"/"off"/"missing", brew_login, maintenance, live_update}` |
 | `POST /api/fleet-control` | `{"enabled": bool, "command": {host, port, use_tls, username, password}?}` | `{ok: true, enabled, restart}`, or `{ok: false, need_command: true}` when the dialog is needed |
 
 `fleet_control` with the same fields is also part of `GET /api/roaming`.

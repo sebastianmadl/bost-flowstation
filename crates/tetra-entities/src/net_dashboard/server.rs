@@ -249,6 +249,8 @@ pub(crate) struct UpdateState {
     pub(crate) units_expected: u32,
     /// When the run started (Fleet Control reports the elapsed time).
     pub(crate) started: Option<std::time::Instant>,
+    /// Live update (installer run): the stage follows the installer's log lines.
+    pub(crate) live: bool,
 }
 
 impl UpdateState {
@@ -260,10 +262,21 @@ impl UpdateState {
             compiled: 0,
             units_expected: 0,
             started: None,
+            live: false,
         }
     }
     fn append(&mut self, line: &str) {
-        if self.stage == crate::net_dashboard::ota_remote::OtaStage::Build && line.trim_start().starts_with("Compiling ") {
+        if self.live {
+            use crate::net_dashboard::ota_remote::OtaStage;
+            if line.starts_with("==> Building bluestation-bs") {
+                self.stage = OtaStage::Build;
+            } else if line.starts_with("==> Installed ") && self.stage == OtaStage::Build {
+                self.stage = OtaStage::Install;
+            }
+        }
+        // The installer's cargo writes to stderr, read on another thread than its own log lines,
+        // so in a live update every `Compiling` line counts, whatever the stage.
+        if (self.live || self.stage == crate::net_dashboard::ota_remote::OtaStage::Build) && line.trim_start().starts_with("Compiling ") {
             self.compiled += 1;
         }
         self.log.push_str(line);
@@ -276,6 +289,7 @@ impl UpdateState {
         self.compiled = 0;
         self.units_expected = 0;
         self.started = Some(std::time::Instant::now());
+        self.live = false;
     }
     fn finish(&mut self, success: bool) {
         self.phase = UpdatePhase::Done { success };
@@ -1986,6 +2000,101 @@ pub(crate) fn run_update(update: SharedUpdateState, config_path: String, source_
         std::time::Duration::from_secs(5),
     );
     rf_recovery.disarm();
+}
+
+/// Fleet Control live update (`update-live-v1`): run the installer with `repo` and `branch`, the
+/// same as `sudo BOST_REPO=… BOST_BRANCH=… bash contrib/install/install-bost.sh` in a terminal,
+/// with the radio kept on (no `request_ota_rf_off`). The installer fetches, builds as the service
+/// user, installs the binary and sets the OTA source to `repo`/`branch`; it does not restart a
+/// running service, so this schedules the restart afterwards. A failed run leaves the old binary
+/// running and the radio on.
+pub(crate) fn run_live_update(update: SharedUpdateState, source_dir_override: Option<String>, repo: String, branch: String) {
+    macro_rules! log {
+        ($update:expr, $($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            tracing::info!("UPDATE: {}", line);
+            $update.lock().unwrap().append(&line);
+        }};
+    }
+    update.lock().unwrap().live = true;
+    log!(update, "=== {} live update (RF on) ===", tetra_core::PRODUCT_NAME);
+    let src_dir = match resolve_source_dir(source_dir_override.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            log!(update, "ERROR: {}", e);
+            update.lock().unwrap().finish(false);
+            return;
+        }
+    };
+    // Same trust rule as the OTA: the installer runs as root from this tree.
+    if let Err(e) = source_tree_is_trusted(&src_dir) {
+        log!(update, "ERROR: {}", e);
+        update.lock().unwrap().finish(false);
+        return;
+    }
+    let script = src_dir.join("contrib/install/install-bost.sh");
+    if !script.is_file() {
+        log!(update, "ERROR: installer not found at {}", script.display());
+        update.lock().unwrap().finish(false);
+        return;
+    }
+    log!(update, "Source dir: {}", src_dir.display());
+    log!(update, "Repository {} branch {}; the radio stays on until the service restart", repo, branch);
+    if !run_installer(&update, &src_dir, &script, &repo, &branch) {
+        log!(update, "Live update failed: the running version stays, the radio stayed on.");
+        return;
+    }
+    let _ = std::process::Command::new("sync").status();
+    log!(update, "--- Installed. Restarting service in 5s… ---");
+    {
+        let mut u = update.lock().unwrap();
+        u.set_stage(crate::net_dashboard::ota_remote::OtaStage::Restart);
+        u.finish(true);
+    }
+    crate::service_control::schedule_service_action(
+        crate::service_control::ServiceAction::Restart,
+        std::time::Duration::from_secs(5),
+    );
+}
+
+/// Run the installer `script` for a live update and stream its output; true when it succeeded.
+fn run_installer(update: &SharedUpdateState, src_dir: &std::path::Path, script: &std::path::Path, repo: &str, branch: &str) -> bool {
+    update.lock().unwrap().units_expected = crate::net_dashboard::ota_remote::expected_units(src_dir);
+
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(script)
+        .env("BOST_REPO", repo)
+        .env("BOST_BRANCH", branch)
+        .env("BOST_SRC", src_dir)
+        .stdin(std::process::Stdio::null())
+        .current_dir(src_dir);
+    // The service runs with real-time scheduling (unit: CPUSchedulingPolicy=fifo) and children
+    // inherit it: a build at that priority would starve the radio. Run the installer as a normal
+    // task with lower priority (nice 10), like a terminal session.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only async-signal-safe libc calls between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let param = libc::sched_param { sched_priority: 0 };
+                libc::sched_setscheduler(0, libc::SCHED_OTHER, &param);
+                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+                Ok(())
+            });
+        }
+    }
+    let label = format!("$ BOST_REPO={repo} BOST_BRANCH={branch} bash {}", script.display());
+    if stream_cmd(update, label, cmd).is_none() {
+        return false;
+    }
+    crate::net_dashboard::ota_remote::remember_units(src_dir, update.lock().unwrap().compiled);
+    true
+}
+
+#[cfg(test)]
+pub(crate) fn run_installer_for_test(update: &SharedUpdateState, src_dir: &std::path::Path, script: &std::path::Path, repo: &str, branch: &str) -> bool {
+    run_installer(update, src_dir, script, repo, branch)
 }
 
 pub struct DashboardServer {

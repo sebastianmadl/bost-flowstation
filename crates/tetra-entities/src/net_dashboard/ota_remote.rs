@@ -9,6 +9,12 @@
 //!
 //! The station always updates from its own OTA source (`[dashboard] ota_channel`, by default the
 //! repository and branch it was installed from); the server only says "check" and "update".
+//!
+//! **Live update** (`update-live-v1`): `StartUpdate` with a `source` runs the installer
+//! (`contrib/install/install-bost.sh`) with that repository and branch, the same as the install
+//! command in a terminal, and keeps the radio on during the build; only the service restart at
+//! the end takes the station off the air. The installer sets the station's OTA source to that
+//! repository and branch.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -149,6 +155,22 @@ pub enum StartRefused {
     Busy,
     /// A call is in progress and the server did not ask to update during calls.
     CallActive,
+    /// Live update: not a plain `https://` repository or branch name.
+    InvalidSource,
+}
+
+/// Only plain `https://` repository URLs without credentials and plain branch names reach the
+/// installer (it gets them as environment variables, never through a shell line).
+pub fn valid_live_source(repo: &str, branch: &str) -> bool {
+    let ok_repo = repo.strip_prefix("https://").is_some_and(|rest| {
+        !rest.is_empty() && !rest.contains('@') && rest.chars().all(|c| c.is_ascii_alphanumeric() || "-._/:~".contains(c))
+    });
+    let ok_branch = !branch.is_empty()
+        && branch.len() <= 100
+        && !branch.starts_with('-')
+        && !branch.contains("..")
+        && branch.chars().all(|c| c.is_ascii_alphanumeric() || "-._/".contains(c));
+    ok_repo && ok_branch
 }
 
 /// Number of calls in progress on this station (dashboard view).
@@ -162,21 +184,38 @@ pub fn active_calls() -> usize {
 }
 
 /// Start the OTA like the dashboard's Update button. `during_call`: start even while a call is
-/// in progress (the radio goes off the air for the build).
-pub fn start(during_call: bool) -> Result<(), StartRefused> {
+/// in progress (the radio goes off the air for the build). `source`: live update from that
+/// repository and branch with the radio kept on.
+pub fn start(during_call: bool, source: Option<&crate::net_control::commands::UpdateSource>) -> Result<(), StartRefused> {
     let (config_path, source_dir) = {
         let reg = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         let Some(r) = reg.as_ref() else { return Err(StartRefused::Unavailable) };
         (r.config_path.clone(), r.source_dir_override.clone())
     };
+    if let Some(s) = source {
+        if !valid_live_source(s.repo.trim(), s.branch.trim()) {
+            return Err(StartRefused::InvalidSource);
+        }
+    }
     let update = shared_update_state();
     try_begin(&update, during_call, active_calls())?;
-    tracing::info!("Fleet Control: OTA update started by the Brew server");
     let u = Arc::clone(&update);
-    if std::thread::Builder::new()
-        .name("ota-update".into())
-        .spawn(move || crate::net_dashboard::server::run_update(u, config_path, source_dir))
-        .is_err()
+    let spawned = match source {
+        Some(s) => {
+            let (repo, branch) = (s.repo.trim().to_string(), s.branch.trim().to_string());
+            tracing::info!("Fleet Control: live update from {repo} ({branch}) started by the Brew server");
+            std::thread::Builder::new()
+                .name("ota-live-update".into())
+                .spawn(move || crate::net_dashboard::server::run_live_update(u, source_dir, repo, branch))
+        }
+        None => {
+            tracing::info!("Fleet Control: OTA update started by the Brew server");
+            std::thread::Builder::new()
+                .name("ota-update".into())
+                .spawn(move || crate::net_dashboard::server::run_update(u, config_path, source_dir))
+        }
+    };
+    if spawned.is_err()
     {
         let mut st = update.lock().unwrap_or_else(|e| e.into_inner());
         st.phase = UpdatePhase::Done { success: false };
@@ -209,6 +248,16 @@ pub struct Progress {
     /// Last log line (shortened).
     pub message: String,
     pub elapsed_secs: u64,
+}
+
+/// A live update (radio on) running now: its progress (the dashboard shows a banner).
+pub fn live_running() -> Option<Progress> {
+    let st = shared_update_state();
+    let st = st.lock().unwrap_or_else(|e| e.into_inner());
+    if !st.live {
+        return None;
+    }
+    progress_of(&st).filter(|p| p.running)
 }
 
 /// `None` until an update ran in this process.
@@ -320,6 +369,75 @@ mod tests {
         assert_eq!(try_begin(&u, true, 0), Err(StartRefused::Busy));
         u.lock().unwrap().finish_for_test(true);
         assert_eq!(try_begin(&u, false, 0), Ok(()));
+    }
+
+    #[test]
+    fn live_source_only_plain_https_and_branch_names() {
+        assert!(valid_live_source("https://github.com/sebastianmadl/bost-flowstation", "fleet-control"));
+        assert!(valid_live_source("https://github.com/Aitorrio/bost-flowstation.git", "main"));
+        assert!(valid_live_source("https://git.example.org:8443/x/y", "feature/a_b.1"));
+        assert!(!valid_live_source("git@github.com:a/b.git", "main"), "ssh needs keys");
+        assert!(!valid_live_source("https://user:pw@github.com/a/b", "main"), "no credentials");
+        assert!(!valid_live_source("https://github.com/a/b;reboot", "main"));
+        assert!(!valid_live_source("https://github.com/a/b $(id)", "main"));
+        assert!(!valid_live_source("https://github.com/a/b", "-x"));
+        assert!(!valid_live_source("https://github.com/a/b", "a..b"));
+        assert!(!valid_live_source("https://github.com/a/b", "a b"));
+        assert!(!valid_live_source("https://github.com/a/b", ""));
+        assert!(!valid_live_source("http://github.com/a/b", "main"));
+    }
+
+    #[test]
+    fn live_stage_follows_the_installer_log() {
+        let mut st = UpdateState::new();
+        st.start();
+        st.live = true;
+        st.append_for_test("==> Updating /opt/bost-flowstation → origin/fleet-control");
+        assert_eq!(st.stage, OtaStage::Download);
+        st.append_for_test("==> Building bluestation-bs (release, --features asterisk) — this can take a while on a Pi");
+        assert_eq!(st.stage, OtaStage::Build);
+        st.append_for_test("   Compiling tetra-core v0.1.0");
+        assert_eq!(st.compiled, 1);
+        st.append_for_test("==> Installed /usr/local/bin/bluestation-bs");
+        assert_eq!(st.stage, OtaStage::Install);
+        let mut normal = UpdateState::new();
+        normal.start();
+        normal.append_for_test("==> Building bluestation-bs (release)");
+        assert_eq!(normal.stage, OtaStage::Download, "the normal OTA sets its stages itself");
+    }
+
+    #[test]
+    fn installer_gets_the_source_runs_as_a_normal_task_and_reports_stages() {
+        let dir = std::env::temp_dir().join(format!("ota-live-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("Cargo.lock"), "[[package]]\n[[package]]\n").unwrap();
+        let script = dir.join("install.sh");
+        std::fs::write(
+            &script,
+            "echo \"==> Updating $BOST_SRC → origin/$BOST_BRANCH\"\necho \"repo=$BOST_REPO\"\n\
+             echo \"nice=$(awk '{print $19}' /proc/$$/stat) $(chrt -p $$ 2>/dev/null | head -1)\"\n\
+             read -t 1 x && echo \"stdin=$x\"\n\
+             echo '==> Building bluestation-bs (release)'\nsleep 0.3\necho '   Compiling a v1' >&2\necho '   Compiling b v1' >&2\necho '==> Installed /usr/local/bin/bluestation-bs'\n",
+        )
+        .unwrap();
+        let u: SharedUpdateState = Arc::new(Mutex::new(UpdateState::new()));
+        u.lock().unwrap().start();
+        u.lock().unwrap().live = true;
+        assert!(crate::net_dashboard::server::run_installer_for_test(&u, &dir, &script, "https://github.com/sebastianmadl/bost-flowstation", "fleet-control"));
+        let st = u.lock().unwrap();
+        assert!(st.log.contains("origin/fleet-control") && st.log.contains("repo=https://github.com/sebastianmadl/bost-flowstation"), "{}", st.log);
+        assert!(st.log.contains("nice=10"), "lower priority: {}", st.log);
+        // Started from a real-time process (the service), the installer must not inherit it.
+        assert!(!st.log.contains("SCHED_FIFO") && !st.log.contains("SCHED_RR"), "normal scheduling: {}", st.log);
+        assert!(!st.log.contains("stdin="), "no terminal: the installer never waits for input");
+        assert_eq!((st.stage, st.compiled, st.units_expected), (OtaStage::Install, 2, 2), "{}", st.log);
+        drop(st);
+        assert_eq!(expected_units(&dir), 2, "the unit count is kept for the next run");
+        std::fs::write(&script, "echo boom; exit 3\n").unwrap();
+        u.lock().unwrap().start();
+        assert!(!crate::net_dashboard::server::run_installer_for_test(&u, &dir, &script, "https://x/y", "main"));
+        assert_eq!(u.lock().unwrap().stage, OtaStage::Failed);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -44,7 +44,18 @@ pub fn status_json(table: &Table, cfg: &StackConfig, shared: Option<&SharedConfi
         "connected": fc.connected,
         "command": command_state(table),
         "brew_login": cfg.brew.as_ref().and_then(|b| b.username.clone()),
+        "maintenance": banner_maintenance(fc.enabled && shared.is_some(), crate::net_control::fleet::maintenance(), std::time::Instant::now()),
+        "live_update": crate::net_dashboard::ota_remote::live_running().map(|p| json!({"stage": p.stage.as_str(), "percent": p.percent})),
     })
+}
+
+/// `maintenance` for the dashboard banner: `{by, reason, left_secs}` while the server's flag is
+/// on (and Fleet Control is on), else null.
+pub fn banner_maintenance(enabled: bool, m: Option<crate::net_control::fleet::Maintenance>, now: std::time::Instant) -> JsonValue {
+    match m {
+        Some(m) if enabled => json!({"by": m.by, "reason": m.reason, "left_secs": m.until.saturating_duration_since(now).as_secs()}),
+        _ => JsonValue::Null,
+    }
 }
 
 /// GET /api/fleet-control payload.
@@ -188,5 +199,14 @@ mod tests {
         assert!(shared.state_read().fleet_control.enabled, "the running switch starts from the config");
         shared.state_write().fleet_control.offered = true;
         assert_eq!(status_json(&table, &shared.config(), Some(&shared))["offered"], true);
+    }
+
+    #[test]
+    fn banner_shows_maintenance_only_while_fleet_control_is_on() {
+        let now = std::time::Instant::now();
+        let m = crate::net_control::fleet::Maintenance { by: "admin".into(), reason: "carrier".into(), until: now + std::time::Duration::from_secs(90) };
+        assert_eq!(banner_maintenance(true, Some(m.clone()), now), json!({"by": "admin", "reason": "carrier", "left_secs": 90}));
+        assert_eq!(banner_maintenance(false, Some(m), now), JsonValue::Null, "switch off: no banner");
+        assert_eq!(banner_maintenance(true, None, now), JsonValue::Null);
     }
 }
