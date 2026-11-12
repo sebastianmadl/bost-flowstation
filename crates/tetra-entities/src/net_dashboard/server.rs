@@ -4288,6 +4288,16 @@ fn handle_connection(
     } else if req_line.contains("POST /api/roaming") {
         let (inner, body_str) = read_post_body(stream);
         serve_roaming_save(inner, &config_path, &body_str);
+    } else if req_line.contains("GET /api/fleet-control") {
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        match crate::net_dashboard::fleet::status_from_file(&config_path, shared_config.as_ref()) {
+            Ok(v) => http_json_response(s, 200, &v.to_string()),
+            Err(e) => http_response(s, 500, &e),
+        }
+    } else if req_line.contains("POST /api/fleet-control") {
+        let (inner, body_str) = read_post_body(stream);
+        serve_fleet_control(inner, &config_path, shared_config.as_ref(), &body_str);
     } else if req_line.contains("GET /api/rf/calibration") {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -5905,6 +5915,41 @@ fn apply_cells_config(stream: PrefixedConn, config_path: &str, text: &str, what:
         std::time::Duration::from_secs(2),
     );
     http_response(stream, 200, &format!("{what}; the base station is restarting to apply it."));
+}
+
+/// POST /api/fleet-control — the Fleet Control switch (see `fleet::apply`). Applied to the running
+/// station at once; only a newly configured control channel needs a restart.
+fn serve_fleet_control(stream: PrefixedConn, config_path: &str, shared: Option<&tetra_config::bluestation::SharedConfig>, body: &str) {
+    use crate::net_dashboard::fleet::{FleetChange, apply};
+    let req: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
+    };
+    let original = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
+    };
+    let brew_password = shared.and_then(|s| s.config().brew.as_ref().and_then(|b| b.password.as_ref().map(|p| p.val.clone())));
+    match apply(&original, &req, brew_password.as_deref()) {
+        Ok(FleetChange::NeedCommand) => http_json_response(stream, 200, r#"{"ok":false,"need_command":true}"#),
+        Ok(FleetChange::Write { text, enabled, restart }) => {
+            if let Err(e) = atomic_write(config_path, &text) {
+                return http_response(stream, 500, &format!("failed to write config: {e}"));
+            }
+            tracing::info!("Dashboard: Fleet Control switched {}", if enabled { "on" } else { "off" });
+            if restart {
+                tracing::info!("Dashboard: control channel configured for Fleet Control; scheduling restart");
+                crate::service_control::schedule_service_action(
+                    crate::service_control::ServiceAction::Restart,
+                    std::time::Duration::from_secs(2),
+                );
+            } else if let Some(s) = shared {
+                s.state_write().fleet_control.enabled = enabled;
+            }
+            http_json_response(stream, 200, &serde_json::json!({"ok": true, "enabled": enabled, "restart": restart}).to_string());
+        }
+        Err(e) => http_response(stream, 400, &e),
+    }
 }
 
 /// POST /api/roaming — see `roaming::apply_roaming`; writes the config and restarts.

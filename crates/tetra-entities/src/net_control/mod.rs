@@ -8,6 +8,7 @@
 pub mod channel;
 pub mod codec;
 pub mod commands;
+pub mod fleet;
 pub mod worker;
 
 use std::time::Duration;

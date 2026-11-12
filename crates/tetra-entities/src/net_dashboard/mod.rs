@@ -6,6 +6,7 @@ pub mod dapnet;
 pub mod dashboard_auth;
 pub mod dashboard_ports;
 pub mod dual_carrier;
+pub mod fleet;
 pub mod geoalarm;
 pub mod html;
 pub mod ota_channel;

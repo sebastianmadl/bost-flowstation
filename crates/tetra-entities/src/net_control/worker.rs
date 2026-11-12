@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use tetra_config::bluestation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
 
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
         channel::CommandDispatcher,
         codec::ControlCodecJson,
         commands::{ControlCommand, ControlResponse},
+        fleet,
     },
     network::transports::NetworkTransport,
 };
@@ -31,6 +33,12 @@ pub struct ControlWorker<T: NetworkTransport> {
     transport: T,
     connected: bool,
     last_connect_attempt: Option<Instant>,
+    /// Station config and state for Fleet Control (`None` in plain tests: no hello is sent).
+    shared: Option<SharedConfig>,
+    /// The server offered `fleet-control` on this connection.
+    fleet_offered: bool,
+    /// The switch value the last hello on this connection announced (`None`: none sent yet).
+    hello_announced: Option<bool>,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
@@ -40,7 +48,16 @@ impl<T: NetworkTransport> ControlWorker<T> {
             transport,
             connected: false,
             last_connect_attempt: None,
+            shared: None,
+            fleet_offered: false,
+            hello_announced: None,
         }
+    }
+
+    /// Give the worker the station's config and state, for Fleet Control (hello, switch).
+    pub fn with_shared(mut self, shared: SharedConfig) -> Self {
+        self.shared = Some(shared);
+        self
     }
 
     pub fn run(&mut self) {
@@ -51,6 +68,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
             if self.connected {
                 self.poll_commands();
                 self.collect_responses();
+                self.announce_switch_change();
             } else {
                 // Not connected — sleep briefly to avoid busy-spinning
                 std::thread::sleep(POLL_TIMEOUT);
@@ -60,6 +78,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
             if !self.transport.is_connected() && self.connected {
                 tracing::warn!("Control transport disconnected");
                 self.connected = false;
+                self.set_fleet_link(false);
             }
 
             // Periodically retry connection when disconnected
@@ -96,7 +115,13 @@ impl<T: NetworkTransport> ControlWorker<T> {
 
     /// Route a command to the correct entity's dispatcher.
     /// Override this mapping as real command variants are added.
-    fn dispatch_command(&self, command: ControlCommand) {
+    fn dispatch_command(&mut self, command: ControlCommand) {
+        // Fleet Control commands are answered here, with the local switch; everything else goes to
+        // the stack as before (independent of the switch).
+        if let Some(response) = fleet::answer(&command, self.fleet_enabled()) {
+            self.send_response(&response);
+            return;
+        }
         let target = Self::route_control_command(&command);
         match self.dispatchers.get(&target) {
             Some(dispatcher) => {
@@ -137,8 +162,48 @@ impl<T: NetworkTransport> ControlWorker<T> {
         if let Err(e) = self.transport.send_reliable(&payload) {
             tracing::warn!("Control transport send failed: {}, will reconnect", e);
             self.connected = false;
+            self.set_fleet_link(false);
             self.try_connect();
         }
+    }
+
+    /// The local Fleet Control switch (off without station state).
+    fn fleet_enabled(&self) -> bool {
+        self.shared.as_ref().is_some_and(|s| s.state_read().fleet_control.enabled)
+    }
+
+    /// Record the control link for the dashboard (sidebar field, Server features list).
+    fn set_fleet_link(&mut self, connected: bool) {
+        if !connected {
+            self.hello_announced = None;
+        }
+        if let Some(shared) = &self.shared {
+            let mut state = shared.state_write();
+            state.fleet_control.connected = connected;
+            if connected {
+                state.fleet_control.offered = self.fleet_offered;
+            }
+        }
+    }
+
+    /// Send a hello when the server offers Fleet Control and the switch differs from what the
+    /// last hello on this connection said (first hello after connecting, or the switch changed on
+    /// the dashboard).
+    fn announce_switch_change(&mut self) {
+        if !self.connected || !self.fleet_offered {
+            return;
+        }
+        let Some(shared) = self.shared.clone() else { return };
+        let enabled = shared.state_read().fleet_control.enabled;
+        if self.hello_announced == Some(enabled) {
+            return;
+        }
+        let hello = fleet::station_hello(&shared);
+        if self.hello_announced.is_some() {
+            tracing::info!("Fleet Control switched {} on this station, telling the server", if enabled { "on" } else { "off" });
+        }
+        self.hello_announced = Some(enabled);
+        self.send_response(&hello);
     }
 
     fn try_connect(&mut self) {
@@ -147,6 +212,14 @@ impl<T: NetworkTransport> ControlWorker<T> {
             Ok(()) => {
                 tracing::info!("Control transport connected");
                 self.connected = true;
+                self.fleet_offered = fleet::offered(self.transport.server_brew_extensions());
+                if self.fleet_offered {
+                    tracing::info!("Control server offers Fleet Control");
+                }
+                self.hello_announced = None;
+                // The hello goes out from the run loop (`announce_switch_change`), not from here:
+                // a failed send reconnects through this function.
+                self.set_fleet_link(true);
             }
             Err(e) => {
                 tracing::warn!("Control transport connection failed: {}, will retry in {:?}", e, RECONNECT_DELAY);
@@ -284,5 +357,94 @@ mod tests {
         });
 
         handle.join().expect("command worker panicked");
+    }
+
+    fn station(fleet_control: bool) -> SharedConfig {
+        let cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        let shared = SharedConfig::from_parts(cfg, None);
+        shared.state_write().fleet_control.enabled = fleet_control;
+        shared
+    }
+
+    fn sent(worker: &ControlWorker<MockTransport>) -> Vec<ControlResponse> {
+        worker.transport.sent_payloads().iter().map(|p| ControlCodecJson.decode_response(p).unwrap()).collect()
+    }
+
+    #[test]
+    fn no_hello_to_a_server_without_fleet_control() {
+        // Older servers never see the new messages: nothing is sent unless `fleet-control` is offered.
+        let shared = station(true);
+        let mut worker = ControlWorker::new(HashMap::new(), MockTransport::new().with_brew_extensions(&["bts-info"])).with_shared(shared.clone());
+        worker.try_connect();
+        worker.announce_switch_change();
+        assert!(worker.transport.sent_payloads().is_empty());
+        let fc = shared.state_read().fleet_control.clone();
+        assert!(fc.connected && !fc.offered && fc.enabled);
+    }
+
+    #[test]
+    fn hello_after_connect_and_on_every_switch_change() {
+        let shared = station(false);
+        let mut worker =
+            ControlWorker::new(HashMap::new(), MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL])).with_shared(shared.clone());
+        worker.try_connect();
+        assert!(shared.state_read().fleet_control.offered);
+        worker.announce_switch_change();
+        worker.announce_switch_change(); // unchanged: no second hello
+        shared.state_write().fleet_control.enabled = true;
+        worker.announce_switch_change();
+        shared.state_write().fleet_control.enabled = false;
+        worker.announce_switch_change();
+        let hellos: Vec<(bool, Vec<String>)> = sent(&worker)
+            .into_iter()
+            .map(|r| match r {
+                ControlResponse::StationHello { fleet_control, capabilities, protocol, version, .. } => {
+                    assert_eq!(protocol, fleet::FLEET_PROTOCOL);
+                    assert_eq!(version, tetra_core::STACK_VERSION);
+                    (fleet_control, capabilities)
+                }
+                other => panic!("expected a hello, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string()]), (false, vec![])]);
+    }
+
+    #[test]
+    fn fleet_ping_answered_by_the_worker_with_the_switch() {
+        let shared = station(false);
+        let (mm_dispatcher, mm_endpoint) = make_control_link();
+        let mut dispatchers = HashMap::new();
+        dispatchers.insert(TetraEntity::Cmce, mm_dispatcher);
+        let mut mock = MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL]);
+        mock.push_inbound(br#"{"FleetPing":{"handle":11}}"#.to_vec());
+        let mut worker = ControlWorker::new(dispatchers, mock).with_shared(shared.clone());
+        worker.try_connect();
+        worker.poll_commands();
+        shared.state_write().fleet_control.enabled = true;
+        worker.transport.push_inbound(br#"{"FleetPing":{"handle":12}}"#.to_vec());
+        worker.poll_commands();
+        assert!(mm_endpoint.try_recv().is_none(), "Fleet Control commands never reach the stack");
+        let results: Vec<(u32, bool, String)> = sent(&worker)
+            .into_iter()
+            .map(|r| match r {
+                ControlResponse::CommandResult { handle, ok, code, .. } => (handle, ok, code),
+                other => panic!("expected a result, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(results, vec![(11, false, "fleet_control_off".to_string()), (12, true, "ok".to_string())]);
+    }
+
+    #[test]
+    fn existing_commands_do_not_need_the_switch() {
+        let shared = station(false);
+        let (dispatcher, endpoint) = make_control_link();
+        let mut dispatchers = HashMap::new();
+        dispatchers.insert(TetraEntity::Cmce, dispatcher);
+        let mut mock = MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL]);
+        mock.push_inbound(ControlCodecJson.encode_command(&ControlCommand::KickMs { issi: 2001 }));
+        let mut worker = ControlWorker::new(dispatchers, mock).with_shared(shared);
+        worker.try_connect();
+        worker.poll_commands();
+        assert!(matches!(endpoint.try_recv(), Some(ControlCommand::KickMs { issi: 2001 })));
     }
 }

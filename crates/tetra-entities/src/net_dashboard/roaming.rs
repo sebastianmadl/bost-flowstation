@@ -10,8 +10,8 @@ use tetra_config::bluestation::{SharedConfig, parsing};
 use tetra_core::CellId;
 use toml::{Table, Value as TomlValue};
 
-/// Brew extensions shown as server features: the ones this station uses (FlowStation ↔ brew-server, opt-in), plus `issi-check` (a brew-server answers it for another server's Multi Network link) and `mni` (Multi Network visitors; this station does not use it yet).
-const HANDOVER_EXTENSIONS: &[&str] = &["bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "call-handoff", "cell-directory", "group-access", "issi-check", "mni"];
+/// Brew extensions shown as server features: `fleet-control` (Fleet Control, offered on the Brew link or the control channel, with its switch), the ones this station uses (FlowStation ↔ brew-server, opt-in), plus `issi-check` (a brew-server answers it for another server's Multi Network link) and `mni` (Multi Network visitors; this station does not use it yet).
+const HANDOVER_EXTENSIONS: &[&str] = &["fleet-control", "bts-info", "handover-v1", "ms-cell", "ms-moved", "ms-reselection", "call-restore", "call-handoff", "cell-directory", "group-access", "issi-check", "mni"];
 
 /// Integer neighbour keys with their maximum (field widths, TS 100 392-2 table 18.64).
 const NEIGHBOUR_INT_KEYS: &[(&str, i64)] = &[
@@ -313,7 +313,11 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
         ];
         SERVICE_DETAILS.iter().zip(flags).map(|(k, v)| (k.to_string(), json!(v))).collect()
     };
-    let offered: Vec<String> = shared.map(|s| s.state_read().brew_server_extensions.clone()).unwrap_or_default();
+    let mut offered: Vec<String> = shared.map(|s| s.state_read().brew_server_extensions.clone()).unwrap_or_default();
+    // Fleet Control is offered on the Brew link or on the control channel.
+    if shared.is_some_and(|s| s.state_read().fleet_control.offered) {
+        offered.push(crate::net_control::fleet::EXT_FLEET_CONTROL.to_string());
+    }
     let link_up = shared.is_some_and(|s| s.state_read().brew_link_up);
     let directory = shared.and_then(|s| s.state_read().brew_cell_directory.clone());
     let server_networks = shared.and_then(|s| s.state_read().multi_network.server.clone());
@@ -358,6 +362,7 @@ pub fn roaming_json(config_path: &str, shared: Option<&SharedConfig>) -> Result<
         "service_details": service_details,
         "telemetry": link_section_json(&table, "telemetry"),
         "command": link_section_json(&table, "command"),
+        "fleet_control": crate::net_dashboard::fleet::status_json(&table, &cfg, shared),
         "brew": {
             "configured": cfg.brew.is_some(),
             "login": brew_login,
@@ -396,7 +401,7 @@ fn link_section_json(table: &Table, key: &str) -> JsonValue {
 /// "latitude": x, "longitude": x` (both or neither). Keys the page does not edit (`ca_cert`) stay
 /// as they are; an empty password keeps the saved one, an empty username removes the login. Off
 /// with nothing filled in removes the section; off with values keeps them with `enabled = false`.
-fn apply_link_section(table: &mut Table, key: &str, v: &JsonValue) -> Result<(), String> {
+pub(crate) fn apply_link_section(table: &mut Table, key: &str, v: &JsonValue) -> Result<(), String> {
     let obj = v.as_object().ok_or_else(|| format!("{key} must be an object"))?;
     let enabled = match obj.get("enabled") {
         None | Some(JsonValue::Null) => true,

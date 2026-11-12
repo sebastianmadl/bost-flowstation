@@ -103,6 +103,10 @@ pub enum ControlCommand {
     /// Resend the current SC3 CCK, sealed with the registered radio's active DCK.
     /// Does not rotate keys or bypass authentication. Local operator action.
     OtarCck { issi: u32 },
+
+    /// Fleet Control (`fleet-v1`): round-trip check. The control worker answers it itself with a
+    /// [`ControlResponse::CommandResult`]: `ok` while Fleet Control is on, else `fleet_control_off`.
+    FleetPing { handle: u32 },
 }
 
 impl ControlCommand {
@@ -120,7 +124,9 @@ impl ControlCommand {
             | Self::ClearLiveSds
             | Self::ClearEmergency { .. }
             | Self::AmbienceListen { .. }
-            | Self::TestCmdB { .. } => TetraEntity::Cmce,
+            | Self::TestCmdB { .. }
+            // Answered by the control worker before routing; never reaches CMCE.
+            | Self::FleetPing { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -133,4 +139,33 @@ pub enum ControlResponse {
     SendSdsResponse { handle: u32, success: bool },
     KickMsResponse { issi: u32, success: bool },
     AmbienceListenResponse { issi: u32, success: bool },
+
+    /// Fleet Control: sent by the station right after the control channel connects (only when the
+    /// server offered `fleet-control` in `X-Brew-Extensions`) and again whenever the local switch
+    /// changes. See `Docs/fleet-control.md`.
+    StationHello {
+        /// Fleet Control protocol version ([`super::fleet::FLEET_PROTOCOL`]).
+        protocol: u32,
+        /// Software version (`STACK_VERSION`, e.g. `v0.5.9-8d7a363`).
+        version: String,
+        /// The station's Brew login (its number on the Brew server), when Brew is configured.
+        brew_login: Option<String>,
+        /// Network of the primary cell.
+        mcc: u16,
+        mnc: u16,
+        /// The local Fleet Control switch.
+        fleet_control: bool,
+        /// Fleet Control commands this station understands (empty while the switch is off).
+        capabilities: Vec<String>,
+    },
+
+    /// Fleet Control: the answer to every Fleet Control command, correlated by `handle`.
+    CommandResult {
+        handle: u32,
+        ok: bool,
+        /// Machine-readable outcome: `ok`, `fleet_control_off`, ... (see `fleet::code`).
+        code: String,
+        /// Short English text for the server's dashboard.
+        message: String,
+    },
 }

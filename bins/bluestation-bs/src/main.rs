@@ -174,7 +174,7 @@ fn start_control_worker(cfg: SharedConfig, command_dispatchers: HashMap<TetraEnt
 
     thread::spawn(move || {
         let transport = WebSocketTransport::new(ws_config);
-        let mut worker = ControlWorker::new(command_dispatchers, transport);
+        let mut worker = ControlWorker::new(command_dispatchers, transport).with_shared(cfg);
         worker.run();
     })
 }

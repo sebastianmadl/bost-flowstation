@@ -2,6 +2,10 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+## Unreleased — Fleet Control (phase 1)
+
+- **Fleet Control: station management by the Brew server (SwMI).** Infrastructure page, under the Brew line (always visible, above the Server features list): new switch **Fleet Control** ("Station management by SwMI (BrewServer)"), off by default and shown only when the server offers it (`fleet-control` in `X-Brew-Extensions`). It works at once, without a restart (`[command] fleet_control = true`). If the control channel (`[command]`) is not configured, a dialog asks for server (never pre-filled), port (443), TLS (on), user (the Brew login) and password (empty = the Brew password); saving restarts the service. In the sidebar under Health the field **Fleet Control** shows green on / red off. With a server that offers it, the station sends `StationHello` (version, Brew login, network, switch, capabilities) when it connects and on every change of the switch, and answers Fleet Control commands with `CommandResult`. Existing commands (kick, DGNA, SDS, restart) do not depend on the switch. Needs a brew-server with Fleet Control. See `Docs/fleet-control.md`.
+
 ## v0.5.9 — RX gain calibration and long scan lists
 
 - **Fix: scan lists with more than 12 groups (PR #55, dn9cho).** Radios scanning 13 or more groups made the station repeat `SwMI group report requested` endlessly, and groups beyond the 12th were never attached or affiliated at Brew. Radios that answer the report with their full list again (seen with Motorola MTP850 and MTM5400) now get the remaining groups attached by the station (`SwMI D-ATTACH remainder`, ETSI §16.8.1). Lists of up to 12 groups are not affected.

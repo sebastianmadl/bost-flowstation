@@ -4,6 +4,10 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## Sin publicar — Fleet Control (fase 1)
+
+- **Fleet Control: gestión de la estación por el servidor Brew (SwMI).** Página Infrastructure, bajo la línea Brew (siempre visible, encima de las Funciones del servidor): nuevo interruptor **Fleet Control** («Gestión de la estación por la SwMI (BrewServer)»), apagado por defecto y visible solo si el servidor lo ofrece (`fleet-control` en `X-Brew-Extensions`). Funciona al momento, sin reiniciar (`[command] fleet_control = true`). Si el canal de control (`[command]`) no está configurado, un diálogo pide servidor (nunca prerrellenado), puerto (443), TLS (activado), usuario (el login de Brew) y contraseña (vacía = la de Brew); al guardar se reinicia el servicio. En la barra lateral, bajo Health, el campo **Fleet Control** muestra verde activado / rojo desactivado. Con el servidor que lo ofrece, la estación envía `StationHello` (versión, login de Brew, red, interruptor, capacidades) al conectar y en cada cambio del interruptor, y responde a los comandos de Fleet Control con `CommandResult`. Los comandos existentes (kick, DGNA, SDS, reinicio) no dependen del interruptor. Requiere brew-server con Fleet Control. Ver `Docs/fleet-control.md`.
+
 ## v0.5.9 — Calibración de ganancia RX y listas de escaneo largas
 
 - **Corrección: listas de escaneo de más de 12 grupos (PR #55, dn9cho).** Con radios que escanean 13 grupos o más, la estación repetía `SwMI group report requested` sin fin y los grupos a partir del 13.º nunca se adjuntaban ni se afiliaban en Brew. Si la radio responde al informe de nuevo con toda la lista (visto con Motorola MTP850 y MTM5400), ahora la estación adjunta ella misma los grupos restantes (`SwMI D-ATTACH remainder`, ETSI §16.8.1). Las listas de hasta 12 grupos no se ven afectadas.

@@ -1418,6 +1418,11 @@ td code{
 .roam-feat i{width:7px;height:7px;border-radius:50%;flex:none;}
 .roam-feat i.on{background:var(--accent);}
 .roam-feat i.off{background:var(--danger);}
+.roam-fleet{display:flex;align-items:center;gap:12px;margin:10px 0 4px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;}
+.roam-fleet .rf-text{flex:1;min-width:0;line-height:1.35;}
+.roam-fleet .rf-sub{display:block;font-size:11.5px;color:var(--muted);}
+.hw-row--fleet{cursor:pointer;}
+.hw-row--fleet .hw-glyph{color:var(--accent2);background:color-mix(in srgb,var(--accent2) 12%,transparent);}
 .badge-red{background:rgba(255,77,109,0.1);color:var(--danger);border-color:rgba(255,77,109,0.3);}
 /* Emergency call (ETSI call priority 15): solid danger fill + pulsing halo for high visibility. */
 .badge-emergency{background:var(--danger);color:#fff;border-color:var(--danger);font-weight:700;letter-spacing:0.06em;animation:badge-emergency-pulse 1s ease-in-out infinite;}
@@ -4060,6 +4065,19 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <span class="hw-meta">
           <span class="hw-key"><span data-i18n="ui_health">HEALTH</span></span>
           <span class="hw-val" id="health-badge-label">—</span>
+        </span>
+      </div>
+      <div id="fleet-badge" class="hw-row hw-row--fleet" style="display:none" title="Fleet Control" onclick="showPage('roaming',document.getElementById('nav-roaming'))">
+        <span class="hw-glyph" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>
+          </svg>
+        </span>
+        <span class="hw-meta">
+          <span class="hw-key" data-i18n="fleet_key">FLEET CONTROL</span>
+          <span class="hw-val" id="fleet-badge-label">—</span>
         </span>
       </div>
       <div id="pwr-badge" class="hw-row hw-row--pwr" style="display:none" title="Host system power draw" data-i18n-title="ui_host_system_power_draw">
@@ -7120,6 +7138,25 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
 </div>
 
 <!-- ── SDS Modal ── -->
+<div class="modal-overlay" id="fleet-cmd-modal">
+  <div class="modal" style="width:min(460px,95vw)">
+    <div class="modal-title" data-i18n="fleet_cmd_title">Fleet Control: control channel</div>
+    <div class="help-text" style="margin-bottom:10px" data-i18n="fleet_cmd_help">Fleet Control runs over the control channel to the Brew server, which is not configured yet.</div>
+    <div class="group-list">
+      <label class="field"><span data-i18n="fleet_cmd_server">Server (IP address or DNS name)</span><input type="text" id="fc-host" class="form-input" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span data-i18n="roam_net_port">Port</span><input type="number" id="fc-port" class="form-input" min="1" max="65535" value="443"></label>
+      <label class="field" style="cursor:pointer;justify-content:space-between"><span data-i18n="roam_link_tls">TLS (wss://)</span><span class="sw"><input type="checkbox" id="fc-tls" checked><i></i></span></label>
+      <label class="field"><span data-i18n="roam_link_user">Username</span><input type="text" id="fc-user" class="form-input" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span data-i18n="roam_net_pass">Password</span><input type="password" id="fc-pass" class="form-input" autocomplete="new-password" placeholder="empty = Brew password" data-i18n-placeholder="fleet_cmd_pass_ph"></label>
+    </div>
+    <div class="help-text" id="fc-msg" style="margin-top:8px;color:var(--danger)"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="fleetCmdClose()" data-i18n="cancel">Cancel</button>
+      <button class="btn btn-primary" id="fc-save" onclick="fleetCmdSave()" data-i18n="fleet_cmd_save">Save and restart</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="sds-modal">
   <div class="modal">
     <div class="modal-title" data-i18n="sds_title">⬡ Send SDS Message</div>
@@ -8083,7 +8120,11 @@ const LANGS={
     roam_types_0:'no forward registration',roam_types_1:'no forward registration, expedited recommended',roam_types_2:'forward registration',roam_types_3:'forward registration, expedited recommended',
     roam_svc_registration:'registration',roam_svc_deregistration:'deregistration',roam_svc_system_wide_services:'system wide services',roam_svc_voice_service:'voice',roam_svc_circuit_mode_data_service:'circuit data',roam_svc_sndcp_service:'packet data',roam_svc_aie_service:'air encryption',roam_svc_advanced_link:'advanced link',roam_svc_priority_cell:'priority cell',roam_svc_no_minimum_mode:'no minimum mode',roam_svc_migration:'migration',
     roam_services_none:'none (radios may not use it)',roam_th_server:'On the server',roam_pick:'Fill in from the server\'s cell list',roam_dir_title:'Cells on the Brew server',roam_dir_help:'The cells of the other stations on the Brew server, with what they broadcast (brew-server extension cell-directory). A neighbour entry is matched by network, downlink frequency and location area. A radio uses its serving cell\'s list to choose which cells to scan (clause 18.3.4.1), so both cells should list each other.',roam_th_state:'State',roam_th_levels:'Access / MS power',roam_th_listed_here:'Neighbour of',roam_th_lists_us:'Lists this station',roam_dir_add:'Add as neighbour',roam_dir_none:'none',roam_dir_empty:'No other cells on the server.',roam_dir_count:'{n} cells of other stations on the server.',roam_dir_off:'The Brew server does not send its cell list (needs a brew-server with the cell-directory extension).',roam_dir_wait:'The server offers its cell list, it has not arrived yet (it comes right after connecting).',roam_dir_unknown:'not known to the server',roam_online:'online',roam_offline:'offline',roam_not_mutual:'{id} does not list this cell: radios there are not told to scan for it',roam_diff_rxlev:'min. access level: listed {list} dBm, the cell broadcasts {cell} dBm',roam_diff_txpwr:'max. MS power: listed {list} dBm, the cell broadcasts {cell} dBm',roam_diff_services:'services differ: {list}',roam_auto_sibling:'Cell of this station (automatic)',roam_nb_none:'No neighbours.',roam_nb_count:'{n} of 7 neighbour entries',roam_need_id_carrier:'Cell identifier and carrier are required.',roam_need_la:'The primary cell needs a location area.',roam_unsaved:'Changed, not saved yet.',roam_confirm_save:'Save the roaming settings and restart the station?',
-    roam_brew_off:'Brew is not configured: roaming between stations is off, cells of this station still work.',roam_link_up:'connected',roam_link_down:'not connected',roam_ext:'Server features',roam_feat_roam:'Roaming',roam_feat_calls:'Calls',roam_feat_cells:'Cells',roam_feat_groups:'Groups',roam_feat_net:'Multi Network',roam_feat_other:'Other',
+    roam_brew_off:'Brew is not configured: roaming between stations is off, cells of this station still work.',roam_link_up:'connected',roam_link_down:'not connected',roam_ext:'Server features',roam_feat_roam:'Roaming',roam_feat_calls:'Calls',roam_feat_cells:'Cells',roam_feat_groups:'Groups',roam_feat_net:'Multi Network',roam_feat_other:'Other',roam_feat_fleet:'Fleet Control',
+    fleet_desc:'Station management by SwMI (BrewServer)',fleet_key:'Fleet Control',fleet_on:'on',fleet_off:'off',fleet_not_connected:'control channel not connected',
+    fleet_cmd_title:'Fleet Control: control channel',fleet_cmd_help:'Fleet Control runs over the control channel to the Brew server, which is not configured yet. Enter the server; the user is your Brew login, an empty password takes the Brew password. Saving restarts the service.',
+    fleet_cmd_server:'Server (IP address or DNS name)',fleet_cmd_pass_ph:'empty = Brew password',fleet_cmd_save:'Save and restart',fleet_need_host:'Please enter the server.',
+    fleet_restarting:'Control channel saved: the station restarts and connects with Fleet Control on.',
     roam_dbm_hint:'At the radio (MS power term 0): no access below {fail} dBm, relinquishable below {fast} dBm, improvable below {slow} dBm (clause 18.3.4.5; Docs/cell-reselection.md).',
     roam_help_fast_th:'FAST_RESELECT_THRESHOLD (clause 18.5.4): below it (C1 in dB above the access level) the serving cell is "relinquishable" and the radio moves to a neighbour better by the fast hysteresis, also during a call. 0-30 dB in 2 dB steps; default 10.',
     roam_help_slow_th:'SLOW_RESELECT_THRESHOLD_ABOVE_FAST (clause 18.5.4): added to the fast threshold. Below the sum the serving cell is "improvable" and an idle radio moves to a neighbour better by the slow hysteresis. Default 20 (= 30 dB with fast 10). Large values make the radio look around almost always.',
@@ -8736,7 +8777,11 @@ const LANGS={
     roam_types_0:'sin registro anticipado',roam_types_1:'sin registro anticipado, reselección acelerada recomendada',roam_types_2:'registro anticipado',roam_types_3:'registro anticipado, reselección acelerada recomendada',
     roam_svc_registration:'registro',roam_svc_deregistration:'baja',roam_svc_system_wide_services:'servicios de todo el sistema',roam_svc_voice_service:'voz',roam_svc_circuit_mode_data_service:'datos en circuito',roam_svc_sndcp_service:'datos en paquetes',roam_svc_aie_service:'cifrado de aire',roam_svc_advanced_link:'enlace avanzado',roam_svc_priority_cell:'celda prioritaria',roam_svc_no_minimum_mode:'sin modo mínimo',roam_svc_migration:'migración',
     roam_services_none:'ninguno (las radios no pueden usarla)',roam_th_server:'En el servidor',roam_pick:'Rellenar desde la lista de celdas del servidor',roam_dir_title:'Celdas en el servidor Brew',roam_dir_help:'Las celdas de las otras estaciones del servidor Brew, con lo que anuncian (extensión cell-directory de brew-server). Una vecina se identifica por red, frecuencia de bajada y área de localización. Una radio usa la lista de su celda servidora para elegir qué celdas explorar (cláusula 18.3.4.1), así que ambas celdas deberían anunciarse mutuamente.',roam_th_state:'Estado',roam_th_levels:'Acceso / potencia MS',roam_th_listed_here:'Vecina de',roam_th_lists_us:'Anuncia esta estación',roam_dir_add:'Añadir como vecina',roam_dir_none:'ninguna',roam_dir_empty:'No hay otras celdas en el servidor.',roam_dir_count:'{n} celdas de otras estaciones en el servidor.',roam_dir_off:'El servidor Brew no envía su lista de celdas (requiere un brew-server con la extensión cell-directory).',roam_dir_wait:'El servidor ofrece su lista de celdas, aún no ha llegado (llega justo después de conectar).',roam_dir_unknown:'desconocida en el servidor',roam_online:'en línea',roam_offline:'fuera de línea',roam_not_mutual:'{id} no anuncia esta celda: a las radios allí no se les indica que la busquen',roam_diff_rxlev:'nivel mín. de acceso: anunciado {list} dBm, la celda emite {cell} dBm',roam_diff_txpwr:'potencia máx. MS: anunciada {list} dBm, la celda emite {cell} dBm',roam_diff_services:'servicios distintos: {list}',roam_auto_sibling:'Celda de esta estación (automática)',roam_nb_none:'Sin vecinas.',roam_nb_count:'{n} de 7 entradas de vecina',roam_need_id_carrier:'Faltan el identificador de celda y la portadora.',roam_need_la:'La celda primaria necesita un área de localización.',roam_unsaved:'Cambiado, aún sin guardar.',roam_confirm_save:'¿Guardar los ajustes de roaming y reiniciar la estación?',
-    roam_brew_off:'Brew no está configurado: el roaming entre estaciones está apagado, las celdas de esta estación siguen funcionando.',roam_link_up:'conectado',roam_link_down:'sin conexión',roam_ext:'Funciones del servidor',roam_feat_roam:'Roaming',roam_feat_calls:'Llamadas',roam_feat_cells:'Celdas',roam_feat_groups:'Grupos',roam_feat_net:'Multi Network',roam_feat_other:'Otras',
+    roam_brew_off:'Brew no está configurado: el roaming entre estaciones está apagado, las celdas de esta estación siguen funcionando.',roam_link_up:'conectado',roam_link_down:'sin conexión',roam_ext:'Funciones del servidor',roam_feat_roam:'Roaming',roam_feat_calls:'Llamadas',roam_feat_cells:'Celdas',roam_feat_groups:'Grupos',roam_feat_net:'Multi Network',roam_feat_other:'Otras',roam_feat_fleet:'Fleet Control',
+    fleet_desc:'Gestión de la estación por la SwMI (BrewServer)',fleet_key:'Fleet Control',fleet_on:'activado',fleet_off:'desactivado',fleet_not_connected:'canal de control sin conexión',
+    fleet_cmd_title:'Fleet Control: canal de control',fleet_cmd_help:'Fleet Control funciona por el canal de control al servidor Brew, que aún no está configurado. Introduce el servidor; el usuario es tu login de Brew, una contraseña vacía usa la contraseña de Brew. Al guardar se reinicia el servicio.',
+    fleet_cmd_server:'Servidor (dirección IP o nombre DNS)',fleet_cmd_pass_ph:'vacía = contraseña de Brew',fleet_cmd_save:'Guardar y reiniciar',fleet_need_host:'Introduce el servidor.',
+    fleet_restarting:'Canal de control guardado: la estación se reinicia y se conecta con Fleet Control activado.',
     roam_dbm_hint:'En la radio (término de potencia 0): sin acceso por debajo de {fail} dBm, celda abandonable por debajo de {fast} dBm, mejorable por debajo de {slow} dBm (cláusula 18.3.4.5; Docs/cell-reselection.md).',
     roam_help_fast_th:'FAST_RESELECT_THRESHOLD (cláusula 18.5.4): por debajo (C1 en dB sobre el nivel de acceso) la celda servidora es «abandonable» y la radio pasa a una vecina mejor en la histéresis rápida, también durante una llamada. 0-30 dB en pasos de 2; por defecto 10.',
     roam_help_slow_th:'SLOW_RESELECT_THRESHOLD_ABOVE_FAST (cláusula 18.5.4): se suma al umbral rápido. Por debajo de la suma la celda servidora es «mejorable» y una radio en reposo pasa a una vecina mejor en la histéresis lenta. Por defecto 20 (= 30 dB con rápido 10). Valores altos hacen que la radio busque casi siempre.',
@@ -19129,18 +19174,82 @@ async function loadRoaming(){
 }
 function roamRenderBrew(){
   const b=roamData.brew,el=document.getElementById('roam-brew');if(!el)return;
-  if(!b.configured){el.textContent=t('roam_brew_off');return;}
+  if(!b.configured){el.innerHTML=escHtml(t('roam_brew_off'))+fleetRow();return;}
   const wasOpen=!!el.querySelector('details[open]');
   const on=b.extensions.filter(x=>x.offered).length;
-  const cat={'bts-info':'roam_feat_roam','handover-v1':'roam_feat_roam','ms-cell':'roam_feat_roam','ms-moved':'roam_feat_roam','ms-reselection':'roam_feat_roam','call-restore':'roam_feat_calls','call-handoff':'roam_feat_calls','cell-directory':'roam_feat_cells','group-access':'roam_feat_groups','issi-check':'roam_feat_net','mni':'roam_feat_net'};
-  const order=['roam_feat_roam','roam_feat_calls','roam_feat_cells','roam_feat_groups','roam_feat_net','roam_feat_other'];
+  const cat={'fleet-control':'roam_feat_fleet','bts-info':'roam_feat_roam','handover-v1':'roam_feat_roam','ms-cell':'roam_feat_roam','ms-moved':'roam_feat_roam','ms-reselection':'roam_feat_roam','call-restore':'roam_feat_calls','call-handoff':'roam_feat_calls','cell-directory':'roam_feat_cells','group-access':'roam_feat_groups','issi-check':'roam_feat_net','mni':'roam_feat_net'};
+  const order=['roam_feat_fleet','roam_feat_roam','roam_feat_calls','roam_feat_cells','roam_feat_groups','roam_feat_net','roam_feat_other'];
   const ext=order.map(k=>{
     const xs=b.extensions.filter(x=>(cat[x.name]||'roam_feat_other')===k);
     return xs.length?'<div class="roam-feat-cat">'+escHtml(t(k))+'</div><div class="roam-feat-row">'+xs.map(x=>'<span class="roam-feat"><i class="'+(x.offered?'on':'off')+'"></i>'+escHtml(x.name)+'</span>').join('')+'</div>':'';
   }).join('');
   el.innerHTML='<b>Brew</b> '+escHtml(b.login||'')+' · '+escHtml(t(b.link_up?'roam_link_up':'roam_link_down'))+
+    // Fleet Control: the switch sits outside the collapsed list so it is always visible.
+    fleetRow()+
     '<details class="roam-feats"'+(wasOpen?' open':'')+'><summary>'+escHtml(t('roam_ext'))+' <span style="color:var(--muted)">'+on+'/'+b.extensions.length+'</span></summary><div>'+ext+'</div></details>';
 }
+/* ── Fleet Control (Docs/fleet-control.md): switch, control channel dialog, sidebar field ── */
+let fleetState=null;
+function fleetRow(){
+  const f=(roamData&&roamData.fleet_control)||fleetState;if(!f||!f.offered)return '';
+  return '<label class="roam-fleet"><span class="rf-text"><b>Fleet Control</b><span class="rf-sub">'+escHtml(t('fleet_desc'))+'</span></span>'+
+    '<span class="sw"><input type="checkbox" id="rm-fleet-on"'+(f.enabled?' checked':'')+' onchange="fleetToggle(this.checked)"><i></i></span></label>';
+}
+async function fleetPost(body){
+  const r=await fetch('/api/fleet-control',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const txt=await r.text();if(!r.ok)throw new Error(txt||String(r.status));return JSON.parse(txt);
+}
+async function fleetToggle(on){
+  const box=document.getElementById('rm-fleet-on');
+  try{
+    const j=await fleetPost({enabled:on});
+    if(j.need_command){if(box)box.checked=false;fleetCmdOpen();return;}
+    if(j.restart)setText('roam-msg',t('fleet_restarting'));
+  }catch(e){if(box)box.checked=!on;setText('roam-msg',String(e.message||e));return;}
+  await refreshFleetControl();
+  if(roamData&&fleetState)roamData.fleet_control=fleetState;
+}
+function fleetCmdOpen(){
+  const f=(roamData&&roamData.fleet_control)||fleetState||{};
+  // The server address is never pre-filled (Sebastian); the user is the Brew login.
+  document.getElementById('fc-host').value='';
+  document.getElementById('fc-port').value='443';
+  document.getElementById('fc-tls').checked=true;
+  document.getElementById('fc-user').value=f.brew_login||'';
+  document.getElementById('fc-pass').value='';
+  setText('fc-msg','');
+  document.getElementById('fleet-cmd-modal').classList.add('open');
+  setTimeout(()=>document.getElementById('fc-host').focus(),30);
+}
+function fleetCmdClose(){document.getElementById('fleet-cmd-modal').classList.remove('open');}
+async function fleetCmdSave(){
+  const v=id=>document.getElementById(id).value.trim();
+  if(!v('fc-host')){setText('fc-msg',t('fleet_need_host'));return;}
+  const port=parseInt(v('fc-port')||'443',10);
+  const body={enabled:true,command:{host:v('fc-host'),port:port,use_tls:document.getElementById('fc-tls').checked,username:v('fc-user'),password:document.getElementById('fc-pass').value}};
+  const btn=document.getElementById('fc-save');btn.disabled=true;
+  try{
+    await fleetPost(body);
+    fleetCmdClose();setText('roam-msg',t('fleet_restarting'));
+  }catch(e){setText('fc-msg',String(e.message||e));}
+  finally{btn.disabled=false;}
+}
+async function refreshFleetControl(){
+  if(document.hidden)return;
+  try{const r=await fetch('/api/fleet-control',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;fleetState=await r.json();}catch{return;}
+  renderFleetBadge();
+}
+function renderFleetBadge(){
+  // Sidebar under Health: only when the server supports Fleet Control; green on, red off.
+  const b=document.getElementById('fleet-badge'),l=document.getElementById('fleet-badge-label');if(!b||!l)return;
+  const f=fleetState;if(!f||!f.offered){b.style.display='none';return;}
+  l.textContent=t(f.enabled?'fleet_on':'fleet_off');
+  l.style.color=f.enabled?'#3fb950':'var(--danger)';
+  b.style.display='flex';
+  b.title='Fleet Control: '+t(f.enabled?'fleet_on':'fleet_off')+(f.connected?'':'\n'+t('fleet_not_connected'));
+}
+setInterval(refreshFleetControl,10000);
+setTimeout(refreshFleetControl,1500);
 function roamRenderCells(){
   const tb=document.getElementById('roam-cells-tbody');if(!tb)return;
   const primaryLa=roamData.cells[0].location_area;
