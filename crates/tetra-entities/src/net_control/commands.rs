@@ -155,6 +155,67 @@ pub enum ControlCommand {
         #[serde(default)]
         during_call: bool,
     },
+
+    /// Fleet Control (`config-v1`): read the config. Answered with a [`ControlResponse::ConfigInfo`]
+    /// (the settings of the Infrastructure page as JSON, the file as TOML, both without passwords
+    /// and keys, and the config hash).
+    GetConfig { handle: u32 },
+
+    /// Fleet Control (`config-v1`): change the config. `changes` has the keys of the dashboard's
+    /// Infrastructure page (see `net_control::fleet_config::apply_changes`); the station checks the
+    /// result like a local save, refuses it when its config hash is not `base_hash` (`conflict`),
+    /// saves the old file, writes the new one and restarts the service. The change must then be
+    /// confirmed with [`ControlCommand::ConfirmConfig`] within `confirm_secs` (default 180) after
+    /// the restart, else the station restores the old file and restarts again. Answered with a
+    /// [`ControlResponse::CommandResult`]: `ok`, `conflict`, `invalid`, `busy`, `call_active`,
+    /// `fleet_control_off`.
+    SetConfig {
+        handle: u32,
+        base_hash: String,
+        changes: JsonDoc,
+        #[serde(default)]
+        confirm_secs: u32,
+        #[serde(default)]
+        during_call: bool,
+        /// Who changed it (for the station's log).
+        #[serde(default)]
+        by: String,
+    },
+
+    /// Fleet Control (`config-v1`): keep the config written by the last `SetConfig` (the old file
+    /// is dropped). Answered with a [`ControlResponse::CommandResult`]: `ok`, `not_pending`.
+    ConfirmConfig { handle: u32 },
+
+    /// Fleet Control (`config-v1`): go back to the config before the last `SetConfig` at once and
+    /// restart. Answered with a [`ControlResponse::CommandResult`]: `ok`, `not_pending`.
+    RollbackConfig { handle: u32 },
+}
+
+/// A JSON document inside a control message: plain JSON on the wire (the server sends and gets an
+/// object, not a string), kept as text for the binary codec.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode)]
+pub struct JsonDoc(pub String);
+
+impl JsonDoc {
+    pub fn from_value(v: &serde_json::Value) -> Self {
+        JsonDoc(v.to_string())
+    }
+
+    pub fn value(&self) -> serde_json::Value {
+        serde_json::from_str(&self.0).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl Serialize for JsonDoc {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.value().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonDoc {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(JsonDoc::from_value(&serde_json::Value::deserialize(d)?))
+    }
 }
 
 /// Repository and branch of a live update (`StartUpdate.source`).
@@ -185,7 +246,11 @@ impl ControlCommand {
             | Self::CheckUpdate { .. }
             | Self::StartUpdate { .. }
             | Self::SetMaintenance { .. }
-            | Self::RestartStation { .. } => TetraEntity::Cmce,
+            | Self::RestartStation { .. }
+            | Self::GetConfig { .. }
+            | Self::SetConfig { .. }
+            | Self::ConfirmConfig { .. }
+            | Self::RollbackConfig { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -216,6 +281,14 @@ pub enum ControlResponse {
         fleet_control: bool,
         /// Fleet Control commands this station understands (empty while the switch is off).
         capabilities: Vec<String>,
+        /// Hash of the config file (`config-v1`, while the switch is on), to see changes made on
+        /// the station. Older stations leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_hash: Option<String>,
+        /// Seconds left to confirm the config written by `SetConfig` (`config-v1`), `None` when
+        /// nothing waits for confirmation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_pending: Option<u32>,
     },
 
     /// Fleet Control: the answer to every Fleet Control command, correlated by `handle`.
@@ -245,6 +318,24 @@ pub enum ControlResponse {
         repo: String,
         branch: String,
         message: String,
+    },
+
+    /// Fleet Control (`config-v1`): the answer to [`ControlCommand::GetConfig`].
+    ConfigInfo {
+        handle: u32,
+        ok: bool,
+        /// `ok`, `fleet_control_off`, `unavailable` (config not readable).
+        code: String,
+        message: String,
+        /// Hash of the config file (the `base_hash` for `SetConfig`).
+        hash: String,
+        /// The settings of the Infrastructure page (passwords only as `password_set`).
+        config: JsonDoc,
+        /// The config file as TOML, passwords and keys replaced by `"***"`.
+        text: String,
+        /// Seconds left to confirm the last `SetConfig`, `None` when nothing waits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<u32>,
     },
 
     /// Fleet Control (`update-v1`): progress of an OTA run (whoever started it), sent when the step

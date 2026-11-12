@@ -4818,7 +4818,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 <th data-i18n="th_type">Type</th>
                 <th data-i18n="th_caller">Caller</th>
                 <th data-i18n="th_dest">Destination</th>
-                <th class="col-mobile-hide" data-i18n="th_speaker">Speaker</th>
+                <th data-i18n="th_speaker">Speaker</th>
                 <th data-i18n="th_duration">Duration</th>
               </tr></thead>
               <tbody id="calls-tbody"></tbody>
@@ -14776,7 +14776,14 @@ function handleMsg(msg){
       tsClearCallCarrier(msg.call_id);updateTsBlocksCarrier();
       delete state.calls[msg.call_id];renderCalls();break;
     case 'ts_voice':
-      if(msg.carrier_num!=null)tsVoiceCarrier(msg.carrier_num,msg.ts,msg.speaker_issi);break;
+      if(msg.carrier_num!=null)tsVoiceCarrier(msg.carrier_num,msg.ts,msg.speaker_issi);
+      // The Calls page follows the talker like the Home time slots do: a voice burst names the
+      // speaker even when no speaker_changed came for it.
+      if(msg.speaker_issi){
+        const vc=Object.values(state.calls).find(c=>(c.carrier_num===msg.carrier_num&&c.ts===msg.ts)||(c.peer_carrier_num===msg.carrier_num&&c.peer_ts===msg.ts));
+        if(vc&&vc.active_speaker!==msg.speaker_issi){vc.active_speaker=msg.speaker_issi;renderCalls();}
+      }
+      break;
     case 'speaker_changed':
       if(state.calls[msg.call_id])state.calls[msg.call_id].active_speaker=msg.speaker_issi;
       if(msg.carrier_num!=null)tsEnsureCarrierInfo(msg.carrier_num);
@@ -15442,7 +15449,7 @@ function renderCalls(){
     // Emergency call = ETSI call priority 15 (terminal emergency button). Flag it prominently.
     const emg=(c.priority||0)>=15;
     const emgBadge=emg?`<span class="pill pill-danger"><span class="pill-icon">${svgIcon('emergency')}</span>${t('call_emergency')}</span> `:'';
-    return`<tr${emg?' class="row-emergency"':''}><td class="col-mobile-hide"><code>${c.call_id}</code></td><td>${emgBadge}<span class="pill ${pillv}">${label}</span></td><td>${c.caller_issi?idCell(c.caller_issi):'<span class="muted">—</span>'}</td><td>${to}</td><td class="col-mobile-hide">${spk}</td><td><span class="num accent">${mm}:${ss}</span></td></tr>`;
+    return`<tr${emg?' class="row-emergency"':''}><td class="col-mobile-hide"><code>${c.call_id}</code></td><td>${emgBadge}<span class="pill ${pillv}">${label}</span></td><td>${c.caller_issi?idCell(c.caller_issi):'<span class="muted">—</span>'}</td><td>${to}</td><td>${spk}</td><td><span class="num accent">${mm}:${ss}</span></td></tr>`;
   }).join('');
   applyTableStackLabels(tb);
   }

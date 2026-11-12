@@ -49,6 +49,9 @@ pub const CAP_RESTART: &str = "restart-v1";
 /// Capability names the station lists in its hello while the switch is on.
 pub fn capabilities(ota_available: bool) -> Vec<String> {
     let mut caps = vec![CAP_FLEET.to_string(), CAP_MAINTENANCE.to_string(), CAP_RESTART.to_string()];
+    if super::fleet_config::config_path().is_some() {
+        caps.push(super::fleet_config::CAP_CONFIG.to_string());
+    }
     if ota_available {
         caps.push(CAP_UPDATE.to_string());
         caps.push(CAP_UPDATE_LIVE.to_string());
@@ -89,6 +92,8 @@ pub fn station_hello(shared: &SharedConfig) -> ControlResponse {
         mnc: cfg.net.mnc,
         fleet_control: enabled,
         capabilities: if enabled { capabilities(crate::net_dashboard::ota_remote::available()) } else { Vec::new() },
+        config_hash: if enabled { super::fleet_config::current_hash() } else { None },
+        config_pending: if enabled { super::fleet_config::pending_secs() } else { None },
     }
 }
 
@@ -466,6 +471,8 @@ mod tests {
             mnc: 20,
             fleet_control: true,
             capabilities: vec!["fleet-v1".into()],
+            config_hash: None,
+            config_pending: None,
         };
         let json: serde_json::Value = serde_json::from_slice(&codec.encode_response(&hello)).unwrap();
         assert_eq!(

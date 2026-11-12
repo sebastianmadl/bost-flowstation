@@ -613,6 +613,10 @@ fn main() {
         migrate_legacy_dashboard_ports(&format!("{}.fallback", args.config));
     }
 
+    // Fleet Control: a config change from the Brew server that waits for confirmation arms the
+    // rollback watchdog now, before anything else can fail.
+    tetra_entities::net_control::fleet_config::boot(&args.config);
+
     // Load config — parse+validate primary; on failure try <config>.fallback the same way.
     let loaded = if args.require_sc3 {
         let c = try_load_stack_config(&args.config).unwrap_or_else(|e| { eprintln!("ERROR: {}", e); std::process::exit(1) });

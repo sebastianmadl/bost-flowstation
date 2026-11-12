@@ -185,6 +185,42 @@ service restarts, `host` false, or the host reboots, `host` true, 5 s later),
 polkit rule and works right after a fresh install. The server knows the
 station is back from its next `StationHello`.
 
+## Station config (`config-v1`)
+
+Phases 4/5: the server reads the config and changes it with a rollback. The
+capability is announced once `fleet_config::boot` knows the config path (at
+start, in `main`).
+
+- **Hash.** `config_hash` in the hello: md5 (16 hex) of the parsed TOML
+  re-serialized, without `[command] fleet_control`, so comments, layout and
+  the switch do not count. `config_pending`: seconds left of a change waiting
+  for confirmation. The worker sends a new hello when either changes (checked
+  every 5 s), so a local edit reaches the server.
+- **`GetConfig`** → `ConfigInfo {hash, config, text, pending}`: `config` is
+  the Infrastructure view (the same JSON as `GET /api/roaming`, without the
+  server's cell directory) plus the Brew link, cell SDR devices and the OTA
+  source; passwords only as `password_set`. `text` is the file with passwords
+  and keys as `***`.
+- **`SetConfig {base_hash, changes, confirm_secs, during_call, by}`**: refused
+  with `conflict` (the file is not `base_hash`), `invalid` (unknown key or
+  the result does not validate like the dashboard's own save), `call_active`,
+  `busy` (update running or a change already waits). Accepted keys:
+  `reselect`, `rxlev_access_min_dbm`, `migration`, `presence_check_secs`,
+  `multi_network_enabled`, `networks`, `telemetry`, `command`, `cells`,
+  `cells_add`, `cells_remove`, `brew`, `ota`, `net_info`. An empty password
+  keeps the old one; a new carrier moves the cell's SoapySDR frequencies. On
+  `ok` the station saves `<config>.fleet-backup`, writes
+  `<config>.fleet-pending.json` (old/new hash, window, who, when), writes the
+  new config and restarts 3 s later.
+- **Window.** `confirm_secs` (default 180, 60–900) from the restart, at least
+  20 s after the boot. A watchdog thread armed at boot (and at `SetConfig`)
+  copies the backup back and restarts when it runs out.
+- **`ConfirmConfig`**: removes backup and note (`ok`, `not_pending`). The run
+  that wrote the change answers `not_restarted`: its re-announced hello
+  already says "pending", but it still runs the old config.
+- **`RollbackConfig`**: backup back, restart (`ok`, `not_pending`).
+- Keys (`[security]`) are never part of `config` or `changes`.
+
 ## HTTP API (dashboard)
 
 | Route | Body | Answer |
@@ -203,5 +239,7 @@ station is back from its next `StationHello`.
 - `crates/tetra-entities/src/net_dashboard/ota_remote.rs`: remote update (check,
   start, progress) on the dashboard's OTA (`server.rs` `run_update`,
   `update_check_json`, `UpdateState.stage`).
+- `crates/tetra-entities/src/net_control/fleet_config.rs`: config read, change,
+  backup, watchdog, confirm / rollback (`config-v1`).
 - `crates/tetra-config/src/bluestation/sec_control.rs` (`fleet_control`),
   `state.rs` (`FleetControlState`: enabled, offered, connected).

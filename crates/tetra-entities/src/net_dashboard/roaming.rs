@@ -65,7 +65,7 @@ fn cell_info_table(table: &Table) -> Option<&Table> {
 }
 
 /// The `[[cells]]` entry with `id` in the file.
-fn extra_cell_entry(table: &Table, id: u8) -> Option<&Table> {
+pub(crate) fn extra_cell_entry(table: &Table, id: u8) -> Option<&Table> {
     table
         .get("cells")?
         .as_array()?
@@ -74,7 +74,7 @@ fn extra_cell_entry(table: &Table, id: u8) -> Option<&Table> {
         .find(|c| c.get("id").and_then(|v| v.as_integer()) == Some(id as i64))
 }
 
-fn extra_cell_entry_mut(table: &mut Table, id: u8) -> Option<&mut Table> {
+pub(crate) fn extra_cell_entry_mut(table: &mut Table, id: u8) -> Option<&mut Table> {
     table
         .get_mut("cells")?
         .as_array_mut()?
@@ -200,10 +200,17 @@ fn apply_networks(table: &mut Table, list: &JsonValue) -> Result<(), String> {
 /// "password"}`) as `[networks.<name>.brew]`. Keys the page does not edit stay as they are; an
 /// empty password keeps the saved one.
 fn apply_network_brew(entry: &mut Table, b: &JsonValue, name: &str) -> Result<(), String> {
-    let what = format!("networks.{name}.brew");
     if entry.contains_key("via") {
         return Err(format!("networks.{name}: give either its own Brew server or via, not both"));
     }
+    apply_brew_link(entry, b, &format!("networks.{name}.brew"))
+}
+
+/// A Brew link (`{"host", "port", "tls", "username", "password"}`) as the `brew` table of `entry`
+/// (a network entry, or the root for the classic `[brew]`). Keys not given here stay as they are;
+/// an empty password keeps the saved one. `what` names it in errors.
+pub(crate) fn apply_brew_link(entry: &mut Table, b: &JsonValue, what: &str) -> Result<(), String> {
+    let what = what.to_string();
     let obj = b.as_object().ok_or_else(|| format!("{what} must be an object"))?;
     let host = obj.get("host").and_then(|v| v.as_str()).map(str::trim).unwrap_or_default();
     if host.is_empty() || host.contains(char::is_whitespace) {
@@ -484,7 +491,7 @@ pub(crate) fn apply_link_section(table: &mut Table, key: &str, v: &JsonValue) ->
     Ok(())
 }
 
-fn int_in(v: &JsonValue, what: &str, min: i64, max: i64) -> Result<i64, String> {
+pub(crate) fn int_in(v: &JsonValue, what: &str, min: i64, max: i64) -> Result<i64, String> {
     v.as_i64()
         .filter(|n| (min..=max).contains(n))
         .ok_or_else(|| format!("{what} must be {min}-{max}"))
@@ -540,7 +547,7 @@ fn neighbour_list(v: &JsonValue, what: &str) -> Result<TomlValue, String> {
     Ok(TomlValue::Array(entries))
 }
 
-fn table_mut<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, String> {
+pub(crate) fn table_mut<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, String> {
     parent
         .entry(key.to_string())
         .or_insert_with(|| TomlValue::Table(Table::new()))

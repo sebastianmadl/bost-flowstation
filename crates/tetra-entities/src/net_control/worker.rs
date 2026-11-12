@@ -17,7 +17,7 @@ use crate::{
         channel::CommandDispatcher,
         codec::ControlCodecJson,
         commands::{ControlCommand, ControlResponse},
-        fleet,
+        fleet, fleet_config,
     },
     network::transports::NetworkTransport,
 };
@@ -46,6 +46,9 @@ pub struct ControlWorker<T: NetworkTransport> {
     async_rx: std::sync::mpsc::Receiver<ControlResponse>,
     /// Stage and percent of the last `UpdateProgress` sent on this connection, with the time.
     last_progress: Option<(String, u8, Instant)>,
+    /// Config hash and "waits for confirmation" as told in the last hello (`config-v1`).
+    hello_config: (Option<String>, bool),
+    last_config_check: Option<Instant>,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
@@ -63,6 +66,8 @@ impl<T: NetworkTransport> ControlWorker<T> {
             async_tx,
             async_rx,
             last_progress: None,
+            hello_config: (None, false),
+            last_config_check: None,
         }
     }
 
@@ -137,6 +142,16 @@ impl<T: NetworkTransport> ControlWorker<T> {
             return;
         }
         let updating = crate::net_dashboard::ota_remote::progress().is_some_and(|p| p.running);
+        let now = fleet_config::StationNow { enabled: self.fleet_enabled(), calls: crate::net_dashboard::ota_remote::active_calls(), updating };
+        if let Some(response) = fleet_config::config_command(&command, now, self.shared.as_ref()) {
+            let confirmed = matches!(command, ControlCommand::ConfirmConfig { .. });
+            self.send_response(&response);
+            if confirmed {
+                // The next hello says that nothing waits any more.
+                self.last_config_check = None;
+            }
+            return;
+        }
         if let Some(response) =
             fleet::restart_command(&command, self.fleet_enabled(), crate::net_dashboard::ota_remote::active_calls(), updating, fleet::schedule_restart)
         {
@@ -235,7 +250,16 @@ impl<T: NetworkTransport> ControlWorker<T> {
         let enabled = shared.state_read().fleet_control.enabled;
         // The capabilities change too when the dashboard (and with it the OTA) comes up later.
         let ota = crate::net_dashboard::ota_remote::available();
-        if self.hello_announced == Some(enabled) && (!enabled || self.hello_ota == ota) {
+        // The config hash changes with a save on the station; "waits for confirmation" ends with
+        // the confirmation. Looked at every 5 s (it reads the file).
+        let config_changed = enabled && self.hello_announced == Some(true) && {
+            let due = self.last_config_check.is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+            due && {
+                self.last_config_check = Some(Instant::now());
+                (fleet_config::current_hash(), fleet_config::pending_secs().is_some()) != self.hello_config
+            }
+        };
+        if self.hello_announced == Some(enabled) && (!enabled || self.hello_ota == ota) && !config_changed {
             return;
         }
         let hello = fleet::station_hello(&shared);
@@ -244,6 +268,10 @@ impl<T: NetworkTransport> ControlWorker<T> {
         }
         self.hello_announced = Some(enabled);
         self.hello_ota = ota;
+        if let ControlResponse::StationHello { config_hash, config_pending, .. } = &hello {
+            self.hello_config = (config_hash.clone(), config_pending.is_some());
+        }
+        self.last_config_check = Some(Instant::now());
         self.send_response(&hello);
     }
 
@@ -508,5 +536,28 @@ mod tests {
         worker.try_connect();
         worker.poll_commands();
         assert!(matches!(endpoint.try_recv(), Some(ControlCommand::KickMs { issi: 2001 })));
+    }
+
+    #[test]
+    fn config_commands_are_answered_by_the_worker_with_the_switch() {
+        let shared = station(false);
+        let (dispatcher, endpoint) = make_control_link();
+        let mut dispatchers = HashMap::new();
+        dispatchers.insert(TetraEntity::Cmce, dispatcher);
+        let mut mock = MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL]);
+        mock.push_inbound(br#"{"GetConfig":{"handle":21}}"#.to_vec());
+        mock.push_inbound(br#"{"ConfirmConfig":{"handle":22}}"#.to_vec());
+        let mut worker = ControlWorker::new(dispatchers, mock).with_shared(shared);
+        worker.try_connect();
+        worker.poll_commands();
+        assert!(endpoint.try_recv().is_none(), "config commands never reach the stack");
+        let got: Vec<(u32, bool, String)> = sent(&worker)
+            .into_iter()
+            .map(|r| match r {
+                ControlResponse::ConfigInfo { handle, ok, code, .. } | ControlResponse::CommandResult { handle, ok, code, .. } => (handle, ok, code),
+                other => panic!("expected an answer, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(got, vec![(21, false, "fleet_control_off".to_string()), (22, false, "fleet_control_off".to_string())]);
     }
 }
