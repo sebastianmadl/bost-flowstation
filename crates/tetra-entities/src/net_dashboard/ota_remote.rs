@@ -113,7 +113,7 @@ pub fn check_outcome_from_json(json: &str, repo: &str) -> CheckOutcome {
     CheckOutcome {
         ok: !failed,
         current: s("current").unwrap_or_else(|| tetra_core::STACK_VERSION.to_string()),
-        latest: s("remote_version").or_else(|| s("latest")),
+        latest: latest_label(s("remote_version").as_deref(), s("latest").as_deref()),
         update_available: available,
         channel: s("channel").unwrap_or_default(),
         repo: repo.to_string(),
@@ -125,6 +125,18 @@ pub fn check_outcome_from_json(json: &str, repo: &str) -> CheckOutcome {
         } else {
             "up to date".into()
         },
+    }
+}
+
+/// Newest version in the same form as `STACK_VERSION` (`v0.5.9-d081d936`): the version number
+/// of the source plus the commit of its tip (`latest` is `branch@commit`), so stations on the same
+/// version number but other commits can be told apart.
+fn latest_label(remote_version: Option<&str>, latest: Option<&str>) -> Option<String> {
+    let commit = latest.and_then(|l| l.rsplit_once('@').map(|(_, c)| c)).filter(|c| !c.is_empty());
+    match (remote_version.map(|v| v.trim().trim_start_matches('v')).filter(|v| !v.is_empty()), commit) {
+        (Some(v), Some(c)) => Some(format!("v{v}-{c}")),
+        (Some(v), None) => Some(format!("v{v}")),
+        (None, _) => latest.map(str::to_string),
     }
 }
 
@@ -312,10 +324,14 @@ mod tests {
 
     #[test]
     fn check_json_is_parsed() {
-        let json = r#"{"current":"v0.5.9-aaa","latest":"main@bbb","update_available":true,"check_failed":false,"channel":"installed","branch":"fleet-control","remote_version":"v0.5.9-bbb"}"#;
+        let json = r#"{"current":"v0.5.9-aaa","latest":"main@bbb","update_available":true,"check_failed":false,"channel":"installed","branch":"fleet-control","remote_version":"0.5.9"}"#;
         let c = check_outcome_from_json(json, "https://github.com/sebastianmadl/bost-flowstation");
         assert!(c.ok && c.update_available);
-        assert_eq!(c.latest.as_deref(), Some("v0.5.9-bbb"));
+        assert_eq!(c.latest.as_deref(), Some("v0.5.9-bbb"), "version number plus the tip commit");
+        let real = r#"{"current":"v0.5.9-2bb45158","latest":"fleet-control@d081d936","update_available":true,"check_failed":false,"channel":"installed","branch":"fleet-control","remote_version":"0.5.9"}"#;
+        assert_eq!(check_outcome_from_json(real, "").latest.as_deref(), Some("v0.5.9-d081d936"));
+        let no_version = r#"{"current":"v1","latest":"main@abc12345","update_available":true,"check_failed":false}"#;
+        assert_eq!(check_outcome_from_json(no_version, "").latest.as_deref(), Some("main@abc12345"));
         assert_eq!((c.channel.as_str(), c.branch.as_str()), ("installed", "fleet-control"));
         let failed = check_outcome_from_json(r#"{"current":"v1","check_failed":true,"update_available":false}"#, "");
         assert!(!failed.ok && !failed.update_available);

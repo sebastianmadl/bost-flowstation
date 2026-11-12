@@ -84,7 +84,7 @@ it was installed from); the server never chooses a repository or branch.
 | `CheckUpdate {handle}` | `UpdateInfo {handle, ok, current, latest, update_available, channel, repo, branch, message}` when the check is done (fresh, no cache; it asks GitHub, so it can take some seconds) |
 | `StartUpdate {handle, during_call}` | `CommandResult` at once: `ok`, `busy` (an update is already running), `call_active` (a call is in progress and `during_call` is false), `unavailable` (no dashboard, so no OTA), `fleet_control_off` |
 
-`during_call` defaults to false. `repo` never carries credentials.
+`during_call` defaults to false. `repo` never carries credentials. `latest` has the form of the running version: the source's version number plus the commit of its tip (`v0.5.9-d081d936`), or `branch@commit` when the version number cannot be read.
 
 While an OTA runs (whoever started it: server or dashboard), the station sends
 
