@@ -22,6 +22,14 @@ config.
   connected. A click opens the Infrastructure page.
 - The existing control commands (kick, DGNA, SDS, live SDS, emergency clear,
   ambience listening, service restart / shutdown) do not depend on the switch.
+- Switching off asks twice (the Fleet Control switch and the remote command /
+  control switch at the bottom of the page alike): first what stops working,
+  **I understand** left and a red **Cancel** right; then "are you sure, the
+  system admin and the fleet managers are notified", **Cancel** left and a red
+  **Yes, switch off** right. Buttons and colours swap between the two dialogs so
+  a double tap cannot get through. Saving the command channel switched off
+  while Fleet Control is on first switches Fleet Control off (live), so the
+  server logs "switched off Fleet Control" before the channel goes away.
 
 ```toml
 [command]
