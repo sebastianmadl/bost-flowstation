@@ -19761,12 +19761,14 @@ function roamServerCell(n,c){
   if(!roamData.directory)return '<span style="color:var(--muted)">—</span>';
   const e=roamMatch(n,c);
   if(!e)return '<span style="color:var(--muted)">'+escHtml(t('roam_dir_unknown'))+'</span>';
-  let h=roamDot(e.online)+escHtml(e.id)+(e.online?'':' <span style="color:var(--muted)">'+escHtml(t('roam_offline'))+'</span>');
+  // One block: the cell id on its own line (never broken), the warnings below it (phones stack the
+  // cell's children side by side otherwise).
+  let h='<div class="roam-srv"><span style="white-space:nowrap">'+roamDot(e.online)+escHtml(e.id)+(e.online?'':' <span style="color:var(--muted)">'+escHtml(t('roam_offline'))+'</span>')+'</span>';
   const warn=[];
   if(roamListsCell(e,c)===false)warn.push(t('roam_not_mutual',{id:e.id}));
   roamDiffs(n,c,e).forEach(x=>warn.push(x));
-  warn.forEach(w=>{h+='<div style="color:var(--warn,#c98a00);font-size:12px">⚠ '+escHtml(w)+'</div>';});
-  return h;
+  warn.forEach(w=>{h+='<div style="color:var(--warn,#c98a00);font-size:12px;margin-top:4px">⚠ '+escHtml(w)+'</div>';});
+  return h+'</div>';
 }
 function roamRenderDirectory(){
   const tb=document.getElementById('roam-dir-tbody');if(!tb||!roamData)return;
@@ -22642,6 +22644,13 @@ mod tests {
         assert!(H.contains(r#"'<td data-label="MCC/MNC">'+e.mcc+'/'+e.mnc+'</td>'"#));
         assert_eq!(H.matches("<th>MCC/MNC</th>").count(), 2, "neighbour table and server cell list");
         assert!(H.contains("setText('rm-n-mm-hint'"));
+    }
+
+    #[test]
+    fn server_cell_warning_sits_under_the_cell_id() {
+        // Sebastian 2026-11-13 (phone): the warning beside the id broke "1000001/0" into pieces.
+        assert!(H.contains(r#"let h='<div class="roam-srv"><span style="white-space:nowrap">'+roamDot(e.online)"#));
+        assert!(H.contains("return h+'</div>';"));
     }
 
     #[test]
