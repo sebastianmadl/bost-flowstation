@@ -452,8 +452,12 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
 
     if let Some(k) = obj.get("keys").filter(|k| !k.is_null()) {
         let mut table: Table = toml::from_str(&text).map_err(|e| format!("config does not parse: {e}"))?;
-        let server_sck = super::auc::global().lock().unwrap_or_else(|e| e.into_inner()).sck_active();
-        apply_key_source(&mut table, k, server_sck.as_ref())?;
+        let (server_sck, server_cck) = {
+            let auc = super::auc::global();
+            let store = auc.lock().unwrap_or_else(|e| e.into_inner());
+            (store.sck_active(), store.cck_active())
+        };
+        apply_key_source(&mut table, k, server_sck.as_ref(), server_cck.as_ref())?;
         text = toml::to_string(&table).map_err(|e| e.to_string())?;
     }
 
@@ -470,7 +474,12 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
 /// `keys: {source, drop_local_keys?}` (see [`apply_changes`]).
 /// `server_sck`: the server's SCK the station runs with. Back to local keys it is written to
 /// `[security.aie]`, so a class 2 cell keeps the key the radios hold.
-fn apply_key_source(table: &mut Table, k: &JsonValue, server_sck: Option<&tetra_config::bluestation::SckKey>) -> Result<(), String> {
+fn apply_key_source(
+    table: &mut Table,
+    k: &JsonValue,
+    server_sck: Option<&tetra_config::bluestation::SckKey>,
+    server_cck: Option<&tetra_config::bluestation::SckKey>,
+) -> Result<(), String> {
     let source = k.get("source").and_then(|v| v.as_str()).ok_or("keys.source is required")?;
     let source = tetra_config::bluestation::KeySource::parse(source).ok_or(format!("keys.source: local or server, not {source:?}"))?;
     let sec = roaming::table_mut(table, "security")?;
@@ -491,6 +500,13 @@ fn apply_key_source(table: &mut Table, k: &JsonValue, server_sck: Option<&tetra_
             aie.insert("sck".into(), TomlValue::String(super::auc::hex(&key.key.0).to_uppercase()));
             aie.insert("sckn".into(), TomlValue::Integer(key.sckn.into()));
             aie.insert("sck_vn".into(), TomlValue::Integer(key.vn.into()));
+        }
+        // Class 3: the server's CCK in use (`sckn` 0, CCK-id as `vn`).
+        if let (Some(key), Some(TomlValue::Table(aie))) = (server_cck, sec.get_mut("aie"))
+            && aie.get("class").and_then(|v| v.as_integer()) == Some(3)
+        {
+            aie.insert("cck".into(), TomlValue::String(super::auc::hex(&key.key.0).to_uppercase()));
+            aie.insert("cck_id".into(), TomlValue::Integer(key.vn.into()));
         }
     }
     Ok(())
@@ -963,11 +979,11 @@ fleet_control = true
     }
 
     #[test]
-    fn back_to_local_keys_writes_the_servers_sck_into_the_config() {
+    fn back_to_local_keys_writes_the_servers_sck_and_cck_into_the_config() {
         let base = format!("{BASE}\n[security]\nkey_source = \"server\"\n\n[security.aie]\nclass = 2\nksg = 1\nsck = \"00000000000000000000\"\n");
         let key = tetra_config::bluestation::SckKey { sckn: 2, vn: 9, key: tetra_config::bluestation::CipherKey([0xAB; 10]) };
         let mut table: Table = toml::from_str(&base).unwrap();
-        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key)).unwrap();
+        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key), None).unwrap();
         let aie = table["security"]["aie"].as_table().unwrap();
         assert_eq!(aie["sck"].as_str(), Some("ABABABABABABABABABAB"), "the radios keep the key they hold");
         assert_eq!((aie["sckn"].as_integer(), aie["sck_vn"].as_integer()), (Some(2), Some(9)));
@@ -975,8 +991,12 @@ fleet_control = true
         // Class 3 cells have no SCK; nothing is written.
         let sc3 = format!("{BASE}\n[security]\nkey_source = \"server\"\n\n[security.aie]\nclass = 3\n");
         let mut table: Table = toml::from_str(&sc3).unwrap();
-        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key)).unwrap();
-        assert!(!table["security"]["aie"].as_table().unwrap().contains_key("sck"));
+        let cck = tetra_config::bluestation::SckKey { sckn: 0, vn: 43, key: tetra_config::bluestation::CipherKey([0xCD; 10]) };
+        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key), Some(&cck)).unwrap();
+        let aie = table["security"]["aie"].as_table().unwrap();
+        assert!(!aie.contains_key("sck"));
+        assert_eq!(aie["cck"].as_str(), Some("CDCDCDCDCDCDCDCDCDCD"), "class 3 keeps the server's CCK");
+        assert_eq!(aie["cck_id"].as_integer(), Some(43));
     }
 
     #[test]

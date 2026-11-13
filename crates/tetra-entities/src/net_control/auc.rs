@@ -20,7 +20,7 @@ use tetra_security::auth::AuthVector;
 
 use tetra_config::bluestation::{CipherKey, SckKey, StackConfig};
 
-use super::commands::{AuthVectorWire, ControlResponse, IssiCount, SckRef, SckWire, SealedSckWire};
+use super::commands::{AuthVectorWire, CckRef, CckWire, ControlResponse, IssiCount, SckRef, SckWire, SealedSckWire};
 
 /// Station capability: understands `AuthSubscribers` / `AuthVectors`.
 pub const CAP_KEYS: &str = "keys-v1";
@@ -28,6 +28,10 @@ pub const CAP_KEYS: &str = "keys-v1";
 /// Station capability: understands `SckKeys` / `SckSealed` / `SckActivate` (security class 2 keys
 /// from the server).
 pub const CAP_SCK: &str = "sck-v1";
+
+/// Station capability: understands `CckKeys` / `CckActivate` (security class 3 CCKs from the
+/// server).
+pub const CAP_CCK: &str = "cck-v1";
 
 /// A radio without sets is asked for at most this often.
 const REQUEST_EVERY: Duration = Duration::from_secs(5);
@@ -72,6 +76,8 @@ pub struct AucStore {
     sck: SckFile,
     /// Sealed SCK deliveries for MM to send.
     sealed: VecDeque<(u32, String, Vec<SealedSckWire>, Instant)>,
+    /// Class 3 CCKs from the server.
+    cck: CckFile,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -80,6 +86,18 @@ struct File {
     sets: BTreeMap<u32, Vec<AuthVectorWire>>,
     #[serde(default)]
     sck: SckFile,
+    #[serde(default)]
+    cck: CckFile,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+struct CckFile {
+    /// The server's keys (every LA it sent; current and next).
+    keys: Vec<CckWire>,
+    /// The key of this cell's LA in use once the server's key took over (`None`: the config key).
+    active: Option<CckWire>,
+    /// Planned change: key, server time (Unix ms) and overlap (s).
+    switch: Option<(CckWire, u64, u32)>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
@@ -103,6 +121,45 @@ fn sck_key(w: &SckWire) -> Option<SckKey> {
         return None;
     }
     Some(SckKey { sckn: w.sckn, vn: w.vn, key: CipherKey(unhex::<10>(&w.key.to_ascii_lowercase())?) })
+}
+
+/// A CCK as the cipher holds it: `sckn` 0, the CCK-id as `vn`.
+fn cck_key(w: &CckWire) -> Option<SckKey> {
+    Some(SckKey { sckn: 0, vn: w.cck_id, key: CipherKey(unhex::<10>(&w.key.to_ascii_lowercase())?) })
+}
+
+fn cck_ref(k: &SckKey) -> CckRef {
+    CckRef { cck_id: k.vn, check: check_value(&k.key.0) }
+}
+
+fn cck_wire(k: &SckKey, la: Option<u16>) -> CckWire {
+    CckWire { la, cck_id: k.vn, key: hex(&k.key.0), next: false }
+}
+
+/// A server CCK applies to location area `la`.
+fn for_la(w: &CckWire, la: u16) -> bool {
+    w.la.is_none_or(|l| l == la)
+}
+
+/// The CCK in use when the station runs with its own config key.
+pub fn config_cck(cfg: &StackConfig) -> Option<SckKey> {
+    let c = cfg.security.aie.as_ref()?.class3.as_ref()?;
+    Some(SckKey { sckn: 0, vn: c.cck_id, key: c.cck.clone() })
+}
+
+/// Before the stack is built: with `key_source = "server"` a class 3 cell runs with the server's
+/// CCK that was in use when the station stopped, instead of the one in `[security.aie]`.
+pub fn apply_server_cck(config_path: &str, cfg: &mut StackConfig) -> Option<String> {
+    if cfg.security.key_source != tetra_config::bluestation::KeySource::Server {
+        return None;
+    }
+    let la = cfg.cell.location_area;
+    let c = cfg.security.aie.as_mut()?.class3.as_mut()?;
+    let f = std::fs::read(format!("{config_path}.auth-sets")).ok().and_then(|b| serde_json::from_slice::<File>(&b).ok())?;
+    let key = f.cck.active.as_ref().filter(|w| for_la(w, la)).and_then(cck_key)?;
+    c.cck_id = key.vn;
+    c.cck = key.key;
+    Some(format!("Key management: class 3 runs with the server's CCK {}", c.cck_id))
 }
 
 fn sck_ref(k: &SckKey) -> SckRef {
@@ -142,6 +199,7 @@ impl AucStore {
                 .collect();
             tracing::info!("Key management: {} authentication data sets for {} radios loaded", self.total(), self.sets.len());
             self.sck = f.sck;
+            self.cck = f.cck;
         }
         self.path = Some(path);
     }
@@ -152,6 +210,7 @@ impl AucStore {
             known: self.known.iter().copied().collect(),
             sets: self.sets.iter().map(|(i, v)| (*i, v.iter().map(AuthVectorWire::from_vector).collect())).collect(),
             sck: self.sck.clone(),
+            cck: self.cck.clone(),
         };
         let Ok(bytes) = serde_json::to_vec(&f) else { return };
         if let Err(e) = write_private(path, &bytes) {
@@ -249,7 +308,97 @@ impl AucStore {
         self.known.clear();
         self.sets.clear();
         self.sck = SckFile::default();
+        self.cck = CckFile::default();
         self.save();
+    }
+
+    // ───────────── class 3 CCKs (`cck-v1`) ─────────────
+
+    /// The server's CCKs. Invalid entries are dropped. A planned change to a key the server no
+    /// longer lists is cancelled.
+    pub fn set_cck_keys(&mut self, keys: &[CckWire]) {
+        self.cck.keys = keys.iter().filter(|w| cck_key(w).is_some()).cloned().collect();
+        if let Some((w, _, _)) = &self.cck.switch
+            && !self.cck.keys.iter().any(|k| k.cck_id == w.cck_id && k.key == w.key && k.la == w.la)
+        {
+            tracing::warn!("Key management: planned CCK change cancelled, the server no longer has that key");
+            self.cck.switch = None;
+        }
+        self.save();
+    }
+
+    /// Plan the change of this cell's LA (`cell_la`) to the server CCK `cck_id` at `at_ms`.
+    /// A change for another LA is ignored (`Ok(false)`).
+    pub fn cck_activate(&mut self, cell_la: u16, la: Option<u16>, cck_id: u16, at_ms: u64, overlap_s: u32) -> Result<bool, &'static str> {
+        if la.is_some_and(|l| l != cell_la) {
+            return Ok(false);
+        }
+        let Some(w) = self.cck.keys.iter().find(|k| k.cck_id == cck_id && for_la(k, cell_la)).cloned() else {
+            return Err("unknown key");
+        };
+        if self.cck.active.as_ref().is_some_and(|a| a.cck_id == cck_id && a.key == w.key) {
+            self.cck.switch = None;
+        } else {
+            self.cck.switch = Some((w, at_ms, overlap_s.min(86_400)));
+        }
+        self.save();
+        Ok(true)
+    }
+
+    /// The server CCK in use (`None`: the config key).
+    pub fn cck_active(&self) -> Option<SckKey> {
+        self.cck.active.as_ref().and_then(cck_key)
+    }
+
+    /// The server's next CCK for location area `la`, if it sent one.
+    pub fn cck_next(&self, la: u16) -> Option<SckKey> {
+        self.cck.keys.iter().filter(|k| k.next && for_la(k, la)).find_map(cck_key)
+    }
+
+    /// The server's current CCK for location area `la`, if it sent one.
+    pub fn cck_current(&self, la: u16) -> Option<SckKey> {
+        self.cck.keys.iter().filter(|k| !k.next && for_la(k, la)).find_map(cck_key)
+    }
+
+    /// The planned change: key, server time (Unix ms) and overlap (s).
+    pub fn cck_switch(&self) -> Option<(SckKey, u64, u32)> {
+        let (w, at, overlap) = self.cck.switch.as_ref()?;
+        Some((cck_key(w)?, *at, *overlap))
+    }
+
+    /// The change to `key` took place on the cell of location area `la`.
+    pub fn commit_cck(&mut self, la: u16, key: &SckKey, config: Option<&SckKey>) {
+        if self.cck_active().as_ref() == Some(key) && self.cck.switch.is_none() {
+            return;
+        }
+        let scope = self.cck.switch.as_ref().map(|(w, _, _)| w.la).unwrap_or(Some(la));
+        self.cck.active = Some(cck_wire(key, scope));
+        self.cck.switch = None;
+        // The server sends its new set once it hears of the change; until then only this key.
+        self.cck.keys.retain(|k| !for_la(k, la) || k.cck_id == key.vn);
+        for k in self.cck.keys.iter_mut().filter(|k| for_la(k, la)) {
+            k.next = false;
+        }
+        self.save();
+        tracing::info!("Key management: CCK {} is in use now", key.vn);
+        let state = self.cck_state(la, config);
+        self.outbox.push(state);
+    }
+
+    /// What the cell of location area `la` runs with, for the server.
+    pub fn cck_state(&self, la: u16, config: Option<&SckKey>) -> ControlResponse {
+        let active = self.cck_active();
+        ControlResponse::CckState {
+            la,
+            from_config: active.is_none() && config.is_some(),
+            active: active.as_ref().or(config).map(cck_ref),
+            keys: self.cck.keys.iter().filter(|k| for_la(k, la)).filter_map(cck_key).map(|k| cck_ref(&k)).collect(),
+            switch_at_ms: self.cck.switch.as_ref().map(|(_, at, _)| *at),
+        }
+    }
+
+    pub fn cck_result(&mut self, issi: u32, cck_id: u16, ok: bool, detail: Option<String>) {
+        self.outbox.push(ControlResponse::CckResult { issi, cck_id, ok, detail });
     }
 
     // ───────────── class 2 SCKs (`sck-v1`) ─────────────

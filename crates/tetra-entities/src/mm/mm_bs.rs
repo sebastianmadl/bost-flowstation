@@ -121,6 +121,8 @@ const T354: Duration = Duration::from_secs(30);
 const AUTH_PASS_GRACE: Duration = Duration::from_secs(5);
 /// A planned SCK change is committed this many slots (one multiframe) after it took effect.
 const SCK_COMMIT_AFTER_SLOTS: i32 = 4 * 18;
+/// A radio that missed a server CCK is offered it again at most this often.
+const CCK_RETRY: Duration = Duration::from_secs(600);
 /// A sealed delivery no cell took (radio not registered here) is reported back after this.
 const SEALED_UNCLAIMED: Duration = Duration::from_secs(5);
 
@@ -176,6 +178,13 @@ pub struct MmBs {
     auth_result_pending: HashMap<u32, PendingAuthResult>,
     auth_ack_pending: HashMap<u32, (PendingAuthResult, TxReporter)>,
     cck_pending: HashMap<u32, Instant>,
+    /// Server CCKs (`cck-v1`): a future CCK sent to the radio, awaiting U-OTAR CCK RESULT
+    /// (ISSI → CCK-id, sent at).
+    cck_future_pending: HashMap<u32, (u16, Instant)>,
+    /// CCK-ids each radio accepted on this cell (server CCKs only).
+    cck_held: HashMap<u32, HashSet<u16>>,
+    /// Last server CCK delivery per radio, so a radio that does not answer is not flooded.
+    cck_offered: HashMap<u32, Instant>,
     /// SCK deliveries awaiting the radio's U-OTAR SCK RESULT.
     otar_pending: HashMap<u32, PendingOtar>,
     /// Radios whose U-OTAR SCK DEMAND waits for the server's answer (ISSI → handle and the
@@ -278,6 +287,9 @@ impl MmBs {
             auth_result_pending: HashMap::new(),
             auth_ack_pending: HashMap::new(),
             cck_pending: HashMap::new(),
+            cck_future_pending: HashMap::new(),
+            cck_held: HashMap::new(),
+            cck_offered: HashMap::new(),
             otar_pending: HashMap::new(),
             sck_demands: HashMap::new(),
             pending_ciphering: HashMap::new(),
@@ -765,6 +777,9 @@ impl MmBs {
         self.auth_result_pending.remove(&issi);
         self.auth_ack_pending.remove(&issi);
         self.cck_pending.remove(&issi);
+        self.cck_future_pending.remove(&issi);
+        self.cck_held.remove(&issi);
+        self.cck_offered.remove(&issi);
         self.config.state_write().sc3_dcks.remove(&issi);
         self.config.state_write().sc3_status.remove(&issi);
         self.otar_pending.remove(&issi);
@@ -3527,6 +3542,7 @@ impl TetraEntityTrait for MmBs {
         self.expire_otar();
         self.process_sck_sealed(queue);
         self.sync_sck(queue, ts);
+        self.sync_cck(queue, ts);
         self.process_authentication_acks(queue);
         self.process_pending_ciphering();
         // Drain control commands addressed to the MM entity. We collect into a Vec first so the
@@ -4299,13 +4315,149 @@ impl MmBs {
     }
 
     fn cck_information_for_key(&self, dck: &SecCipherKey) -> Option<CckInformation> {
+        let (cck_id, cck) = self.current_cck()?;
+        Some(CckInformation {
+            cck_id, future: false,
+            sealed: tetra_security::taa1::ta31(&cck.0, cck_id, &dck.0),
+            locations: CckLocations::List(vec![self.config.config().cell.location_area]), next_sealed: None,
+        })
+    }
+
+    /// The CCK the cell runs with now: the server's (Fleet Control) or the one of `[security.aie]`.
+    fn current_cck(&self) -> Option<(u16, tetra_config::bluestation::CipherKey)> {
+        if let Some(k) = self.config.state_read().cck_run.as_ref().and_then(|r| r.active.clone()) {
+            return Some((k.vn, k.key));
+        }
         let cfg = self.config.config();
         let sc3 = cfg.security.aie.as_ref()?.class3.as_ref()?;
-        Some(CckInformation {
-            cck_id: sc3.cck_id, future: false,
-            sealed: tetra_security::taa1::ta31(&sc3.cck.0, sc3.cck_id, &dck.0),
-            locations: CckLocations::List(vec![cfg.cell.location_area]), next_sealed: None,
-        })
+        Some((sc3.cck_id, sc3.cck.clone()))
+    }
+
+    /// D-OTAR CCK PROVIDE with a CCK for future use (key type flag "future", Table A.42; the SwMI
+    /// "can deliver to all registered MSs a CCK for future use", clause 4.5.1).
+    fn otar_cck_future(&mut self, queue: &mut MessageQueue, issi: u32, key: &tetra_config::bluestation::SckKey) {
+        let Some(dck) = self.cck_delivery_key(issi) else { return };
+        if self.cck_pending.contains_key(&issi) || self.cck_future_pending.contains_key(&issi) {
+            return;
+        }
+        let pdu = DOtarCckProvide {
+            cck: Some(CckInformation {
+                cck_id: key.vn,
+                future: true,
+                sealed: tetra_security::taa1::ta31(&key.key.0, key.vn, &dck.0),
+                locations: CckLocations::List(vec![self.config.config().cell.location_area]),
+                next_sealed: None,
+            }),
+        };
+        self.cck_future_pending.insert(issi, (key.vn, Instant::now()));
+        self.cck_offered.insert(issi, Instant::now());
+        self.send_auth_pdu(queue, issi, 0, "DOtarCckProvide", |b| pdu.to_bitbuf(b));
+        tracing::info!("MM: OTAR — sending the next CCK {} to ISSI {}", key.vn, issi);
+    }
+
+    /// Server CCKs (`cck-v1`): follow the key in use and a planned change like the SCK
+    /// (`sync_sck`), hand the next CCK to the radios before the change, and the current one to
+    /// radios that missed the change. The old CCK stays usable for uplink ESIs during the overlap.
+    fn sync_cck(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        if !self.server_keys() || !self.is_class3() {
+            return;
+        }
+        let la = self.config.config().cell.location_area;
+        let (active, switch, next) = {
+            let store = self.auc_lock();
+            (store.cck_active(), store.cck_switch(), store.cck_next(la))
+        };
+        let planned = self.config.state_read().cck_run.as_ref().and_then(|r| r.switch.clone());
+        match (switch, planned) {
+            (Some((key, _, overlap_s)), Some((at, k))) if k == key => {
+                if ts.diff(at) > SCK_COMMIT_AFTER_SLOTS {
+                    let config_key = crate::net_control::auc::config_cck(&self.config.config());
+                    let old = self.current_cck();
+                    self.auc_lock().commit_cck(la, &key, config_key.as_ref());
+                    let mut st = self.config.state_write();
+                    st.cck_run = Some(tetra_config::bluestation::SckRun { active: Some(key), switch: None });
+                    // Overlap from the switch on; at least the two slots of clause 4.5.5.2.
+                    let slots = ((u64::from(overlap_s) * 1000 * 18) / 255).min(i32::MAX as u64 / 4) as i32;
+                    if let Some((id, k)) = old {
+                        st.cck_overlap = Some((tetra_config::bluestation::SckKey { sckn: 0, vn: id, key: k }, at.add_timeslots(slots.max(crate::aie::cipher::UPLINK_OLD_KEY_SLOTS))));
+                    }
+                }
+            }
+            (Some((key, at_ms, _)), _) => {
+                let at = sck_change_slot(ts, at_ms, now_ms());
+                tracing::info!("MM: CCK change to CCK {} on {}/{}/{}/{} (now {}/{}/{}/{})", key.vn, at.h, at.m, at.f, at.t, ts.h, ts.m, ts.f, ts.t);
+                let old = self.current_cck();
+                {
+                    let mut st = self.config.state_write();
+                    let run = st.cck_run.get_or_insert_with(Default::default);
+                    if run.active.is_none() {
+                        run.active = active.clone().or_else(|| old.map(|(id, k)| tetra_config::bluestation::SckKey { sckn: 0, vn: id, key: k }));
+                    }
+                    run.switch = Some((at, key.clone()));
+                }
+                self.announce_cck_change(queue, key.vn, at);
+            }
+            (None, _) => {
+                let want = active.map(|a| tetra_config::bluestation::SckRun { active: Some(a), switch: None });
+                let mut st = self.config.state_write();
+                if want.is_some() && st.cck_run != want {
+                    st.cck_run = want;
+                } else if want.is_none() && st.cck_run.as_ref().is_some_and(|r| r.switch.is_some()) {
+                    if let Some(r) = st.cck_run.as_mut() {
+                        r.switch = None;
+                    }
+                }
+                if st.cck_overlap.as_ref().is_some_and(|(_, until)| ts.diff(*until) >= 0) {
+                    st.cck_overlap = None;
+                }
+            }
+        }
+        self.expire_cck_future();
+        // Deliveries: the next key before a change, the current one to radios that missed it.
+        let Some((cur_id, _)) = self.current_cck() else { return };
+        let mut radios: Vec<u32> = self.config.state_read().sc3_dcks.keys().copied().collect();
+        radios.sort_unstable();
+        for issi in radios {
+            if self.cck_offered.get(&issi).is_some_and(|t| t.elapsed() < CCK_RETRY) {
+                continue;
+            }
+            let held = self.cck_held.get(&issi);
+            if let Some(n) = next.as_ref().filter(|n| n.vn != cur_id && held.is_none_or(|h| !h.contains(&n.vn))) {
+                self.otar_cck_future(queue, issi, n);
+            } else if self.config.state_read().cck_run.as_ref().is_some_and(|r| r.active.is_some())
+                && held.is_some_and(|h| !h.contains(&cur_id))
+                && self.cck_delivery_key(issi).is_some()
+            {
+                // The radio accepted a server CCK here before, but not the one in use now.
+                self.cck_offered.insert(issi, Instant::now());
+                self.otar_cck_provide(queue, issi);
+            }
+        }
+    }
+
+    fn expire_cck_future(&mut self) {
+        let stale: Vec<(u32, u16)> = self.cck_future_pending.iter().filter(|(_, (_, t))| t.elapsed() >= T_OTAR_RESULT).map(|(i, (id, _))| (*i, *id)).collect();
+        for (issi, id) in stale {
+            self.cck_future_pending.remove(&issi);
+            tracing::warn!("MM: no U-OTAR CCK RESULT from ISSI {} for the next CCK {}", issi, id);
+            self.auc_lock().cck_result(issi, id, false, Some("no answer".into()));
+        }
+    }
+
+    /// D-CK CHANGE DEMAND for the CCK to every radio with an active class 3 session (clause
+    /// 4.5.5.2: "may be addressed to group and broadcast addresses"; sent individually).
+    fn announce_cck_change(&self, queue: &mut MessageQueue, cck_id: u16, at: TdmaTime) {
+        let pdu = DCkChangeDemand {
+            ack_required: false,
+            change_of_class: 0,
+            key: KeyChange::Cck(cck_id),
+            time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
+        };
+        let mut radios: Vec<u32> = self.config.state_read().sc3_dcks.keys().copied().filter(|i| self.client_mgr.client_is_known(*i)).collect();
+        radios.sort_unstable();
+        for issi in radios {
+            self.send_auth_pdu(queue, issi, 0, "DCkChangeDemand", |b| pdu.to_bitbuf(b));
+        }
     }
 
     fn subscriber_key(&self, issi: u32) -> Option<AuthKey> {
@@ -4443,11 +4595,32 @@ impl MmBs {
                 Err(e) => tracing::warn!("MM: invalid CCK demand from {}: {:?}", issi, e),
             },
             OtarSubType::CckResultReject => match UOtarCckResult::from_bitbuf(&mut prim.sdu) {
+                Ok(pdu) if prim.encrypted && self.cck_future_pending.contains_key(&issi) && !self.cck_pending.contains_key(&issi) => {
+                    // Answer to a future CCK only: its result is in "provision result" (Table A.11
+                    // note: the future key flag is false when only a future CCK was given).
+                    let (id, _) = self.cck_future_pending.remove(&issi).expect("checked");
+                    let ok = pdu.result == ProvisionResult::Accepted;
+                    if ok {
+                        self.cck_held.entry(issi).or_default().insert(id);
+                        tracing::info!("MM: ISSI {} accepted the next CCK {}", issi, id);
+                    } else {
+                        tracing::warn!("MM: ISSI {} did not take the next CCK {}: {:?}", issi, id, pdu.result);
+                    }
+                    if self.server_keys() {
+                        self.auc_lock().cck_result(issi, id, ok, (!ok).then(|| format!("{:?}", pdu.result)));
+                    }
+                }
                 Ok(pdu) if prim.encrypted && self.cck_delivery_key(issi).is_some()
                     && self.cck_pending.remove(&issi).is_some() => {
                     if pdu.result == ProvisionResult::Accepted && pdu.future_result.is_none() {
                         self.sc3_cck(issi, "accepted");
                         tracing::info!("MM: ISSI {} accepted CCK", issi);
+                        if self.server_keys()
+                            && let Some((id, _)) = self.current_cck()
+                        {
+                            self.cck_held.entry(issi).or_default().insert(id);
+                            self.auc_lock().cck_result(issi, id, true, None);
+                        }
                     } else {
                         tracing::warn!("MM: ISSI {} rejected CCK: {:?}; removing SC3 state", issi, pdu.result);
                         self.clear_registration_transients(issi);

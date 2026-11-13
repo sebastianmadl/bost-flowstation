@@ -218,6 +218,42 @@ pub enum ControlCommand {
     /// `at_ms` (Unix ms), network wide (clause 4.5.5.4). The station announces the change with
     /// D-CK CHANGE DEMAND on the matching IV and changes the key on that slot.
     SckActivate { sckn: u8, vn: u16, at_ms: u64 },
+
+    /// Fleet Control (`cck-v1`): the class 3 CCKs the server holds for the station's location
+    /// area(s), current and, before a change, next (EN 300 392-7 clause 4.2.3). The station
+    /// seals them for each radio with its DCK itself (TA31, clause 4.5.1.1).
+    CckKeys { keys: Vec<CckWire> },
+
+    /// Fleet Control (`cck-v1`): make the CCK `cck_id` of location area `la` (`None`: every LA)
+    /// the one in use at the server time `at_ms` (clause 4.5.5.2). The old CCK is still tried for
+    /// uplink ESIs for `overlap_s` seconds.
+    CckActivate {
+        #[serde(default)]
+        la: Option<u16>,
+        cck_id: u16,
+        at_ms: u64,
+        #[serde(default)]
+        overlap_s: u32,
+    },
+}
+
+/// One CCK on the wire ([`ControlCommand::CckKeys`]): location area (`None`: every LA), CCK-id,
+/// 20 hex digits, `next` for the key that is not in use yet.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct CckWire {
+    #[serde(default)]
+    pub la: Option<u16>,
+    pub cck_id: u16,
+    pub key: String,
+    #[serde(default)]
+    pub next: bool,
+}
+
+/// A CCK named without its value ([`ControlResponse::CckState`]).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct CckRef {
+    pub cck_id: u16,
+    pub check: String,
 }
 
 /// One SCK on the wire ([`ControlCommand::SckKeys`]): number 1..=32, version, 20 hex digits,
@@ -327,7 +363,9 @@ impl ControlCommand {
             | Self::AuthVectors { .. }
             | Self::SckKeys { .. }
             | Self::SckSealed { .. }
-            | Self::SckActivate { .. } => TetraEntity::Cmce,
+            | Self::SckActivate { .. }
+            | Self::CckKeys { .. }
+            | Self::CckActivate { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -503,6 +541,30 @@ pub enum ControlResponse {
         issi: u32,
         sckn: u8,
         vn: u16,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
+    /// Fleet Control (`cck-v1`): the CCK the cell of location area `la` runs with (`active`;
+    /// from the config until the server's key is in use), the server keys it holds and a planned
+    /// change.
+    CckState {
+        la: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active: Option<CckRef>,
+        #[serde(default)]
+        from_config: bool,
+        #[serde(default)]
+        keys: Vec<CckRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switch_at_ms: Option<u64>,
+    },
+
+    /// Fleet Control (`cck-v1`): a radio's U-OTAR CCK RESULT for one CCK (`ok`: accepted).
+    CckResult {
+        issi: u32,
+        cck_id: u16,
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,

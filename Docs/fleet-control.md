@@ -349,7 +349,45 @@ acted on with `key_source = "server"`):
   switched by the server when it comes back; a station still on its own config key
   only switches when the server activates the current key for it.
 
-**Back to local keys** writes the server's active SCK (key, `sckn`, `sck_vn`) into
+### Common cipher keys from the server (`cck-v1`, phase 8c)
+
+On a class 3 cell with server keys the CCK comes from the server too (EN 300 392-7
+clause 4.2.3): per location area (or one for every LA, `la` null) the current key and,
+before a change, the next one. The station gets them in clear over TLS; a CCK is sealed
+for a radio with that radio's DCK (TA31, clause 4.5.1.1), which only the station holds,
+so the station does the OTAR itself:
+
+```json
+{"CckKeys": {"keys": [{"la": 2, "cck_id": 42, "key": "<20 hex>"}, {"la": 2, "cck_id": 43, "key": "<20 hex>", "next": true}]}}
+{"CckActivate": {"la": 2, "cck_id": 43, "at_ms": 1763049600000, "overlap_s": 1800}}
+{"CckState": {"la": 2, "active": {"cck_id": 42, "check": "<16 hex>"}, "from_config": true, "keys": [...]}}   // station
+{"CckResult": {"issi": 2320972, "cck_id": 43, "ok": true}}                                             // station
+```
+
+- `CckKeys`: kept in `<config>.auth-sets`; only the keys of the cell's LA (or `la`
+  null) are used. Answered with `CckState` (the server learns the station's LA from
+  it). At start the station runs on the server CCK that was in use when it stopped,
+  else on `[security.aie] cck` / `cck_id`.
+- The next CCK goes to every radio with an active class 3 session as a D-OTAR CCK
+  PROVIDE with key type "future" (Table A.42, "the SwMI can deliver to all registered
+  MSs a CCK for future use", clause 4.5.1), at most every 10 min per radio; the
+  U-OTAR CCK RESULT goes back as `CckResult`. Rejecting a future key does not touch the
+  radio's session.
+- `CckActivate`: like the SCK, the time becomes the start of the next multiframe; the
+  station sends D-CK CHANGE DEMAND (key change type CCK, absolute IV) to its class 3
+  radios and switches on that slot (SYSINFO CCK-id, MAC-RESOURCE CCK-id bit and ESIs;
+  clause 4.5.5.2). A change for another LA is ignored.
+- **Overlap**: the uplink has no key identifier (clause 6.5.2). After the change the
+  station decrypts an uplink ESI with the new CCK; if that names no radio with a class 3
+  session but the old CCK does, it takes the old one, for `overlap_s` seconds (at least
+  the two slots of clause 4.5.5.2). A radio still on the old CCK can so still ask for the
+  new one (U-OTAR CCK DEMAND). A radio that accepted a server CCK here before but not the
+  one in use now is sent the current one.
+
+**Back to local keys** on a class 3 cell writes the server's CCK in use (`cck`,
+`cck_id`) into `[security.aie]`.
+
+**Back to local keys** on a class 2 cell writes the server's active SCK (key, `sckn`, `sck_vn`) into
 `[security.aie]`, so class 2 keeps running with the key the radios hold.
 
 ## HTTP API (dashboard)

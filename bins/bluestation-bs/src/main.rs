@@ -633,8 +633,10 @@ fn main() {
     };
     // Multi-cell: every cell advertises its siblings as neighbours for reselection.
     stack_cfg.add_sibling_neighbours();
-    // Key management (`sck-v1`): a class 2 cell keeps the server's SCK it was running with.
-    let server_sck_note = tetra_entities::net_control::auc::apply_server_sck(&args.config, &mut stack_cfg);
+    // Key management (`sck-v1` / `cck-v1`): a class 2 cell keeps the server's SCK, a class 3 cell
+    // the server's CCK it was running with.
+    let server_sck_note = tetra_entities::net_control::auc::apply_server_sck(&args.config, &mut stack_cfg)
+        .or_else(|| tetra_entities::net_control::auc::apply_server_cck(&args.config, &mut stack_cfg));
 
     // Build immutable, cheaply clonable SharedConfig and build the base station stack. The
     // primary config was already parsed+validated by load_config_with_fallback, so this should

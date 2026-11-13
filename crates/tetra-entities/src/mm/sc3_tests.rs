@@ -1181,3 +1181,200 @@ fn sck_server_simulation_10_stations_25_radios() {
         assert!(matches!(&out[..], [ControlResponse::SckState { active: Some(a), .. }] if a.sckn == 2 && a.vn == 6));
     }
 }
+
+// ───────────── server CCKs (`cck-v1`, Fleet Control phase 8c) ─────────────
+
+use crate::net_control::commands::CckWire;
+
+fn cck_wire(cck_id: u16, key: [u8; 10], next: bool) -> CckWire {
+    CckWire { la: None, cck_id, key: crate::net_control::auc::hex(&key), next }
+}
+
+/// A class 3 station with server keys and one radio with an active class 3 session.
+fn sc3_server_station_with(issis: &[u32]) -> (MmBs, Handle) {
+    let (mut mm, auc) = server_station(issis, &[]);
+    for (n, &issi) in issis.iter().enumerate() {
+        mm.client_mgr.try_register_client(issi, true).unwrap();
+        let mut st = mm.config.state_write();
+        st.subscribers.register(issi);
+        st.subscribers.set_encrypted(issi, true);
+        st.sc3_dcks.insert(issi, CipherKey([0x60 + n as u8; 10]));
+        drop(st);
+        mm.sc3_phase(issi, "active");
+    }
+    (mm, auc)
+}
+
+fn cck_provides(q: &mut MessageQueue) -> Vec<(u32, CckInformation)> {
+    sent_pdus(q)
+        .into_iter()
+        .filter_map(|(to, mut sdu)| {
+            (sdu.peek_bits(4) == Some(tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl::DOtar.into_raw()))
+                .then(|| {
+                    // D-OTAR CCK PROVIDE: PDU type + OTAR sub-type, CCK provision flag, CCK information.
+                    sdu.read_field(8, "header").ok()?;
+                    (sdu.read_field(1, "present").ok()? == 1).then(|| CckInformation::from_bitbuf(&mut sdu).ok()).flatten().map(|c| (to, c))
+                })
+                .flatten()
+        })
+        .collect()
+}
+
+#[test]
+fn cck_server_next_key_goes_to_class3_radios_as_future_and_their_result_goes_back() {
+    let (mut mm, auc) = sc3_server_station_with(&[MS]);
+    let next = [0x44; 10];
+    auc.lock().unwrap().set_cck_keys(&[cck_wire(42, CCK, false), cck_wire(43, next, true)]);
+    let mut q = MessageQueue::new();
+    mm.sync_cck(&mut q, TdmaTime::default());
+    let sent = cck_provides(&mut q);
+    assert_eq!(sent.len(), 1);
+    let (to, info) = &sent[0];
+    assert_eq!(*to, MS);
+    assert!(info.future, "key type flag future (Table A.42)");
+    assert_eq!(info.cck_id, 43);
+    assert_eq!(ta32(&info.sealed, 43, &[0x60; 10]), Ok(next), "sealed with the radio's DCK (TA31, clause 4.5.1.1)");
+    // The radio accepts: the server hears of it, and the key is not offered again.
+    mm.rx_u_otar(&mut q, otar_message(OtarSubType::CckResultReject, &[(0, 3), (0, 1)]));
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::CckResult { issi: MS, cck_id: 43, ok: true, .. }]), "{out:?}");
+    assert!(mm.config.state_read().sc3_dcks.contains_key(&MS), "a future-key answer never touches the session");
+    mm.cck_offered.clear();
+    mm.sync_cck(&mut q, TdmaTime::default());
+    assert!(cck_provides(&mut q).is_empty());
+}
+
+#[test]
+fn cck_server_rejected_future_key_keeps_the_radio_registered() {
+    let (mut mm, auc) = sc3_server_station_with(&[MS]);
+    auc.lock().unwrap().set_cck_keys(&[cck_wire(42, CCK, false), cck_wire(43, [0x44; 10], true)]);
+    let mut q = MessageQueue::new();
+    mm.sync_cck(&mut q, TdmaTime::default());
+    mm.rx_u_otar(&mut q, otar_message(OtarSubType::CckResultReject, &[(1, 3), (0, 1)]));
+    assert!(mm.config.state_read().subscribers.is_registered(MS));
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::CckResult { cck_id: 43, ok: false, .. }]), "{out:?}");
+}
+
+#[test]
+fn cck_server_change_is_announced_switched_and_the_old_key_kept_for_the_overlap() {
+    let (mut mm, auc) = sc3_server_station_with(&[MS]);
+    let next = [0x44; 10];
+    {
+        let mut s = auc.lock().unwrap();
+        s.set_cck_keys(&[cck_wire(42, CCK, false), cck_wire(43, next, true)]);
+        assert_eq!(s.cck_activate(mm.config.config().cell.location_area, None, 43, super::now_ms() + 10_000, 600), Ok(true));
+        assert_eq!(s.cck_activate(mm.config.config().cell.location_area, Some(9999), 43, 0, 0), Ok(false), "another LA's change");
+    }
+    let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
+    let mut q = MessageQueue::new();
+    mm.cck_offered.insert(MS, Instant::now()); // no delivery in this test
+    mm.sync_cck(&mut q, ts);
+    let (at, key) = mm.config.state_read().cck_run.as_ref().and_then(|r| r.switch.clone()).expect("planned");
+    assert_eq!((key.vn, key.key.0), (43, next));
+    let mut pdus = sent_pdus(&mut q);
+    assert_eq!(pdus.len(), 1);
+    let d = DCkChangeDemand::from_bitbuf(&mut pdus[0].1).unwrap();
+    assert_eq!(d.key, KeyChange::Cck(43));
+    assert_eq!(d.time, ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h });
+    assert_eq!(mm.current_cck().map(|c| c.0), Some(42), "the old key until the commit");
+    mm.sync_cck(&mut q, at.add_timeslots(super::SCK_COMMIT_AFTER_SLOTS + 1));
+    assert_eq!(mm.current_cck().map(|c| (c.0, c.1.0)), Some((43, next)));
+    let (old, until) = mm.config.state_read().cck_overlap.clone().expect("overlap");
+    assert_eq!((old.vn, old.key.0), (42, CCK));
+    assert!(until.diff(at) >= 600 * 18 * 1000 / 255 - 1, "600 s of overlap from the switch");
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::CckState { active: Some(a), from_config: false, .. }] if a.cck_id == 43), "{out:?}");
+    // After the overlap the old key goes.
+    mm.sync_cck(&mut q, until.add_timeslots(1));
+    assert!(mm.config.state_read().cck_overlap.is_none());
+}
+
+#[test]
+fn cck_server_radio_that_missed_the_change_gets_the_current_key() {
+    let (mut mm, auc) = sc3_server_station_with(&[MS]);
+    let new = [0x44; 10];
+    auc.lock().unwrap().set_cck_keys(&[cck_wire(43, new, false)]);
+    mm.config.state_write().cck_run = Some(tetra_config::bluestation::SckRun { active: Some(tetra_config::bluestation::SckKey { sckn: 0, vn: 43, key: CipherKey(new) }), switch: None });
+    auc.lock().unwrap().commit_cck(mm.config.config().cell.location_area, &tetra_config::bluestation::SckKey { sckn: 0, vn: 43, key: CipherKey(new) }, None);
+    mm.cck_held.entry(MS).or_default().insert(42); // it held the old one only
+    let mut q = MessageQueue::new();
+    mm.sync_cck(&mut q, TdmaTime::default());
+    let sent = cck_provides(&mut q);
+    assert_eq!(sent.len(), 1);
+    assert!(!sent[0].1.future);
+    assert_eq!(ta32(&sent[0].1.sealed, 43, &[0x60; 10]), Ok(new));
+}
+
+#[test]
+fn cck_server_keys_are_ignored_on_a_station_with_local_keys() {
+    let auc: Handle = std::sync::Arc::new(std::sync::Mutex::new(AucStore::default()));
+    auc.lock().unwrap().set_cck_keys(&[cck_wire(43, [0x44; 10], false)]);
+    let mut mm = station().with_auc(auc);
+    let mut q = MessageQueue::new();
+    mm.sync_cck(&mut q, TdmaTime::default());
+    assert!(mm.config.state_read().cck_run.is_none() && q.pop_front().is_none());
+}
+
+/// Simulation (10 stations, 25 radios) of a CCK change run by the server: every station gets the
+/// set as JSON, hands the next CCK to its class 3 radios sealed with each radio's DCK, the radios
+/// confirm, one activation switches every station on its own timebase, and each reports it.
+#[test]
+fn cck_server_simulation_10_stations_25_radios() {
+    use crate::net_control::codec::ControlCodecJson;
+    use crate::net_control::commands::ControlCommand;
+    const STATIONS: usize = 10;
+    const RADIOS: u32 = 25;
+    let next = [0x45; 10];
+    let set_json = serde_json::json!({"CckKeys": {"keys": [
+        {"cck_id": 42, "key": crate::net_control::auc::hex(&CCK)},
+        {"cck_id": 43, "key": crate::net_control::auc::hex(&next), "next": true},
+    ]}});
+    let issis: Vec<u32> = (0..RADIOS).map(|i| 2_340_000 + i).collect();
+    let mut stations: Vec<(MmBs, Handle, TdmaTime)> = (0..STATIONS)
+        .map(|s| {
+            let mine: Vec<u32> = issis.iter().copied().enumerate().filter(|(n, _)| n % STATIONS == s).map(|(_, i)| i).collect();
+            let (mm, auc) = sc3_server_station_with(&mine);
+            let ControlCommand::CckKeys { keys } = ControlCodecJson.decode_command(set_json.to_string().as_bytes()).unwrap() else { panic!() };
+            auc.lock().unwrap().set_cck_keys(&keys);
+            (mm, auc, TdmaTime::from_int(s as i32 * 6151 + 29))
+        })
+        .collect();
+    let mut confirmed = 0;
+    for (mm, auc, ts) in stations.iter_mut() {
+        let mut q = MessageQueue::new();
+        mm.sync_cck(&mut q, *ts);
+        let sent = cck_provides(&mut q);
+        for (issi, info) in sent {
+            let dck = mm.config.state_read().sc3_dcks[&issi].0;
+            assert_eq!(ta32(&info.sealed, info.cck_id, &dck), Ok(next));
+            let mut msg = otar_message(OtarSubType::CckResultReject, &[(0, 3), (0, 1)]);
+            if let SapMsgInner::LmmMleUnitdataInd(p) = &mut msg.msg {
+                p.received_address = TetraAddress::issi(issi);
+            }
+            mm.rx_u_otar(&mut q, msg);
+        }
+        confirmed += auc.lock().unwrap().drain_outbox().iter().filter(|r| matches!(r, ControlResponse::CckResult { cck_id: 43, ok: true, .. })).count();
+    }
+    assert_eq!(confirmed, RADIOS as usize);
+    let at_ms = super::now_ms() + 20_000;
+    let activate = serde_json::json!({"CckActivate": {"cck_id": 43, "at_ms": at_ms, "overlap_s": 1800}}).to_string();
+    let mut announced = 0;
+    for (mm, auc, ts) in stations.iter_mut() {
+        let ControlCommand::CckActivate { la, cck_id, at_ms, overlap_s } = ControlCodecJson.decode_command(activate.as_bytes()).unwrap() else { panic!() };
+        assert_eq!(auc.lock().unwrap().cck_activate(mm.config.config().cell.location_area, la, cck_id, at_ms, overlap_s), Ok(true));
+        let mut q = MessageQueue::new();
+        mm.sync_cck(&mut q, *ts);
+        announced += sent_pdus(&mut q).len();
+        let (at, _) = mm.config.state_read().cck_run.as_ref().and_then(|r| r.switch.clone()).unwrap();
+        *ts = at;
+    }
+    assert_eq!(announced, RADIOS as usize);
+    for (mm, auc, ts) in stations.iter_mut() {
+        let mut q = MessageQueue::new();
+        mm.sync_cck(&mut q, ts.add_timeslots(super::SCK_COMMIT_AFTER_SLOTS + 1));
+        assert_eq!(mm.current_cck().map(|c| c.0), Some(43));
+        let out = auc.lock().unwrap().drain_outbox();
+        assert!(out.iter().any(|r| matches!(r, ControlResponse::CckState { active: Some(a), .. } if a.cck_id == 43)), "{out:?}");
+    }
+}

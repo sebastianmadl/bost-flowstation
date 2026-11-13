@@ -691,6 +691,12 @@ pub struct StackState {
     /// Class 2 SCK from the Brew server (Fleet Control key management). `None`: the cell uses the
     /// SCK of `[security.aie]`.
     pub sck_run: Option<SckRun>,
+    /// Class 3 CCK from the Brew server (Fleet Control key management), as an `SckKey` with
+    /// `sckn` 0 and the CCK-id as `vn`. `None`: the cell uses the CCK of `[security.aie]`.
+    pub cck_run: Option<SckRun>,
+    /// After a CCK change: the old CCK, still tried for uplink ESIs that do not resolve with the
+    /// new one until this slot (the overlap; EN 300 392-7 clause 4.5.5.2 requires two slots).
+    pub cck_overlap: Option<(SckKey, tetra_core::TdmaTime)>,
     /// Startup CLI guard, not persisted by dashboard edits.
     pub security_class3_required: bool,
     /// Queue of live SDS messages injected at runtime via the dashboard.
@@ -943,6 +949,8 @@ impl Default for StackState {
             subscribers: SubscriberRegistry::new(),
             sc3_dcks: HashMap::new(),
             sck_run: None,
+            cck_run: None,
+            cck_overlap: None,
             sc3_status: HashMap::new(),
             security_class3_required: false,
             live_sds_queue: VecDeque::new(),

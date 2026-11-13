@@ -1087,7 +1087,19 @@ impl UmacBs {
             tracing::warn!("UMAC: encrypted uplink PDU from ESI {} but this cell runs no encryption; dropping", addr.ssi);
             return None;
         };
-        Some(TetraAddress { ssi: cipher.ssi_at(self.dltime.add_timeslots(-2), addr.ssi), ..addr })
+        let t = self.dltime.add_timeslots(-2);
+        let ssi = cipher.ssi_at(t, addr.ssi);
+        // Class 3 CCK overlap: a radio that still runs the old CCK (no key id on the uplink,
+        // EN 300 392-7 clause 6.5.2) is recognised by its ESI under the old CCK.
+        if addr.ssi_type != SsiType::Gssi
+            && let Some(old) = cipher.ssi_old_cck_at(t, addr.ssi)
+        {
+            let st = self.config.state_read();
+            if !st.sc3_dcks.contains_key(&ssi) && st.sc3_dcks.contains_key(&old) {
+                return Some(TetraAddress { ssi: old, ..addr });
+            }
+        }
+        Some(TetraAddress { ssi, ..addr })
     }
 
     /// Whether a downlink PDU to `addr` is encrypted: non-zero marks it for the fragger, which
@@ -2740,4 +2752,45 @@ fn pack_ul_acelp_bits(bits: &[u8]) -> Option<Vec<u8>> {
         out.push(byte);
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod cck_overlap_tests {
+    use super::*;
+    use tetra_config::bluestation::sec_security::{CfgAie, CfgClass3, CipherKey};
+    use tetra_config::bluestation::{SckKey, SckRun};
+
+    /// Fleet Control phase 8c: after a CCK change a radio that still runs the old CCK is found by
+    /// its ESI under the old CCK while the overlap lasts (no key id on the uplink, EN 300 392-7
+    /// clause 6.5.2), but only when the new CCK does not already name a radio with a session.
+    #[test]
+    fn uplink_esi_under_the_old_cck_resolves_to_a_radio_during_the_overlap() {
+        let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        cfg.security.aie = Some(CfgAie {
+            enabled: true,
+            ksg: 2,
+            sck: CipherKey([0; 10]),
+            sckn: 1,
+            sck_vn: 0,
+            clear_groups: vec![],
+            class3: Some(CfgClass3 { cck: CipherKey([0x33; 10]), cck_id: 42 }),
+        });
+        let shared = SharedConfig::from_parts(cfg, None);
+        let mut umac = UmacBs::new(shared.clone(), None);
+        umac.dltime = TdmaTime { t: 1, f: 5, m: 20, h: 3 };
+        let old = SckKey { sckn: 0, vn: 42, key: CipherKey([0x33; 10]) };
+        let new = SckKey { sckn: 0, vn: 43, key: CipherKey([0x44; 10]) };
+        let ul_t = umac.dltime.add_timeslots(-2);
+        let old_esi = umac.cipher.as_ref().unwrap().esi_at(ul_t, 100);
+        shared.state_write().cck_run = Some(SckRun { active: Some(new), switch: None });
+        shared.state_write().sc3_dcks.insert(100, CipherKey([0x11; 10]));
+        let esi = TetraAddress { ssi: old_esi, ssi_type: SsiType::Ssi, ..TetraAddress::issi(0) };
+        // Without an overlap the old ESI maps to some other number.
+        assert_ne!(umac.ul_resolve_esi(esi, true).unwrap().ssi, 100);
+        shared.state_write().cck_overlap = Some((old, umac.dltime.add_timeslots(1000)));
+        assert_eq!(umac.ul_resolve_esi(esi, true).unwrap().ssi, 100);
+        // Not for a radio without a class 3 session.
+        shared.state_write().sc3_dcks.clear();
+        assert_ne!(umac.ul_resolve_esi(esi, true).unwrap().ssi, 100);
+    }
 }

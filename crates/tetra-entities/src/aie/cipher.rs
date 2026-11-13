@@ -140,10 +140,11 @@ impl CellCipher {
 
     /// The SCK in use at `t` (class 3: the CCK).
     fn mat(&self, t: TdmaTime, uplink: bool) -> Arc<KeyMat> {
-        if self.class3 {
-            return self.base.clone();
-        }
-        let Some(run) = self.config.as_ref().and_then(|c| c.state_read().sck_run.clone()) else {
+        let run = self.config.as_ref().and_then(|c| {
+            let st = c.state_read();
+            if self.class3 { st.cck_run.clone() } else { st.sck_run.clone() }
+        });
+        let Some(run) = run else {
             return self.base.clone();
         };
         if let Some((at, key)) = &run.switch {
@@ -202,6 +203,18 @@ impl CellCipher {
     /// ESI → SSI, for an address received in an encrypted uplink MAC PDU sent at `t`.
     pub fn ssi_at(&self, t: TdmaTime, esi: u32) -> u32 {
         self.mat(t, true).ta61.decrypt(esi)
+    }
+
+    /// Class 3, during the overlap after a CCK change: the SSI of `esi` under the old CCK.
+    pub fn ssi_old_cck_at(&self, t: TdmaTime, esi: u32) -> Option<u32> {
+        if !self.class3 {
+            return None;
+        }
+        let (key, until) = self.config.as_ref()?.state_read().cck_overlap.clone()?;
+        if t.diff(until) >= 0 {
+            return None;
+        }
+        Some(self.mat_for(&key).ta61.decrypt(esi))
     }
 
     /// The key stream segment of timeslot `t` on `carrier`.
@@ -376,6 +389,44 @@ mod sc3_tests {
     use super::*;
     use tetra_config::bluestation::sec_security::CfgClass3;
     use tetra_config::bluestation::{CipherKey, SharedConfig};
+    #[test]
+    fn a_server_cck_change_moves_esi_and_group_keys_and_the_old_cck_resolves_during_the_overlap() {
+        use tetra_config::bluestation::SckRun;
+        let aie = CfgAie {
+            enabled: true,
+            ksg: 2,
+            sck: CipherKey([0; 10]),
+            sckn: 1,
+            sck_vn: 0,
+            class3: Some(CfgClass3 { cck: CipherKey([0x33; 10]), cck_id: 42 }),
+            clear_groups: vec![],
+        };
+        let cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        let shared = SharedConfig::from_parts(cfg, None);
+        let c = CellCipher::new(&aie, &[1521], 7, 3).with_config(shared.clone());
+        let t0 = TdmaTime { t: 1, f: 2, m: 3, h: 4 };
+        let old_esi = c.esi_at(t0, 100);
+        assert_eq!(c.sck_vn_at(t0), 42, "config CCK-id");
+        let old = SckKey { sckn: 0, vn: 42, key: CipherKey([0x33; 10]) };
+        let new = SckKey { sckn: 0, vn: 43, key: CipherKey([0x44; 10]) };
+        let at = t0.add_timeslots(4);
+        shared.state_write().cck_run = Some(SckRun { active: Some(old.clone()), switch: Some((at, new.clone())) });
+        assert_eq!(c.sck_vn_at(at), 43, "SYSINFO CCK-id follows the change (clause 4.5.5.2)");
+        assert_eq!(c.encryption_mode_at(at), 0b11, "odd CCK-id in the MAC-RESOURCE (clause 6.5.1)");
+        let new_esi = c.esi_at(at, 100);
+        assert_ne!(new_esi, old_esi);
+        assert_eq!(c.ssi_at(at.add_timeslots(1), old_esi), 100, "two uplink slots with the old CCK");
+        assert_eq!(c.ssi_at(at.add_timeslots(2), new_esi), 100);
+        let g = TetraAddress::new(900, SsiType::Gssi);
+        assert_ne!(c.kss_for(1521, t0, false, g).unwrap().0, c.kss_for(1521, at, false, g).unwrap().0, "group downlink uses the new CCK");
+        // Overlap: the old CCK still resolves an ESI until its end, then no longer.
+        let until = at.add_timeslots(100);
+        shared.state_write().cck_overlap = Some((old, until));
+        assert_ne!(c.ssi_at(at.add_timeslots(10), old_esi), 100);
+        assert_eq!(c.ssi_old_cck_at(at.add_timeslots(10), old_esi), Some(100));
+        assert_eq!(c.ssi_old_cck_at(until, old_esi), None);
+    }
+
     #[test]
     fn sc3_dck_selection_and_group_cck_are_distinct_and_cell_bound() {
         let aie = CfgAie {

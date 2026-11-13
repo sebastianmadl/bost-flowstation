@@ -169,6 +169,8 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 | ControlCommand::SckKeys { .. }
                 | ControlCommand::SckSealed { .. }
                 | ControlCommand::SckActivate { .. }
+                | ControlCommand::CckKeys { .. }
+                | ControlCommand::CckActivate { .. }
         ) {
             self.auc_command(command);
             return;
@@ -323,6 +325,8 @@ impl<T: NetworkTransport> ControlWorker<T> {
             return;
         }
         let config_key = self.shared.as_ref().and_then(|s| auc::config_sck(&s.config()));
+        let config_cck = self.shared.as_ref().and_then(|s| auc::config_cck(&s.config()));
+        let cell_la = self.shared.as_ref().map_or(0, |s| s.config().cell.location_area);
         let answer = {
             let mut store = self.auc.lock().unwrap_or_else(|e| e.into_inner());
             match &command {
@@ -353,6 +357,22 @@ impl<T: NetworkTransport> ControlWorker<T> {
                     Err(e) => {
                         tracing::warn!("Key management: SCK {} version {} cannot be activated: {}", sckn, vn, e);
                         Some(store.sck_state(config_key.as_ref()))
+                    }
+                },
+                ControlCommand::CckKeys { keys } => {
+                    tracing::info!("Key management: server sent {} CCK(s)", keys.len());
+                    store.set_cck_keys(keys);
+                    Some(store.cck_state(cell_la, config_cck.as_ref()))
+                }
+                ControlCommand::CckActivate { la, cck_id, at_ms, overlap_s } => match store.cck_activate(cell_la, *la, *cck_id, *at_ms, *overlap_s) {
+                    Ok(true) => {
+                        tracing::info!("Key management: CCK {} planned for server time {} (overlap {} s)", cck_id, at_ms, overlap_s);
+                        Some(store.cck_state(cell_la, config_cck.as_ref()))
+                    }
+                    Ok(false) => None,
+                    Err(e) => {
+                        tracing::warn!("Key management: CCK {} cannot be activated: {}", cck_id, e);
+                        Some(store.cck_state(cell_la, config_cck.as_ref()))
                     }
                 },
                 _ => None,
@@ -617,7 +637,7 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string(), "cck-v1".to_string()]), (false, vec![])]);
     }
 
     fn fake_metrics(_: &mut metrics::CpuSampler) -> ControlResponse {
