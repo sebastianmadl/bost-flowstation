@@ -65,7 +65,7 @@ Only on a control connection whose HTTP 101 names `fleet-control`:
 - `StationHello {protocol: 1, version, brew_login, mcc, mnc, fleet_control,
   capabilities}` right after connecting and whenever the switch changes (also
   to off, so the server can drop the station from its list and log it).
-  `capabilities` is `["fleet-v1", "update-v1"]` while the switch is on
+  `capabilities` is e.g. `["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "config-v1", "update-v1", "update-live-v1"]` while the switch is on
   (`update-v1` only while the dashboard runs, because the OTA lives there),
   empty while off. A hello is sent again when `update-v1` appears later.
 - `CommandResult {handle, ok, code, message}` for every Fleet Control command.
@@ -234,6 +234,37 @@ start, in `main`).
 - **`RollbackConfig`**: backup back, restart (`ok`, `not_pending`).
 - Keys (`[security]`) are never part of `config` or `changes`.
 
+## Metrics (`metrics-v1`, phase 7)
+
+While the server offers `fleet-control` and the switch is on, the control
+worker sends a report 5 s after the connect (or after the switch went on) and
+then every 60 s:
+
+```json
+{"FleetMetrics": {"interval_secs": 60, "cpu_pct": 17.4, "cpu_temp_c": 52.1,
+  "cells": [{"cell": 0, "rf": "online", "sdr_temp_c": 44.3},
+            {"cell": 1, "rf": "error", "sdr_temp_c": null, "detail": "SoapySDR: no device found"}],
+  "radios": 3, "calls": 1, "health": "ok"}}
+```
+
+- `cpu_pct`: busy share of all cores between two reports, from `/proc/stat`
+  (idle includes iowait), one decimal; `null` on the very first sample.
+- `cpu_temp_c`: the first thermal zone whose type names the CPU (`cpu-thermal`
+  on a Raspberry Pi, `x86_pkg_temp`), else a hwmon CPU driver (`coretemp`,
+  `k10temp`, `cpu_thermal`, `zenpower`), else the first thermal zone; `null`
+  without a sensor.
+- `cells`: one entry per cell (`rf_status`): `rf` is `online`, `off` (no SDR
+  configured), `error` (the SDR could not be opened, `detail` says why) or
+  `starting`; `sdr_temp_c` is the last `SdrHealth` temperature of that cell
+  (the telemetry fan-out feeds it, read every 10 s by the PHY), `null` when the
+  SDR has no sensor or did not report for 2 min.
+- `radios`: registered radios (health registry), `calls`: calls in progress
+  (dashboard), `health`: overall stack health (`ok`, `degraded`, `critical`).
+
+No answer is expected. The server uses it for its graphs and alarms
+(brew-server `docs/Fleet-Control.md` section 12); it also pings the station
+with `FleetPing` for its ping graph.
+
 ## HTTP API (dashboard)
 
 | Route | Body | Answer |
@@ -252,6 +283,9 @@ start, in `main`).
 - `crates/tetra-entities/src/net_dashboard/ota_remote.rs`: remote update (check,
   start, progress) on the dashboard's OTA (`server.rs` `run_update`,
   `update_check_json`, `UpdateState.stage`).
+- `crates/tetra-entities/src/net_control/metrics.rs`: `FleetMetrics` (CPU load,
+  temperatures, RF state), sent by `worker.rs` `report_metrics`; SDR
+  temperatures are fed from the telemetry fan-out in `bins/bluestation-bs`.
 - `crates/tetra-entities/src/net_control/fleet_config.rs`: config read, change,
   backup, watchdog, confirm / rollback (`config-v1`).
 - `crates/tetra-config/src/bluestation/sec_control.rs` (`fleet_control`),

@@ -10,6 +10,7 @@ pub mod codec;
 pub mod commands;
 pub mod fleet;
 pub mod fleet_config;
+pub mod metrics;
 pub mod worker;
 
 use std::time::Duration;

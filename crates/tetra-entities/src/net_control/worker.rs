@@ -17,7 +17,7 @@ use crate::{
         channel::CommandDispatcher,
         codec::ControlCodecJson,
         commands::{ControlCommand, ControlResponse},
-        fleet, fleet_config,
+        fleet, fleet_config, metrics,
     },
     network::transports::NetworkTransport,
 };
@@ -49,6 +49,13 @@ pub struct ControlWorker<T: NetworkTransport> {
     /// Config hash and "waits for confirmation" as told in the last hello (`config-v1`).
     hello_config: (Option<String>, bool),
     last_config_check: Option<Instant>,
+    /// CPU load between two metrics reports (`metrics-v1`).
+    cpu: metrics::CpuSampler,
+    /// When the next metrics report is due (`None`: not reporting, the switch is off or the server
+    /// does not offer Fleet Control).
+    next_metrics: Option<Instant>,
+    /// Source of the reports (replaced in tests).
+    metrics_source: fn(&mut metrics::CpuSampler) -> ControlResponse,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
@@ -68,6 +75,9 @@ impl<T: NetworkTransport> ControlWorker<T> {
             last_progress: None,
             hello_config: (None, false),
             last_config_check: None,
+            cpu: metrics::CpuSampler::default(),
+            next_metrics: None,
+            metrics_source: metrics::collect,
         }
     }
 
@@ -88,6 +98,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 self.announce_switch_change();
                 self.send_async_answers();
                 self.report_update_progress();
+                self.report_metrics(Instant::now());
             } else {
                 // Not connected — sleep briefly to avoid busy-spinning
                 std::thread::sleep(POLL_TIMEOUT);
@@ -229,6 +240,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
         if !connected {
             self.hello_announced = None;
             self.last_progress = None;
+            self.next_metrics = None;
         }
         if let Some(shared) = &self.shared {
             let mut state = shared.state_write();
@@ -280,6 +292,27 @@ impl<T: NetworkTransport> ControlWorker<T> {
         while let Ok(response) = self.async_rx.try_recv() {
             self.send_response(&response);
         }
+    }
+
+    /// Send the metrics report every minute to a server offering Fleet Control while the switch is
+    /// on (`metrics-v1`). The first one comes a few seconds after the connect or the switch-on.
+    fn report_metrics(&mut self, now: Instant) {
+        if !self.connected || !self.fleet_offered || !self.fleet_enabled() {
+            self.next_metrics = None;
+            return;
+        }
+        let Some(due) = self.next_metrics else {
+            // Start the CPU sample now, so the first report already has a load value.
+            self.cpu.sample();
+            self.next_metrics = Some(now + metrics::FIRST_METRICS_DELAY);
+            return;
+        };
+        if now < due {
+            return;
+        }
+        self.next_metrics = Some(now + metrics::METRICS_INTERVAL);
+        let report = (self.metrics_source)(&mut self.cpu);
+        self.send_response(&report);
     }
 
     /// Report the OTA progress to a server offering Fleet Control while the switch is on.
@@ -496,7 +529,52 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string()]), (false, vec![])]);
+    }
+
+    fn fake_metrics(_: &mut metrics::CpuSampler) -> ControlResponse {
+        metrics::report(Some(7.5), Some(50.0), vec![], 2, 0, "ok")
+    }
+
+    fn metrics_sent(worker: &ControlWorker<MockTransport>) -> usize {
+        sent(worker).into_iter().filter(|r| matches!(r, ControlResponse::FleetMetrics { .. })).count()
+    }
+
+    #[test]
+    fn metrics_every_minute_only_with_the_switch_and_a_fleet_server() {
+        // A server without Fleet Control never gets metrics.
+        let mut old = ControlWorker::new(HashMap::new(), MockTransport::new().with_brew_extensions(&["bts-info"])).with_shared(station(true));
+        old.metrics_source = fake_metrics;
+        old.try_connect();
+        let t0 = Instant::now();
+        for s in [0, 10, 70, 200] {
+            old.report_metrics(t0 + Duration::from_secs(s));
+        }
+        assert_eq!(metrics_sent(&old), 0);
+
+        let shared = station(false);
+        let mut worker =
+            ControlWorker::new(HashMap::new(), MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL])).with_shared(shared.clone());
+        worker.metrics_source = fake_metrics;
+        worker.try_connect();
+        worker.report_metrics(t0);
+        worker.report_metrics(t0 + Duration::from_secs(10));
+        assert_eq!(metrics_sent(&worker), 0, "switch off: no metrics");
+        shared.state_write().fleet_control.enabled = true;
+        worker.report_metrics(t0 + Duration::from_secs(20)); // starts the clock
+        worker.report_metrics(t0 + Duration::from_secs(24));
+        assert_eq!(metrics_sent(&worker), 0);
+        worker.report_metrics(t0 + Duration::from_secs(25)); // first report 5 s after the switch-on
+        assert_eq!(metrics_sent(&worker), 1);
+        worker.report_metrics(t0 + Duration::from_secs(60));
+        assert_eq!(metrics_sent(&worker), 1);
+        worker.report_metrics(t0 + Duration::from_secs(85)); // then every 60 s
+        assert_eq!(metrics_sent(&worker), 2);
+        let last = sent(&worker).into_iter().rev().find(|r| matches!(r, ControlResponse::FleetMetrics { .. })).unwrap();
+        assert!(matches!(last, ControlResponse::FleetMetrics { interval_secs: 60, radios: 2, .. }));
+        shared.state_write().fleet_control.enabled = false;
+        worker.report_metrics(t0 + Duration::from_secs(200));
+        assert_eq!(metrics_sent(&worker), 2, "switch off again: no more metrics");
     }
 
     #[test]

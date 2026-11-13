@@ -352,4 +352,37 @@ pub enum ControlResponse {
         /// Seconds since the run started.
         elapsed_secs: u64,
     },
+
+    /// Fleet Control (`metrics-v1`): load and temperatures, sent every `interval_secs` while the
+    /// server offers Fleet Control and the switch is on (graphs and alarms on the server).
+    FleetMetrics {
+        /// Seconds between two reports.
+        interval_secs: u32,
+        /// CPU load in percent, averaged since the previous report (`None`: not readable yet).
+        cpu_pct: Option<f32>,
+        /// CPU temperature in °C, when the host has a sensor.
+        cpu_temp_c: Option<f32>,
+        /// One entry per cell, primary first.
+        cells: Vec<CellMetrics>,
+        /// Registered radios.
+        radios: u32,
+        /// Calls in progress.
+        calls: u32,
+        /// Stack health: `ok`, `degraded` or `critical`.
+        health: String,
+    },
+}
+
+/// One cell in [`ControlResponse::FleetMetrics`].
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Serialize, Deserialize)]
+pub struct CellMetrics {
+    pub cell: u8,
+    /// RF state: `online`, `off` (no SDR configured), `error` (the SDR could not be opened),
+    /// `starting`.
+    pub rf: String,
+    /// SDR temperature in °C, when the SDR has a sensor.
+    pub sdr_temp_c: Option<f32>,
+    /// Error text while `rf` is `error`, else empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }

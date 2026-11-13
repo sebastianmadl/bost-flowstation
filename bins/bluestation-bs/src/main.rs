@@ -977,6 +977,11 @@ fn main() {
                                     TelemetryEvent::MsGroupAttach { issi, gssis } => radio_directory::attach_groups(*issi, gssis),
                                     TelemetryEvent::MsGroupDetach { issi, gssis } => radio_directory::detach_groups(*issi, gssis),
                                     TelemetryEvent::SdsLog { .. } => health_registry().note_sds(),
+                                    // SDR temperature per cell for the Fleet Control metrics (`metrics-v1`).
+                                    TelemetryEvent::SdrHealth { temperature_c, .. } => tetra_entities::net_control::metrics::note_sdr_temp(0, *temperature_c),
+                                    TelemetryEvent::CellRf { cell, event: tetra_entities::net_telemetry::events::CellRfEvent::SdrHealth { temperature_c, .. } } => {
+                                        tetra_entities::net_control::metrics::note_sdr_temp(*cell, *temperature_c)
+                                    }
                                     _ => {}
                                 }
                                 // Feed decoded TETRA LIP positions (SDS protocol-id 10, inbound from
