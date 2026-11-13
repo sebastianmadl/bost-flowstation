@@ -319,6 +319,12 @@ pub fn config_json(config: &str, shared: Option<&SharedConfig>) -> Result<JsonVa
         "issi_whitelist": sec.and_then(|s| s.get("issi_whitelist")).map(|l| serde_json::to_value(l).unwrap_or(JsonValue::Null)).unwrap_or(json!([])),
         "whitelist_mode": sec.and_then(|s| s.get("whitelist_mode")).and_then(|m| m.as_str()).unwrap_or("auto"),
     });
+    // Key management (`keys-v1`): where authentication keys come from, and how many K the config
+    // holds (never the keys).
+    v["keys"] = json!({
+        "source": sec.and_then(|s| s.get("key_source")).and_then(|m| m.as_str()).unwrap_or("local"),
+        "local_keys": sec.and_then(|s| s.get("subscribers")).and_then(|l| l.as_array()).map_or(0, |l| l.len()),
+    });
     v["net_info"] = json!({
         "mcc": table.get("net_info").and_then(|n| n.get("mcc")).and_then(|x| x.as_integer()),
         "mnc": table.get("net_info").and_then(|n| n.get("mnc")).and_then(|x| x.as_integer()),
@@ -348,7 +354,7 @@ fn carrier_locked(table: &Table) -> Option<&'static str> {
 const ROAMING_KEYS: &[&str] =
     &["reselect", "rxlev_access_min_dbm", "migration", "presence_check_secs", "multi_network_enabled", "networks", "telemetry", "command", "cells"];
 /// Keys only Fleet Control adds.
-const FLEET_KEYS: &[&str] = &["cells_add", "cells_remove", "brew", "ota", "net_info", "raw"];
+const FLEET_KEYS: &[&str] = &["cells_add", "cells_remove", "brew", "ota", "net_info", "raw", "keys"];
 
 /// Apply a `SetConfig.changes` object to the config text; returns the new text, checked like a
 /// local save. Every key is optional:
@@ -363,6 +369,10 @@ const FLEET_KEYS: &[&str] = &["cells_add", "cells_remove", "brew", "ota", "net_i
 ///   the links are set per network);
 /// - `net_info: {mcc, mnc}` (classic config only);
 /// - `ota: {channel, repo?, branch?}` (`[dashboard] ota_channel` / `ota_repo` / `ota_branch`);
+/// - `keys: {source, drop_local_keys?}` (`keys-v1`): `[security] key_source`, `local` or
+///   `server`. `server` removes the K list `[[security.subscribers]]` (the server then holds K,
+///   EN 300 392-7 clause 4.1.1); while the list is not empty that needs `drop_local_keys: true`,
+///   so no K is lost by mistake (export them on the station first);
 /// - `raw: [{path: [key | index, ..], value?, remove?}]`: single values of the config file (the
 ///   server's config editor and the Home Mode Display / ISSI whitelist cards send only what
 ///   changed), applied last. Keys and passwords are refused here.
@@ -440,6 +450,12 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
         text = ota_channel::ota_source_text(&text, channel, o.get("repo").and_then(|v| v.as_str()), o.get("branch").and_then(|v| v.as_str()))?;
     }
 
+    if let Some(k) = obj.get("keys").filter(|k| !k.is_null()) {
+        let mut table: Table = toml::from_str(&text).map_err(|e| format!("config does not parse: {e}"))?;
+        apply_key_source(&mut table, k)?;
+        text = toml::to_string(&table).map_err(|e| e.to_string())?;
+    }
+
     if let Some(list) = obj.get("raw").filter(|r| !r.is_null()) {
         let mut table: Table = toml::from_str(&text).map_err(|e| format!("config does not parse: {e}"))?;
         apply_raw(&mut table, list)?;
@@ -448,6 +464,26 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
 
     cells::validated(&text)?;
     Ok(text)
+}
+
+/// `keys: {source, drop_local_keys?}` (see [`apply_changes`]).
+fn apply_key_source(table: &mut Table, k: &JsonValue) -> Result<(), String> {
+    let source = k.get("source").and_then(|v| v.as_str()).ok_or("keys.source is required")?;
+    let source = tetra_config::bluestation::KeySource::parse(source).ok_or(format!("keys.source: local or server, not {source:?}"))?;
+    let sec = roaming::table_mut(table, "security")?;
+    if source == tetra_config::bluestation::KeySource::Server {
+        let local = sec.get("subscribers").and_then(|l| l.as_array()).map_or(0, |l| l.len());
+        if local > 0 && !k.get("drop_local_keys").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Err(format!(
+                "keys.source: the station holds {local} authentication keys; export them on the station and import them on the server, then switch with drop_local_keys"
+            ));
+        }
+        sec.remove("subscribers");
+        sec.insert("key_source".into(), TomlValue::String("server".into()));
+    } else {
+        sec.remove("key_source");
+    }
+    Ok(())
 }
 
 /// One step of a `raw` path: a table key or an array index.
@@ -900,6 +936,20 @@ fleet_control = true
             assert!(apply_changes(&base, &bad).is_err(), "{bad}");
         }
         assert!(apply_changes(&base, &json!({"raw": [{"path": ["cell_info", "colour_code"], "value": "red"}]})).is_err(), "the result is validated");
+    }
+
+    #[test]
+    fn key_source_switch_keeps_no_local_k_by_mistake() {
+        let base = format!("{BASE}\n[security]\nauthentication = \"optional\"\n\n[[security.subscribers]]\nissi = 100\nk = \"00112233445566778899aabbccddeeff\"\n");
+        let err = apply_changes(&base, &json!({"keys": {"source": "server"}})).unwrap_err();
+        assert!(err.contains("1 authentication keys"), "{err}");
+        let text = apply_changes(&base, &json!({"keys": {"source": "server", "drop_local_keys": true}})).unwrap();
+        let t: Table = toml::from_str(&text).unwrap();
+        assert_eq!(t["security"]["key_source"].as_str(), Some("server"));
+        assert!(!t["security"].as_table().unwrap().contains_key("subscribers"), "K stays at the server only");
+        let back = apply_changes(&text, &json!({"keys": {"source": "local"}})).unwrap();
+        assert!(!back.contains("key_source"));
+        assert!(apply_changes(&base, &json!({"keys": {"source": "auc"}})).is_err());
     }
 
     #[test]

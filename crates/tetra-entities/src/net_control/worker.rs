@@ -17,7 +17,7 @@ use crate::{
         channel::CommandDispatcher,
         codec::ControlCodecJson,
         commands::{ControlCommand, ControlResponse},
-        fleet, fleet_config, metrics,
+        auc, fleet, fleet_config, metrics,
     },
     network::transports::NetworkTransport,
 };
@@ -56,6 +56,8 @@ pub struct ControlWorker<T: NetworkTransport> {
     next_metrics: Option<Instant>,
     /// Source of the reports (replaced in tests).
     metrics_source: fn(&mut metrics::CpuSampler) -> ControlResponse,
+    /// Stock of authentication data sets (`keys-v1`, `key_source = "server"`).
+    auc: auc::Handle,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
@@ -78,12 +80,19 @@ impl<T: NetworkTransport> ControlWorker<T> {
             cpu: metrics::CpuSampler::default(),
             next_metrics: None,
             metrics_source: metrics::collect,
+            auc: auc::global(),
         }
     }
 
     /// Give the worker the station's config and state, for Fleet Control (hello, switch).
     pub fn with_shared(mut self, shared: SharedConfig) -> Self {
         self.shared = Some(shared);
+        self
+    }
+
+    /// Use this stock of authentication data sets instead of the process-wide one (tests).
+    pub fn with_auc(mut self, auc: auc::Handle) -> Self {
+        self.auc = auc;
         self
     }
 
@@ -99,6 +108,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 self.send_async_answers();
                 self.report_update_progress();
                 self.report_metrics(Instant::now());
+                self.send_auc_outbox();
             } else {
                 // Not connected — sleep briefly to avoid busy-spinning
                 std::thread::sleep(POLL_TIMEOUT);
@@ -150,6 +160,10 @@ impl<T: NetworkTransport> ControlWorker<T> {
         // the stack as before (independent of the switch).
         if let Some(response) = fleet::answer(&command, self.fleet_enabled()) {
             self.send_response(&response);
+            return;
+        }
+        if matches!(command, ControlCommand::AuthSubscribers { .. } | ControlCommand::AuthVectors { .. }) {
+            self.auc_command(command);
             return;
         }
         let updating = crate::net_dashboard::ota_remote::progress().is_some_and(|p| p.running);
@@ -285,6 +299,52 @@ impl<T: NetworkTransport> ControlWorker<T> {
         }
         self.last_config_check = Some(Instant::now());
         self.send_response(&hello);
+    }
+
+    /// The station takes its authentication data from the server (`key_source = "server"`) and
+    /// Fleet Control is on.
+    fn uses_server_keys(&self) -> bool {
+        self.fleet_enabled()
+            && self.shared.as_ref().is_some_and(|s| s.config().security.key_source == tetra_config::bluestation::KeySource::Server)
+    }
+
+    /// `AuthSubscribers` / `AuthVectors` (`keys-v1`). Ignored unless the station uses the server's
+    /// keys, so a station with local keys never stores data sets.
+    fn auc_command(&mut self, command: ControlCommand) {
+        if !self.uses_server_keys() {
+            tracing::debug!("Key management: command ignored, key_source is not server or Fleet Control is off");
+            return;
+        }
+        let answer = {
+            let mut store = self.auc.lock().unwrap_or_else(|e| e.into_inner());
+            match &command {
+                ControlCommand::AuthSubscribers { issis, drop } => {
+                    tracing::info!("Key management: server holds keys for {} radios", issis.len());
+                    Some(store.subscribers(issis, drop))
+                }
+                ControlCommand::AuthVectors { issi, vectors } => {
+                    tracing::debug!("Key management: {} authentication data sets for {}", vectors.len(), issi);
+                    store.add(*issi, vectors);
+                    None
+                }
+                _ => None,
+            }
+        };
+        if let Some(answer) = answer {
+            self.send_response(&answer);
+        }
+    }
+
+    /// Send what MM queued for the server (set requests, reports). Dropped while the server does
+    /// not take them: the stock sent after the next `AuthSubscribers` corrects the server's count.
+    fn send_auc_outbox(&mut self) {
+        let out = self.auc.lock().unwrap_or_else(|e| e.into_inner()).drain_outbox();
+        if out.is_empty() || !self.fleet_offered || !self.uses_server_keys() {
+            return;
+        }
+        for response in &out {
+            self.send_response(response);
+        }
     }
 
     /// Send the answers of finished update checks.
@@ -529,7 +589,7 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string()]), (false, vec![])]);
     }
 
     fn fake_metrics(_: &mut metrics::CpuSampler) -> ControlResponse {
@@ -575,6 +635,41 @@ mod tests {
         shared.state_write().fleet_control.enabled = false;
         worker.report_metrics(t0 + Duration::from_secs(200));
         assert_eq!(metrics_sent(&worker), 2, "switch off again: no more metrics");
+    }
+
+    #[test]
+    fn key_commands_only_with_server_key_source_and_the_switch() {
+        for (server, fleet) in [(false, true), (true, false), (true, true)] {
+            let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+            if server {
+                cfg.security.key_source = tetra_config::bluestation::KeySource::Server;
+            }
+            let shared = SharedConfig::from_parts(cfg, None);
+            shared.state_write().fleet_control.enabled = fleet;
+            let auc: auc::Handle = std::sync::Arc::new(std::sync::Mutex::new(auc::AucStore::default()));
+            let (cmce, cmce_endpoint) = make_control_link();
+            let mut dispatchers = HashMap::new();
+            dispatchers.insert(TetraEntity::Cmce, cmce);
+            let mut mock = MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL]);
+            mock.push_inbound(br#"{"AuthSubscribers":{"issis":[100]}}"#.to_vec());
+            mock.push_inbound(
+                br#"{"AuthVectors":{"issi":100,"vectors":[{"rs":"00112233445566778899","ks":"000102030405060708090a0b0c0d0e0f","ks_p":"101112131415161718191a1b1c1d1e1f"}]}}"#
+                    .to_vec(),
+            );
+            let mut worker = ControlWorker::new(dispatchers, mock).with_shared(shared).with_auc(auc.clone());
+            worker.try_connect();
+            worker.poll_commands();
+            assert!(cmce_endpoint.try_recv().is_none(), "key commands never reach the stack");
+            let used = server && fleet;
+            assert_eq!(auc.lock().unwrap().count(100), used as u32);
+            let stock: Vec<_> = sent(&worker).into_iter().filter(|r| matches!(r, ControlResponse::AuthStock { .. })).collect();
+            assert_eq!(stock.len(), used as usize);
+            // Requests from MM go out only while the station uses the server's keys.
+            auc.lock().unwrap().request(200, Instant::now());
+            worker.send_auc_outbox();
+            let requests = sent(&worker).into_iter().filter(|r| matches!(r, ControlResponse::AuthVectorRequest { issi: 200 })).count();
+            assert_eq!(requests, used as usize);
+        }
     }
 
     #[test]

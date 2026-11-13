@@ -110,6 +110,7 @@ pub fn posture_json(sec: &CfgSecurity) -> serde_json::Value {
         "class": sec.aie.as_ref().map_or(1, |a| a.security_class()),
         "authentication": auth_str(sec.authentication),
         "mutual_authentication": sec.mutual_authentication,
+        "key_source": sec.key_source.as_str(),
         "subscribers": sec.subscribers.iter().map(|s| serde_json::json!({
             "issi": s.issi, "k_masked": mask_key(&s.k),
         })).collect::<Vec<_>>(),
@@ -318,10 +319,54 @@ pub fn parse_edit(body: &str, current: &CfgSecurity) -> Result<SecurityEdit, Str
     };
     if aie.as_ref().is_some_and(|a| a.class3.is_some()) {
         if authentication != AuthenticationMode::Required { return Err("SC3 requires authentication = required".into()); }
-        if subscribers.is_empty() { return Err("SC3 requires at least one subscriber with a matching K".into()); }
+        if subscribers.is_empty() && current.key_source == tetra_config::bluestation::KeySource::Local { return Err("SC3 requires at least one subscriber with a matching K".into()); }
     }
 
     Ok(SecurityEdit { authentication, mutual_authentication, subscribers, aie })
+}
+
+/// Format name of a key export file; the Brew server's key import reads it.
+pub const EXPORT_FORMAT: &str = "bost-keys-v1";
+/// PBKDF2-HMAC-SHA256 rounds of an export (OWASP 2023 figure for SHA-256).
+pub const EXPORT_ITERATIONS: u32 = 600_000;
+/// Shortest export password.
+pub const EXPORT_MIN_PASSWORD: usize = 10;
+
+/// The station's K list as an encrypted export file for the Brew server's key import (Fleet
+/// Control key management): JSON `{format, kdf, iterations, salt, nonce, data}`, the text
+/// `ISSI;K` per line sealed with AES-256-GCM under a key from PBKDF2-HMAC-SHA256(password). K
+/// cannot be read out of a radio (EN 300 392-7 has no OTAR for K), so this is how a fleet's keys
+/// move to the server without being typed again.
+pub fn export_keys(subscribers: &[(u32, [u8; 16])], password: &str, iterations: u32) -> Result<String, String> {
+    use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+    use ring::rand::{SecureRandom, SystemRandom};
+    if password.chars().count() < EXPORT_MIN_PASSWORD {
+        return Err(format!("the password needs at least {EXPORT_MIN_PASSWORD} characters"));
+    }
+    if subscribers.is_empty() {
+        return Err("no authentication keys to export".into());
+    }
+    let rng = SystemRandom::new();
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    rng.fill(&mut salt).map_err(|_| "no random source")?;
+    rng.fill(&mut nonce).map_err(|_| "no random source")?;
+    let mut key = [0u8; 32];
+    let rounds = std::num::NonZeroU32::new(iterations.max(1)).expect("non-zero");
+    ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, rounds, &salt, password.as_bytes(), &mut key);
+    let mut data: Vec<u8> = subscribers.iter().map(|(issi, k)| format!("{issi};{}\n", hex(k))).collect::<String>().into_bytes();
+    let sealing = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).map_err(|_| "cipher setup failed")?);
+    sealing.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut data).map_err(|_| "encryption failed")?;
+    key.fill(0);
+    Ok(serde_json::json!({
+        "format": EXPORT_FORMAT,
+        "kdf": "pbkdf2-hmac-sha256",
+        "iterations": iterations,
+        "salt": hex(&salt),
+        "nonce": hex(&nonce),
+        "data": hex(&data),
+    })
+    .to_string())
 }
 
 /// A fresh random key as hex, from the kernel's generator.
@@ -481,6 +526,27 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "config_version = \"0.6\"\nstack_mode = \"Bs\"\n\n[phy_io]\nbackend = \"None\"\n\n[net_info]\nmcc = 901\nmnc = 16383\n\n[cell_info]\nmain_carrier = 1584\nfreq_band = 4\nfreq_offset = 0\nduplex_spacing = 4\nreverse_operation = false\nlocation_area = 1\n";
+    #[test]
+    fn key_export_opens_with_the_password_only() {
+        use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+        let subs = vec![(100, [0x11; 16]), (2358245, [0xab; 16])];
+        assert!(export_keys(&subs, "short", 1000).is_err());
+        assert!(export_keys(&[], "long enough pw", 1000).is_err());
+        let file: serde_json::Value = serde_json::from_str(&export_keys(&subs, "long enough pw", 1000).unwrap()).unwrap();
+        assert_eq!(file["format"], "bost-keys-v1");
+        let unhex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        let open = |pw: &str| {
+            let mut key = [0u8; 32];
+            ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, std::num::NonZeroU32::new(1000).unwrap(), &unhex(file["salt"].as_str().unwrap()), pw.as_bytes(), &mut key);
+            let k = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).unwrap());
+            let nonce: [u8; 12] = unhex(file["nonce"].as_str().unwrap()).try_into().unwrap();
+            let mut data = unhex(file["data"].as_str().unwrap());
+            k.open_in_place(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut data).ok().map(|p| String::from_utf8(p.to_vec()).unwrap())
+        };
+        assert!(open("wrong password").is_none());
+        assert_eq!(open("long enough pw").unwrap(), format!("100;{}\n2358245;{}\n", "11".repeat(16), "ab".repeat(16)));
+    }
+
     const BASE: &str = "config_version = \"0.6\"\nstack_mode = \"Bs\"\n\n[phy_io]\nbackend = \"None\"\n\n[net_info]\nmcc = 901\nmnc = 16383\n\n[cell_info]\nmain_carrier = 1584\nfreq_band = 4\nfreq_offset = 0\nduplex_spacing = 4\nreverse_operation = false\nlocation_area = 1\n\n[security]\n# comment kept\nissi_whitelist = [1, 2]\nauthentication = \"off\"\n\n[security.aie]\nclass = 2\nksg = 2\nsck = \"00000000000000000000\"\nclear_groups = [900]\n\n[[security.subscribers]]\nissi = 7\nk = \"00000000000000000000000000000000\"\n\n[recovery]\nenabled = false\n";
 
     fn edit() -> SecurityEdit {

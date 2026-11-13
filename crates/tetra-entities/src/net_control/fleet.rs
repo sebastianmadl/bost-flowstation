@@ -48,7 +48,7 @@ pub const CAP_RESTART: &str = "restart-v1";
 
 /// Capability names the station lists in its hello while the switch is on.
 pub fn capabilities(ota_available: bool) -> Vec<String> {
-    let mut caps = vec![CAP_FLEET.to_string(), CAP_MAINTENANCE.to_string(), CAP_RESTART.to_string(), super::metrics::CAP_METRICS.to_string()];
+    let mut caps = vec![CAP_FLEET.to_string(), CAP_MAINTENANCE.to_string(), CAP_RESTART.to_string(), super::metrics::CAP_METRICS.to_string(), super::auc::CAP_KEYS.to_string()];
     if super::fleet_config::config_path().is_some() {
         caps.push(super::fleet_config::CAP_CONFIG.to_string());
     }
@@ -94,6 +94,8 @@ pub fn station_hello(shared: &SharedConfig) -> ControlResponse {
         capabilities: if enabled { capabilities(crate::net_dashboard::ota_remote::available()) } else { Vec::new() },
         config_hash: if enabled { super::fleet_config::current_hash() } else { None },
         config_pending: if enabled { super::fleet_config::pending_secs() } else { None },
+        key_source: Some(cfg.security.key_source.as_str().to_string()),
+        local_keys: Some(cfg.security.subscribers.len() as u32),
     }
 }
 
@@ -388,8 +390,8 @@ mod tests {
 
     #[test]
     fn capabilities_list_update_only_with_an_ota() {
-        assert_eq!(capabilities(false), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1"]);
-        assert_eq!(capabilities(true), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "update-v1", "update-live-v1"]);
+        assert_eq!(capabilities(false), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "keys-v1"]);
+        assert_eq!(capabilities(true), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "keys-v1", "update-v1", "update-live-v1"]);
     }
 
     fn prog(running: bool, stage: OtaStage, percent: u8) -> Progress {
@@ -460,6 +462,29 @@ mod tests {
     }
 
     #[test]
+    fn keys_wire_shape() {
+        // As brew-server's `control.rs` / `fleet_keys.rs` send and parse them (`keys-v1`).
+        let codec = ControlCodecJson;
+        let cmd = codec.decode_command(br#"{"AuthSubscribers":{"issis":[100,200],"drop":[200]}}"#).unwrap();
+        assert!(matches!(cmd, ControlCommand::AuthSubscribers { ref issis, ref drop } if issis == &[100, 200] && drop == &[200]));
+        let cmd = codec.decode_command(br#"{"AuthSubscribers":{"issis":[]}}"#).unwrap();
+        assert!(matches!(cmd, ControlCommand::AuthSubscribers { ref drop, .. } if drop.is_empty()), "older servers leave drop out");
+        let cmd = codec
+            .decode_command(br#"{"AuthVectors":{"issi":7,"vectors":[{"rs":"00112233445566778899","ks":"000102030405060708090a0b0c0d0e0f","ks_p":"101112131415161718191a1b1c1d1e1f"}]}}"#)
+            .unwrap();
+        let ControlCommand::AuthVectors { issi: 7, vectors } = cmd else { panic!("AuthVectors") };
+        let v = vectors[0].to_vector().unwrap();
+        assert_eq!(v.rs[9], 0x99);
+        assert_eq!(v.ks_p[0], 0x10);
+        let report = ControlResponse::AuthReport { issi: 7, rs: "00".into(), ok: true, mutual: false, left: Some(3) };
+        let json: serde_json::Value = serde_json::from_slice(&codec.encode_response(&report)).unwrap();
+        assert_eq!(json, serde_json::json!({"AuthReport": {"issi": 7, "rs": "00", "ok": true, "mutual": false, "left": 3}}));
+        let stock = ControlResponse::AuthStock { counts: vec![super::super::commands::IssiCount { issi: 7, count: 3 }] };
+        let json: serde_json::Value = serde_json::from_slice(&codec.encode_response(&stock)).unwrap();
+        assert_eq!(json, serde_json::json!({"AuthStock": {"counts": [{"issi": 7, "count": 3}]}}));
+    }
+
+    #[test]
     fn json_wire_shape() {
         // Externally tagged, as brew-server's `control.rs` parses it (docs: Docs/fleet-control.md).
         let codec = ControlCodecJson;
@@ -473,6 +498,8 @@ mod tests {
             capabilities: vec!["fleet-v1".into()],
             config_hash: None,
             config_pending: None,
+            key_source: None,
+            local_keys: None,
         };
         let json: serde_json::Value = serde_json::from_slice(&codec.encode_response(&hello)).unwrap();
         assert_eq!(

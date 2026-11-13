@@ -61,6 +61,9 @@ pub struct CfgSecurity {
     /// Answer a radio's own challenge (U-AUTHENTICATION DEMAND) and, when we are challenged first,
     /// also challenge back so both sides are authenticated (clause 4.1.4).
     pub mutual_authentication: bool,
+    /// Where the authentication keys are: here (`[[security.subscribers]]`) or at the Brew
+    /// server, the authentication centre (Fleet Control key management, `key_source = "server"`).
+    pub key_source: KeySource,
     /// Authentication keys by ISSI.
     pub subscribers: Vec<SubscriberKey>,
     /// ISSIs whose `k` could not be parsed (reported at startup, never silently dropped).
@@ -93,6 +96,36 @@ impl AuthenticationMode {
             "optional" => Some(AuthenticationMode::Optional),
             "required" | "on" | "enforce" => Some(AuthenticationMode::Required),
             _ => None,
+        }
+    }
+}
+
+/// Where the station gets what it needs to authenticate radios.
+///   [security]
+///   key_source = "server"   # K stays at the Brew server (EN 300 392-7 clause 4.1.1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeySource {
+    /// K of every radio in `[[security.subscribers]]` (default, as before).
+    #[default]
+    Local,
+    /// K stays at the Brew server (the authentication centre); the station gets authentication
+    /// data sets (RS, KS, KS') over the Fleet Control channel and keeps a stock of them.
+    Server,
+}
+
+impl KeySource {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "local" | "" => Some(KeySource::Local),
+            "server" => Some(KeySource::Server),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeySource::Local => "local",
+            KeySource::Server => "server",
         }
     }
 }
@@ -247,6 +280,7 @@ impl Default for CfgSecurity {
             aie: None,
             authentication: AuthenticationMode::Off,
             mutual_authentication: true,
+            key_source: KeySource::Local,
             subscribers: Vec::new(),
             invalid_subscriber_keys: Vec::new(),
             e2ee: None,
@@ -274,6 +308,13 @@ impl CfgSecurity {
             format!(" — IGNORED {} subscriber(s) with an invalid k: {:?}", self.invalid_subscriber_keys.len(), self.invalid_subscriber_keys)
         };
         let mutual = if self.mutual_authentication { "mutual" } else { "one-way" };
+        if self.key_source == KeySource::Server {
+            return match self.authentication {
+                AuthenticationMode::Off => "OFF — radios are not authenticated (keys at the Brew server)".to_string(),
+                AuthenticationMode::Optional => format!("OPTIONAL — radios with a key at the Brew server are challenged ({mutual}), others register unauthenticated"),
+                AuthenticationMode::Required => format!("REQUIRED — only radios with a key at the Brew server may register ({mutual})"),
+            };
+        }
         match self.authentication {
             AuthenticationMode::Off => format!("OFF — radios are not authenticated ({n} key(s) configured but unused){bad}"),
             AuthenticationMode::Optional => format!("OPTIONAL — {n} radio(s) with a key are challenged ({mutual}), others register unauthenticated{bad}"),
@@ -333,6 +374,8 @@ pub struct CfgSecurityDto {
     pub authentication: Option<String>,
     #[serde(default)]
     pub mutual_authentication: Option<bool>,
+    #[serde(default)]
+    pub key_source: Option<String>,
     #[serde(default)]
     pub subscribers: Vec<SubscriberKeyDto>,
     #[serde(default)]
@@ -508,7 +551,14 @@ pub fn apply_security_patch(dto: CfgSecurityDto) -> Result<CfgSecurity, String> 
         None => AuthenticationMode::Off,
         Some(s) => AuthenticationMode::parse(s).ok_or_else(|| format!("security.authentication = {s:?}: use off, optional or required"))?,
     };
-    if authentication == AuthenticationMode::Required && subscribers.is_empty() {
+    let key_source = match dto.key_source.as_deref() {
+        None => KeySource::Local,
+        Some(s) => KeySource::parse(s).ok_or_else(|| format!("security.key_source = {s:?}: use local or server"))?,
+    };
+    if key_source == KeySource::Server && !(subscribers.is_empty() && invalid_subscriber_keys.is_empty()) {
+        return Err("security.key_source = \"server\": K stays at the Brew server (EN 300 392-7 clause 4.1.1), remove the [[security.subscribers]] keys".into());
+    }
+    if authentication == AuthenticationMode::Required && subscribers.is_empty() && key_source == KeySource::Local {
         return Err("security.authentication = \"required\" needs at least one [[security.subscribers]] key, or no radio can register".into());
     }
     let aie = apply_aie_patch(dto.aie.unwrap_or_default())?;
@@ -529,6 +579,7 @@ pub fn apply_security_patch(dto: CfgSecurityDto) -> Result<CfgSecurity, String> 
         e2ee: apply_e2ee_patch(dto.e2ee.unwrap_or_default())?,
         authentication,
         mutual_authentication: dto.mutual_authentication.unwrap_or(defaults.mutual_authentication),
+        key_source,
         subscribers,
         invalid_subscriber_keys,
         issi_whitelist: dto.issi_whitelist,

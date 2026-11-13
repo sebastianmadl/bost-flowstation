@@ -5,6 +5,7 @@
 //! toward the stack through a [`CommandSink`], and sends [`CommandResponse`]s
 //! back to the server.
 
+pub mod auc;
 pub mod channel;
 pub mod codec;
 pub mod commands;

@@ -3047,6 +3047,10 @@ fn serve_security_post(stream: PrefixedConn, shared_config: &Option<tetra_config
             return;
         }
     };
+    if current.key_source == tetra_config::bluestation::KeySource::Server && !edit.subscribers.is_empty() {
+        http_response(stream, 400, "Authentication keys are held by the Brew server (key_source = server): add them there");
+        return;
+    }
     if let Err(e) = security::validate_startup_guard(&edit, shared_config) {
         http_response(stream, 400, e);
         return;
@@ -3069,6 +3073,30 @@ fn serve_security_post(stream: PrefixedConn, shared_config: &Option<tetra_config
         None => tetra_config::bluestation::sec_security::CfgSecurity::default(),
     };
     http_json_response(stream, 200, &security::page_json(&running, security::load_saved(config_path), security::runtime_json(shared_config)));
+}
+
+/// POST /api/security/export {"password"} — the saved K list as an encrypted file for the Brew
+/// server's key import (`security::export_keys`). The keys never leave unencrypted.
+fn serve_security_export(stream: PrefixedConn, config_path: &str, body: &str) {
+    use crate::net_dashboard::security;
+    let password = serde_json::from_str::<serde_json::Value>(body.trim())
+        .ok()
+        .and_then(|v| v.get("password").and_then(|w| w.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let subscribers: Vec<(u32, [u8; 16])> = match security::load_saved(config_path) {
+        Ok(s) => s.subscribers.iter().map(|s| (s.issi, s.k)).collect(),
+        Err(e) => {
+            http_response(stream, 500, &e);
+            return;
+        }
+    };
+    match security::export_keys(&subscribers, &password, security::EXPORT_ITERATIONS) {
+        Ok(file) => {
+            tracing::info!("Dashboard: {} authentication keys exported (encrypted) for the Brew server", subscribers.len());
+            http_json_response(stream, 200, &file);
+        }
+        Err(e) => http_response(stream, 400, &e),
+    }
 }
 
 /// POST /api/security/generate {"what":"sck"|"cck"|"k"} — a fresh random key for the form.
@@ -4668,6 +4696,9 @@ fn handle_connection(
     } else if req_line.contains("POST /api/telegram/test") {
         let (inner, body_str) = read_post_body(stream);
         serve_telegram_test(inner, &shared_config, &body_str);
+    } else if req_line.contains("POST /api/security/export") {
+        let (inner, body_str) = read_post_body(stream);
+        serve_security_export(inner, &config_path, &body_str);
     } else if req_line.contains("POST /api/security/generate") {
         let (inner, body_str) = read_post_body(stream);
         serve_security_generate(inner, &body_str);

@@ -53,7 +53,7 @@ use tetra_pdus::mm::pdus::authentication::{
     UAuthenticationReject, UAuthenticationResponse, UAuthenticationResult, peek_sub_type,
 };
 use tetra_pdus::mm::pdus::otar_sck::{self, DOtarSckProvide, DOtarSckReject, OtarSessionKey, SckKeyAndIdentifier, UOtarSckDemand, UOtarSckResult};
-use tetra_security::auth::{MsChallenge, answer_ms_challenge, derive_dck, random_nonce};
+use tetra_security::auth::{AuthVector, MsChallenge, answer_with_vector, derive_dck, random_nonce};
 use tetra_security::keys::{AuthKey, CipherKey as SecCipherKey};
 use tetra_pdus::mm::pdus::otar_cck::{AuthenticationDownlink, CckInformation, CckLocations, DOtarCckProvide, UOtarCckDemand, UOtarCckResult};
 use tetra_security::taa1::{ta41, ta51};
@@ -64,6 +64,9 @@ const GROUP_DETACHMENT_TEMPORARY_1: u8 = 1;
 /// A challenge in flight (EN 300 392-7 clause 4.1.2).
 struct PendingAuth {
     challenge: MsChallenge,
+    /// The authentication data set of this exchange (RS, KS, KS'): from the local K, or one set
+    /// of the server's stock (`key_source = "server"`), used once.
+    vector: AuthVector,
     dck2: Option<[u8; 10]>,
     /// L2 handle the challenge went out on.
     handle: u32,
@@ -72,6 +75,20 @@ struct PendingAuth {
     held: Option<SapMsg>,
     started: Instant,
 }
+
+/// A radio waiting for authentication data sets from the server (`key_source = "server"`, empty
+/// stock): its registration or its own challenge goes on when the sets arrive, or after
+/// [`AUC_WAIT`] without them.
+struct AuthWaiting {
+    handle: u32,
+    rand2: Option<[u8; 10]>,
+    /// The registration to go on with (`None`: the radio challenged us outside a registration).
+    registration: Option<(LocationUpdateType, Option<u64>, SapMsg)>,
+    since: Instant,
+}
+
+/// How long a registration waits for authentication data sets requested from the server.
+const AUC_WAIT: Duration = Duration::from_secs(2);
 
 struct PendingAuthResult {
     uplink_ack: bool,
@@ -128,6 +145,10 @@ pub struct MmBs {
     // ── Air-interface security (EN 300 392-7) ──────────────────────────────────────────────
     /// Radios we have challenged and are waiting on (U-AUTHENTICATION RESPONSE / RESULT).
     auth_pending: HashMap<u32, PendingAuth>,
+    /// Radios waiting for authentication data sets from the server.
+    auth_waiting: HashMap<u32, AuthWaiting>,
+    /// Stock of authentication data sets from the server (`key_source = "server"`).
+    auc: crate::net_control::auc::Handle,
     /// Radios that just passed, so the replayed registration is not challenged again.
     auth_passed: HashMap<u32, Instant>,
     /// Newly authenticated DCKs; published to MAC only at the acknowledgement boundary.
@@ -228,6 +249,8 @@ impl MmBs {
             registration_probe_receipts: HashMap::new(),
             auth_pending: HashMap::new(),
             auth_passed: HashMap::new(),
+            auth_waiting: HashMap::new(),
+            auc: crate::net_control::auc::global(),
             dck: HashMap::new(),
             auth_result_pending: HashMap::new(),
             auth_ack_pending: HashMap::new(),
@@ -532,7 +555,8 @@ impl MmBs {
         if self.auth_pending.get(&issi).is_some_and(|pending| {
             pending.held.is_some() && pending.started.elapsed() < T354
         }) || self.auth_result_pending.get(&issi).is_some_and(|p| p.started.elapsed() < T354)
-           || self.auth_ack_pending.get(&issi).is_some_and(|(p, _)| p.started.elapsed() < T354) {
+           || self.auth_ack_pending.get(&issi).is_some_and(|(p, _)| p.started.elapsed() < T354)
+           || self.auth_waiting.get(&issi).is_some_and(|w| w.registration.is_some()) {
             tracing::debug!(
                 "MM: suppressing reactive recovery for ISSI {} while registration authentication is pending",
                 issi
@@ -711,6 +735,7 @@ impl MmBs {
     /// to finish or change the next registration for the same ISSI.
     fn clear_registration_transients(&mut self, issi: u32) {
         self.auth_pending.remove(&issi);
+        self.auth_waiting.remove(&issi);
         self.auth_passed.remove(&issi);
         self.dck.remove(&issi);
         self.auth_result_pending.remove(&issi);
@@ -984,7 +1009,8 @@ impl MmBs {
         let registration_auth_pending = self.auth_pending.get(&issi).is_some_and(|pending| {
             pending.held.is_some() && pending.started.elapsed() < T354
         }) || self.auth_result_pending.get(&issi).is_some_and(|p| p.started.elapsed() < T354)
-           || self.auth_ack_pending.get(&issi).is_some_and(|(p, _)| p.started.elapsed() < T354);
+           || self.auth_ack_pending.get(&issi).is_some_and(|(p, _)| p.started.elapsed() < T354)
+           || self.auth_waiting.get(&issi).is_some_and(|w| w.registration.is_some());
         if count_rate_limit
             && !registration_auth_pending
             && !self.client_mgr.allow_registration(issi)
@@ -3475,6 +3501,7 @@ impl TetraEntityTrait for MmBs {
 
     fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
         self.expire_authentication();
+        self.process_auth_waiting(queue);
         self.expire_otar();
         self.process_authentication_acks(queue);
         self.process_pending_ciphering();
@@ -3755,13 +3782,24 @@ impl MmBs {
         embedded_rand2: Option<[u8; 10]>,
         held: SapMsg,
     ) -> bool {
-        let (mode, k) = {
-            let cfg = self.config.config();
-            // A visitor's K lives in its home network (authentication at migration is not
-            // implemented): it is a radio without a key here.
-            let k = if self.visitors.is_visitor(issi) { None } else { cfg.security.subscriber_k(issi).copied() };
-            (cfg.security.authentication, k)
-        };
+        self.authentication_gate_inner(queue, issi, handle, location_update_type, address_extension, embedded_rand2, held, true)
+    }
+
+    /// `may_wait`: with `key_source = "server"` and no set in stock, hold the registration and ask
+    /// the server (false once the wait is over: the radio is then treated like one without a key).
+    #[allow(clippy::too_many_arguments)]
+    fn authentication_gate_inner(
+        &mut self,
+        queue: &mut MessageQueue,
+        issi: u32,
+        handle: u32,
+        location_update_type: LocationUpdateType,
+        address_extension: Option<u64>,
+        embedded_rand2: Option<[u8; 10]>,
+        held: SapMsg,
+        may_wait: bool,
+    ) -> bool {
+        let mode = self.config.config().security.authentication;
         if mode == AuthenticationMode::Off {
             return false;
         }
@@ -3770,7 +3808,14 @@ impl MmBs {
             self.auth_passed.remove(&issi);
             return false;
         }
-        let Some(k) = k else {
+        // Sets requested from the server: keep the newest registration to go on with.
+        if let Some(w) = self.auth_waiting.get_mut(&issi) {
+            w.handle = handle;
+            w.rand2 = embedded_rand2;
+            w.registration = Some((location_update_type, address_extension, held));
+            return true;
+        }
+        if !self.has_auth(issi) {
             if mode == AuthenticationMode::Required {
                 tracing::warn!("MM: ISSI {} has no authentication key and authentication is required — rejecting registration", issi);
                 Self::send_d_location_update_reject_cause(queue, issi, handle, location_update_type, address_extension, RejectCause::IllegalMs);
@@ -3778,7 +3823,7 @@ impl MmBs {
             }
             tracing::debug!("MM: ISSI {} has no authentication key — registering unauthenticated (authentication = optional)", issi);
             return false;
-        };
+        }
         if let Some((p, _)) = self.auth_ack_pending.get_mut(&issi) {
             if p.started.elapsed() < T354 { p.held = Some(held); return true; }
         }
@@ -3795,18 +3840,111 @@ impl MmBs {
         self.auth_pending.remove(&issi);
         self.auth_result_pending.remove(&issi);
         self.auth_ack_pending.remove(&issi);
+        let Some(vector) = self.auth_vector(issi) else {
+            if may_wait {
+                // Clause 4.1.1: the BS authenticates with KS / KS' from the authentication centre.
+                tracing::info!("MM: no authentication data set for ISSI {} — asking the server, registration held", issi);
+                self.auc_lock().request(issi, Instant::now());
+                self.auth_waiting.insert(issi, AuthWaiting {
+                    handle,
+                    rand2: embedded_rand2,
+                    registration: Some((location_update_type, address_extension, held)),
+                    since: Instant::now(),
+                });
+                return true;
+            }
+            if mode == AuthenticationMode::Required {
+                tracing::warn!("MM: no authentication data set for ISSI {} from the server — rejecting registration (authentication = required)", issi);
+                Self::send_d_location_update_reject_cause(queue, issi, handle, location_update_type, address_extension, RejectCause::IllegalMs);
+                return true;
+            }
+            tracing::info!("MM: no authentication data set for ISSI {} from the server — registering unauthenticated (authentication = optional)", issi);
+            return false;
+        };
         if let Some(rand2) = embedded_rand2 {
-            self.rx_u_authentication_demand(queue, issi, handle, UAuthenticationDemand { rand2, proprietary: None });
+            self.answer_demand(queue, issi, handle, rand2, vector);
             if let Some(pending) = self.auth_pending.get_mut(&issi) { pending.held = Some(held); }
             return true;
         }
-        let challenge = MsChallenge::new(&AuthKey(k));
+        let challenge = MsChallenge::from_vector(&vector, random_nonce());
         let pdu = DAuthenticationDemand { rand1: challenge.rand1, rs: challenge.rs, proprietary: None };
         tracing::info!("MM: challenging ISSI {} (D-AUTHENTICATION DEMAND)", issi);
         self.send_auth_pdu(queue, issi, handle, "DAuthenticationDemand", |b| pdu.to_bitbuf(b));
-        self.auth_pending.insert(issi, PendingAuth { challenge, dck2: None, handle, held: Some(held), started: Instant::now() });
+        self.auth_pending.insert(issi, PendingAuth { challenge, vector, dck2: None, handle, held: Some(held), started: Instant::now() });
         self.sc3_phase(issi, "challenge");
         true
+    }
+
+    /// Use this stock of authentication data sets instead of the process-wide one (tests).
+    pub fn with_auc(mut self, auc: crate::net_control::auc::Handle) -> Self {
+        self.auc = auc;
+        self
+    }
+
+    /// The station takes its authentication data from the server (`key_source = "server"`).
+    fn server_keys(&self) -> bool {
+        self.config.config().security.key_source == tetra_config::bluestation::KeySource::Server
+    }
+
+    fn auc_lock(&self) -> std::sync::MutexGuard<'_, crate::net_control::auc::AucStore> {
+        self.auc.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Can this radio be authenticated: a K in the config, or (`key_source = "server"`) the server
+    /// holds one. A visitor's K lives in its home network (authentication at migration is not
+    /// implemented): it is a radio without a key here.
+    fn has_auth(&self, issi: u32) -> bool {
+        if self.visitors.is_visitor(issi) {
+            return false;
+        }
+        if self.server_keys() { self.auc_lock().is_known(issi) } else { self.subscriber_key(issi).is_some() }
+    }
+
+    /// One authentication data set for `issi`: computed from the local K with a fresh RS, or taken
+    /// from the server's stock (each set once). `None`: no K, or the stock is empty.
+    fn auth_vector(&mut self, issi: u32) -> Option<AuthVector> {
+        if self.visitors.is_visitor(issi) {
+            return None;
+        }
+        if self.server_keys() {
+            return self.auc_lock().take(issi);
+        }
+        self.subscriber_key(issi).map(|k| AuthVector::from_k(&k, random_nonce()))
+    }
+
+    /// Tell the server how a set of its stock was used (only with `key_source = "server"`).
+    fn auth_report(&self, issi: u32, vector: &AuthVector, ok: bool, mutual: bool) {
+        if self.server_keys() {
+            self.auc_lock().report(issi, &vector.rs, ok, mutual);
+        }
+    }
+
+    /// Go on with radios whose sets arrived from the server, or whose wait is over.
+    fn process_auth_waiting(&mut self, queue: &mut MessageQueue) {
+        if self.auth_waiting.is_empty() {
+            return;
+        }
+        let arrived = self.auc_lock().take_arrived();
+        let ready: Vec<u32> = self.auth_waiting.iter()
+            .filter(|(issi, w)| arrived.contains(issi) || w.since.elapsed() >= AUC_WAIT)
+            .map(|(issi, _)| *issi)
+            .collect();
+        for issi in ready {
+            let Some(w) = self.auth_waiting.remove(&issi) else { continue };
+            match w.registration {
+                Some((lut, ext, held)) => {
+                    if !self.authentication_gate_inner(queue, issi, w.handle, lut, ext, w.rand2, held.clone(), false) {
+                        self.auth_passed.insert(issi, Instant::now());
+                        self.rx_u_location_update_demand_replay(queue, held);
+                    }
+                }
+                None => {
+                    if let Some(rand2) = w.rand2 {
+                        self.rx_u_authentication_demand_inner(queue, issi, w.handle, rand2, false);
+                    }
+                }
+            }
+        }
     }
 
     /// U-AUTHENTICATION: dispatch on the sub-type that follows the PDU type.
@@ -3855,6 +3993,7 @@ impl MmBs {
             return;
         };
         if pending.started.elapsed() >= T354 || pending.dck2.is_some() {
+            self.auth_report(issi, &pending.vector, false, false);
             self.sc3_phase(issi, if pending.started.elapsed() >= T354 { "timeout" } else { "failed" });
             if let Some(held) = pending.held { self.reject_held_registration(queue, issi, handle, held); }
             return;
@@ -3862,13 +4001,14 @@ impl MmBs {
         let dck1 = pending.challenge.verify(&pdu.res1);
         let r1 = dck1.is_some();
         // Mutual: the radio challenged us with RAND2 under the same RS.
-        let (res2, dck2) = match (pdu.rand2, self.subscriber_key(issi)) {
-            (Some(rand2), Some(k)) => {
-                let r = answer_ms_challenge(&k, &pending.challenge.rs, &rand2);
+        let (res2, dck2) = match pdu.rand2 {
+            Some(rand2) => {
+                let r = answer_with_vector(&pending.vector, &rand2);
                 (Some(r.res2), Some(r.dck2))
             }
-            _ => (None, None),
+            None => (None, None),
         };
+        self.auth_report(issi, &pending.vector, r1, res2.is_some());
         let result = DAuthenticationResult { r1, res2, proprietary: None };
         let result_receipt = (self.is_class3() && r1 && res2.is_none() && pending.held.is_none()).then(TxReporter::new);
         // Combined registration carries final R1 in D-LOCATION UPDATE ACCEPT.
@@ -3900,32 +4040,56 @@ impl MmBs {
     /// The radio challenges us (clause 4.1.3): answer with RES2 and, if configured, challenge
     /// back so the exchange becomes mutual.
     fn rx_u_authentication_demand(&mut self, queue: &mut MessageQueue, issi: u32, handle: u32, pdu: UAuthenticationDemand) {
+        self.rx_u_authentication_demand_inner(queue, issi, handle, pdu.rand2, true);
+    }
+
+    fn rx_u_authentication_demand_inner(&mut self, queue: &mut MessageQueue, issi: u32, handle: u32, rand2: [u8; 10], may_wait: bool) {
         // Do not overlap a standalone rekey with an unfinished registration.
         self.process_pending_ciphering();
         if self.is_class3() && self.pending_ciphering.contains_key(&issi) {
             tracing::debug!("MM: ISSI {} authentication deferred until registration ACK", issi);
             return;
         }
-        let mutual = self.config.config().security.mutual_authentication || self.is_class3();
         if self.auth_pending.contains_key(&issi) || self.auth_result_pending.contains_key(&issi) || self.auth_ack_pending.contains_key(&issi) {
             tracing::debug!("MM: authentication already in progress for ISSI {}; keeping current exchange", issi);
             return;
         }
-        let Some(k) = self.subscriber_key(issi) else {
+        if let Some(w) = self.auth_waiting.get_mut(&issi) {
+            w.handle = handle;
+            w.rand2 = Some(rand2);
+            return;
+        }
+        let vector = if self.has_auth(issi) { self.auth_vector(issi) } else { None };
+        let Some(vector) = vector else {
+            if may_wait && self.has_auth(issi) {
+                tracing::info!("MM: ISSI {} challenges us but no authentication data set is in stock — asking the server", issi);
+                self.auc_lock().request(issi, Instant::now());
+                self.auth_waiting.insert(issi, AuthWaiting { handle, rand2: Some(rand2), registration: None, since: Instant::now() });
+                return;
+            }
             tracing::info!("MM: ISSI {} asked us to authenticate but has no key configured — D-AUTHENTICATION REJECT", issi);
             let reject = DAuthenticationReject { reject_reason: AuthenticationRejectReason::AuthenticationNotSupported };
             self.send_auth_pdu(queue, issi, handle, "DAuthenticationReject", |b| reject.to_bitbuf(b));
             return;
         };
-        let rs = random_nonce();
-        let answer = answer_ms_challenge(&k, &rs, &pdu.rand2);
+        self.answer_demand(queue, issi, handle, rand2, vector);
+    }
+
+    /// Answer the radio's challenge with RES2 from KS' (TA22) and, if configured, challenge back
+    /// under the same RS so the exchange becomes mutual (clause 4.1.3 / 4.1.4).
+    fn answer_demand(&mut self, queue: &mut MessageQueue, issi: u32, handle: u32, rand2: [u8; 10], vector: AuthVector) {
+        let mutual = self.config.config().security.mutual_authentication || self.is_class3();
+        let rs = vector.rs;
+        let answer = answer_with_vector(&vector, &rand2);
         let rand1 = if mutual {
-            let challenge = MsChallenge::with_nonces(&k, rs, random_nonce());
+            let challenge = MsChallenge::from_vector(&vector, random_nonce());
             let rand1 = challenge.rand1;
-            self.auth_pending.insert(issi, PendingAuth { challenge, dck2: Some(answer.dck2), handle, held: None, started: Instant::now() });
+            self.auth_pending.insert(issi, PendingAuth { challenge, vector, dck2: Some(answer.dck2), handle, held: None, started: Instant::now() });
             self.sc3_phase(issi, "challenge");
             Some(rand1)
         } else {
+            // The radio's verdict (R2) is not reported back; the set is used either way.
+            self.auth_report(issi, &vector, true, false);
             if !self.is_class3() { self.dck.insert(issi, derive_dck(None, Some(&answer.dck2))); }
             None
         };
@@ -3958,6 +4122,7 @@ impl MmBs {
             self.sc3_phase(issi, "failed");
             tracing::warn!("MM: ISSI {} reports our authentication FAILED (R2 = false)", issi);
             if let Some(pending) = self.auth_pending.remove(&issi) {
+                self.auth_report(issi, &pending.vector, false, true);
                 if let Some(held) = pending.held { self.reject_held_registration(queue, issi, handle, held); }
             }
             return;
@@ -3970,12 +4135,14 @@ impl MmBs {
             return;
         };
         if pending.started.elapsed() >= T354 || pending.dck2.is_none() {
+            self.auth_report(issi, &pending.vector, false, true);
             self.sc3_phase(issi, if pending.started.elapsed() >= T354 { "timeout" } else { "failed" });
             if let Some(held) = pending.held { self.reject_held_registration(queue, issi, handle, held); }
             return;
         }
         let dck1 = pending.challenge.verify(&res1);
         let r1 = dck1.is_some();
+        self.auth_report(issi, &pending.vector, r1, true);
         let result = DAuthenticationResult { r1, res2: None, proprietary: None };
         if r1 && self.is_class3() && pending.held.is_some() {
             // Embedded RAND2: the accept carries R1 and gates DCK activation on its ACK.
@@ -4001,6 +4168,8 @@ impl MmBs {
         let mode = self.config.config().security.authentication;
         tracing::warn!("MM: ISSI {} rejected authentication ({:?})", issi, pdu.reject_reason);
         self.sc3_phase(issi, "failed");
+        self.auth_waiting.remove(&issi);
+        if let Some(p) = self.auth_pending.get(&issi) { self.auth_report(issi, &p.vector, false, false); }
         let held = self.auth_pending.remove(&issi).and_then(|p| p.held)
             .or_else(|| self.auth_result_pending.remove(&issi).and_then(|p| p.held))
             .or_else(|| self.auth_ack_pending.remove(&issi).and_then(|(p, _)| p.held));
@@ -4031,7 +4200,7 @@ impl MmBs {
         let expired: Vec<u32> = self.auth_pending.iter().filter(|(_, p)| p.started.elapsed() > T354).map(|(i, _)| *i).collect();
         for issi in expired {
             tracing::warn!("MM: authentication of ISSI {} timed out (T354) — no response to the challenge", issi);
-            self.auth_pending.remove(&issi);
+            if let Some(p) = self.auth_pending.remove(&issi) { self.auth_report(issi, &p.vector, false, false); }
             self.sc3_phase(issi, "timeout");
         }
         self.auth_passed.retain(|_, t| t.elapsed() < AUTH_PASS_GRACE);
@@ -4058,14 +4227,14 @@ impl MmBs {
     }
 
     fn sc3_phase(&self, issi: u32, phase: &'static str) {
-        if self.is_class3() && self.subscriber_key(issi).is_some() {
+        if self.is_class3() && self.has_auth(issi) {
             self.config.state_write().sc3_status.entry(issi).or_default().phase = phase;
             tracing::debug!("MM: SC3 ISSI {} state {}", issi, phase);
         }
     }
 
     fn sc3_cck(&self, issi: u32, status: &'static str) {
-        if self.is_class3() && self.subscriber_key(issi).is_some() {
+        if self.is_class3() && self.has_auth(issi) {
             self.config.state_write().sc3_status.entry(issi).or_default().cck = status;
         }
     }
@@ -4138,6 +4307,12 @@ impl MmBs {
             self.notify_otar(issi, 0, 0, "no SCK configured");
             return;
         };
+        if self.server_keys() {
+            // K stays at the server (clause 4.1.1); SCK delivery through the server comes later.
+            tracing::warn!("MM: OTAR to ISSI {} ({}) refused — keys come from the server (key_source = server)", issi, why);
+            self.notify_otar(issi, aie.sckn, aie.sck_vn, "keys are managed by the server");
+            return;
+        }
         let Some(k) = self.subscriber_key(issi) else {
             tracing::warn!("MM: OTAR to ISSI {} ({}) refused — no authentication key K on file for it", issi, why);
             self.notify_otar(issi, aie.sckn, aie.sck_vn, "no K on file for this radio");

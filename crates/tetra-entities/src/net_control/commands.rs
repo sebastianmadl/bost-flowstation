@@ -189,6 +189,35 @@ pub enum ControlCommand {
     /// Fleet Control (`config-v1`): go back to the config before the last `SetConfig` at once and
     /// restart. Answered with a [`ControlResponse::CommandResult`]: `ok`, `not_pending`.
     RollbackConfig { handle: u32 },
+
+    /// Fleet Control (`keys-v1`): the radios the server (the authentication centre) holds a K
+    /// for. The station drops the sets of radios not listed and of those in `drop` (K changed)
+    /// and answers with [`ControlResponse::AuthStock`]. Only used with
+    /// `[security] key_source = "server"`.
+    AuthSubscribers {
+        issis: Vec<u32>,
+        #[serde(default)]
+        drop: Vec<u32>,
+    },
+
+    /// Fleet Control (`keys-v1`): authentication data sets (RS, KS, KS') for `issi`
+    /// (EN 300 392-7 clause 4.1.1), added to the station's stock. Empty: the server has no K.
+    AuthVectors { issi: u32, vectors: Vec<AuthVectorWire> },
+}
+
+/// One authentication data set on the wire: RS (80 bit), KS and KS' (128 bit each) as hex.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct AuthVectorWire {
+    pub rs: String,
+    pub ks: String,
+    pub ks_p: String,
+}
+
+/// Sets in stock for one radio ([`ControlResponse::AuthStock`]).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct IssiCount {
+    pub issi: u32,
+    pub count: u32,
 }
 
 /// A JSON document inside a control message: plain JSON on the wire (the server sends and gets an
@@ -250,7 +279,9 @@ impl ControlCommand {
             | Self::GetConfig { .. }
             | Self::SetConfig { .. }
             | Self::ConfirmConfig { .. }
-            | Self::RollbackConfig { .. } => TetraEntity::Cmce,
+            | Self::RollbackConfig { .. }
+            | Self::AuthSubscribers { .. }
+            | Self::AuthVectors { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -289,6 +320,14 @@ pub enum ControlResponse {
         /// nothing waits for confirmation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config_pending: Option<u32>,
+        /// Where authentication keys come from (`keys-v1`): `local` or `server`. Older stations
+        /// leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_source: Option<String>,
+        /// Number of radios with a K in the station's own config (`key_source = local`), so the
+        /// server can show what an export would carry. Never the keys.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_keys: Option<u32>,
     },
 
     /// Fleet Control: the answer to every Fleet Control command, correlated by `handle`.
@@ -370,6 +409,28 @@ pub enum ControlResponse {
         calls: u32,
         /// Stack health: `ok`, `degraded` or `critical`.
         health: String,
+    },
+
+    /// Fleet Control (`keys-v1`): sets in stock per radio (answer to `AuthSubscribers`).
+    AuthStock {
+        #[serde(default)]
+        counts: Vec<IssiCount>,
+    },
+
+    /// Fleet Control (`keys-v1`): the station has no set left for `issi`.
+    AuthVectorRequest { issi: u32 },
+
+    /// Fleet Control (`keys-v1`): one set of `issi` was used; `rs` identifies it, `ok` the
+    /// result, `mutual` whether the radio also authenticated the network, `left` the sets left.
+    AuthReport {
+        issi: u32,
+        #[serde(default)]
+        rs: String,
+        ok: bool,
+        #[serde(default)]
+        mutual: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<u32>,
     },
 }
 

@@ -659,6 +659,11 @@ fn main() {
 
     let _log_guards = debug::setup_logging_default(cfg.config().debug_log.clone());
 
+    // Key management (`keys-v1`): with `key_source = "server"` load the stock of authentication
+    // data sets kept from the last run; with local keys an old stock is removed.
+    let server_keys = cfg.config().security.key_source == tetra_config::bluestation::KeySource::Server;
+    tetra_entities::net_control::auc::boot(&args.config, server_keys);
+
     // Apply explicit systemd service name from config, if provided.
     // Used by SDS command control (restart/shutdown) and dashboard OTA.
     // Auto-detection from /proc/self/cgroup is still the fallback.

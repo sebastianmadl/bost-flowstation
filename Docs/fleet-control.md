@@ -265,6 +265,49 @@ No answer is expected. The server uses it for its graphs and alarms
 (brew-server `docs/Fleet-Control.md` section 12); it also pings the station
 with `FleetPing` for its ping graph.
 
+## Key management (`keys-v1`, phase 8a)
+
+With `[security] key_source = "server"` the Brew server is the authentication
+centre (EN 300 392-7 clause 4.1.1): it holds K, the station holds none (no
+`[[security.subscribers]]`). The station lists `keys-v1` while the switch is on
+and reports `key_source` (`local` / `server`) and `local_keys` (number of K in
+its config, never the keys) in its hello. Designed with Patrick, OE1LHP.
+
+Messages (only acted on with `key_source = "server"` and the switch on; a
+station with local keys ignores them):
+
+```json
+{"AuthSubscribers": {"issis": [2320972], "drop": []}}          // server: radios with K; answer AuthStock
+{"AuthVectors": {"issi": 2320972, "vectors": [{"rs": "<20 hex>", "ks": "<32 hex>", "ks_p": "<32 hex>"}]}}
+{"AuthStock": {"counts": [{"issi": 2320972, "count": 10}]}}       // station
+{"AuthVectorRequest": {"issi": 2320972}}                          // station, at most every 5 s per radio
+{"AuthReport": {"issi": 2320972, "rs": "<20 hex>", "ok": true, "mutual": false, "left": 9}}
+```
+
+MM takes one set per authentication (`net_control/auc.rs`): RS goes to the
+radio with a fresh RAND1, RES1 / DCK1 come from TA12(KS, RAND1); a RAND2 from
+the radio is answered with RES2 / DCK2 = TA22(KS', RAND2) under the same RS
+(clause 4.1.3 / 4.1.4). Each set is used once and reported. The stock is kept
+in `<config>.auth-sets` (mode 600), so the station authenticates after a
+restart while the server is away. No set for a radio the server has K for: the
+station asks for sets and holds the registration up to 2 s; without an answer
+the radio is treated as one without a key (`required`: rejected, `optional`:
+registered unauthenticated). With `key_source = "local"` an old stock file is
+deleted at start. OTAR of the SCK from the station is refused while it uses
+server keys (phase 8b).
+
+The switch is a config change (`config-v1`): `{"keys": {"source": "server",
+"drop_local_keys": true}}` removes `[[security.subscribers]]` (refused without
+`drop_local_keys` while the list is not empty), `{"keys": {"source":
+"local"}}` sets it back. `GetConfig` shows `keys: {source, local_keys}`.
+
+**Export for the server**: Security page → *Export keys* (password at least 10
+characters) downloads `bost-keys-v1`: JSON `{format, kdf:
+"pbkdf2-hmac-sha256", iterations: 600000, salt, nonce, data}`, the lines
+`ISSI;K` sealed with AES-256-GCM under PBKDF2-HMAC-SHA256(password, salt).
+Import it on the server's Keys page. `POST /api/security/export
+{"password"}`.
+
 ## HTTP API (dashboard)
 
 | Route | Body | Answer |
@@ -288,5 +331,8 @@ with `FleetPing` for its ping graph.
   temperatures are fed from the telemetry fan-out in `bins/bluestation-bs`.
 - `crates/tetra-entities/src/net_control/fleet_config.rs`: config read, change,
   backup, watchdog, confirm / rollback (`config-v1`).
+- `crates/tetra-entities/src/net_control/auc.rs`: stock of authentication data
+  sets (`keys-v1`); `mm/mm_bs.rs` `authentication_gate`, `auth_vector`,
+  `process_auth_waiting`; `tetra-security` `auth.rs` `AuthVector`.
 - `crates/tetra-config/src/bluestation/sec_control.rs` (`fleet_control`),
   `state.rs` (`FleetControlState`: enabled, offered, connected).

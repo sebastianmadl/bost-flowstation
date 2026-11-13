@@ -472,6 +472,11 @@ voice_service = true
 # issi = 2260571
 # k = "00112233445566778899aabbccddeeff"
 #
+# Or keep K on the Brew server (Fleet Control key management, EN 300 392-7 clause 4.1.1): the
+# station gets one-time authentication data sets from the server and keeps a stock of them in
+# <config>.auth-sets. No [[security.subscribers]] then. Switched from the server's Keys page.
+# key_source = "server"
+#
 # Air-interface encryption (class 2, clause 6): one static cipher key shared by the encrypted
 # radios; radios without AIE still register in clear and use only the clear_groups. NOT permitted
 # under amateur licences — licensed private networks only. With class = 1 and a key the key is

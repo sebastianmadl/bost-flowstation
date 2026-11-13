@@ -5750,17 +5750,23 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
         <div class="card-body">
           <div class="help-text" style="margin-bottom:12px" data-i18n="secp_keys_help"></div>
+          <div id="secp-server-keys" class="help-text" style="margin-bottom:12px;display:none;color:var(--accent)" data-i18n="secp_keys_server">Authentication keys are held by the Brew server (key_source = server). The station gets one-time authentication data sets from it; manage the keys on the server's Keys page.</div>
           <div class="table-wrap">
             <table>
               <thead><tr><th data-i18n="secp_th_issi">ISSI</th><th data-i18n="secp_th_k">Key K</th><th></th></tr></thead>
               <tbody id="secp-subs"></tbody>
             </table>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <div id="secp-add-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
             <input type="number" id="secp-sub-issi" class="form-input" placeholder="ISSI" min="1" max="16777215" style="width:140px" data-i18n-placeholder="secp_issi_placeholder">
             <input type="text" id="secp-sub-k" class="form-input" placeholder="32 hex digits" autocomplete="off" spellcheck="false" style="flex:1;min-width:260px;font-family:var(--mono)" data-i18n-placeholder="secp_k_placeholder">
             <button class="btn" onclick="secpGenerate('k','secp-sub-k')"><span data-i18n="secp_generate">Generate</span></button>
             <button class="btn btn-primary" onclick="secpAddSub()"><span class="btn-icon" data-icon="add"></span><span data-i18n="secp_add">Add</span></button>
+          </div>
+          <div id="secp-export-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center">
+            <span class="help-text" data-i18n="secp_export_help">Export for the Brew server (encrypted):</span>
+            <input type="password" id="secp-export-pw" class="form-input" autocomplete="new-password" style="width:220px" placeholder="Password (min. 10)" data-i18n-placeholder="secp_export_pw">
+            <button class="btn" onclick="secpExport()"><span data-i18n="secp_export">Export keys</span></button>
           </div>
           <div id="secp-invalid" class="help-text" style="margin-top:8px;color:var(--warn);display:none"></div>
           <div class="config-msg" id="secp-subs-msg"></div>
@@ -8309,7 +8315,11 @@ const LANGS={
     sec_cell_hint_err:'AIE configuration rejected: {err}',sec_subs:'{n} subscriber key(s) loaded',
     secp_section:'Air-interface security',secp_status_title:'Status',secp_running:'Running now',secp_saved:'Saved in config',
     secp_restart_needed:'The saved settings differ from what is running. Restart the station to apply them.',secp_restart:'Restart station',
-    secp_restarting:'Restarting… the page will reconnect in a few seconds.',secp_parse_error:'config.toml does not parse — fix it on the Config page first: ',
+    secp_restarting:'Restarting… the page will reconnect in a few seconds.',
+    secp_keys_server:'Authentication keys are held by the Brew server (key_source = server). The station gets one-time authentication data sets from it; manage the keys on the server\'s Keys page.',
+    secp_export_help:'Export for the Brew server (encrypted):',secp_export_pw:'Password (min. 10)',secp_export:'Export keys',
+    secp_export_short:'The export password needs at least 10 characters.',
+    secp_export_ok:'Export file saved. Import it on the Brew server\'s Keys page with this password.',secp_parse_error:'config.toml does not parse — fix it on the Config page first: ',
     secp_auth_title:'Authentication (TAA1)',secp_auth_help:'Challenge radios with their 128-bit authentication key K when they register (EN 300 392-7 clause 4). Only radios whose K is listed below can pass. Authentication is an access-control handshake and is fine on amateur allocations.',
     secp_auth_mode:'Mode',secp_auth_off:'Off — any radio may register',secp_auth_optional:'Optional — challenge radios with a key on file, let others in',secp_auth_required:'Required — reject radios that fail or have no key',
     secp_mutual:'Mutual authentication (answer the radio\'s challenge and challenge back)',secp_keys_title:'Subscriber keys',secp_keys_help:'One K per radio, 32 hex digits, identical to the key programmed into the radio with its KVL / programming software.',
@@ -9090,7 +9100,11 @@ const LANGS={
     sec_cell_hint_err:'Configuración AIE rechazada: {err}',sec_subs:'{n} clave(s) de abonado cargada(s)',
     secp_section:'Seguridad del interfaz aire',secp_status_title:'Estado',secp_running:'En ejecución',secp_saved:'Guardado en la configuración',
     secp_restart_needed:'La configuración guardada difiere de la que está en ejecución. Reinicia la estación para aplicarla.',secp_restart:'Reiniciar estación',
-    secp_restarting:'Reiniciando… la página se reconectará en unos segundos.',secp_parse_error:'config.toml no se puede analizar; corrígelo primero en la página Config: ',
+    secp_restarting:'Reiniciando… la página se reconectará en unos segundos.',
+    secp_keys_server:'Las claves de autenticación las guarda el servidor Brew (key_source = server). La estación recibe de él juegos de datos de autenticación de un solo uso; gestiona las claves en la página Claves del servidor.',
+    secp_export_help:'Exportar para el servidor Brew (cifrado):',secp_export_pw:'Contraseña (mín. 10)',secp_export:'Exportar claves',
+    secp_export_short:'La contraseña de exportación necesita al menos 10 caracteres.',
+    secp_export_ok:'Archivo de exportación guardado. Impórtalo en la página Claves del servidor Brew con esta contraseña.',secp_parse_error:'config.toml no se puede analizar; corrígelo primero en la página Config: ',
     secp_auth_title:'Autenticación (TAA1)',secp_auth_help:'Desafía a las radios con su clave de autenticación K de 128 bits al registrarse (EN 300 392-7 cláusula 4). Solo pasan las radios cuya K figura abajo. La autenticación es un control de acceso y es admisible en bandas de aficionados.',
     secp_auth_mode:'Modo',secp_auth_off:'Desactivada: cualquier radio puede registrarse',secp_auth_optional:'Opcional: se desafía a las radios con clave y se admite al resto',secp_auth_required:'Obligatoria: se rechazan las radios sin clave o que fallan',
     secp_mutual:'Autenticación mutua (responder al desafío de la radio y desafiarla a su vez)',secp_keys_title:'Claves de abonado',secp_keys_help:'Una K por radio, 32 dígitos hexadecimales, idéntica a la programada en la radio.',
@@ -17594,6 +17608,10 @@ function secpFill(d){
   document.getElementById('secp-auth').value=s.authentication||'off';
   document.getElementById('secp-mutual').checked=!!s.mutual_authentication;
   secpSubs=(s.subscribers||[]).map(x=>({issi:x.issi,k:'keep',k_masked:x.k_masked}));
+  const srvKeys=s.key_source==='server';
+  document.getElementById('secp-server-keys').style.display=srvKeys?'':'none';
+  document.getElementById('secp-add-row').style.display=srvKeys?'none':'flex';
+  document.getElementById('secp-export-row').style.display=(!srvKeys&&secpSubs.length)?'flex':'none';
   const inv=document.getElementById('secp-invalid');
   if((s.invalid_subscriber_keys||[]).length){inv.style.display='';inv.textContent=t('secp_invalid_keys')+s.invalid_subscriber_keys.join(', ');}else{inv.style.display='none';}
   const sel=document.getElementById('secp-ksg');
@@ -17614,6 +17632,19 @@ function secpFill(d){
   if(s.aie_error){secpMsg(s.aie_error,false);}else if(!secpChanged){const msg=document.getElementById('secp-msg');msg.textContent='';delete msg.dataset.translationKey;}
   secpClassFields();secpRenderSubs();secpRenderRuntime();
 
+}
+async function secpExport(){
+  const pw=document.getElementById('secp-export-pw').value;
+  if(pw.length<10){secpMsg(t('secp_export_short'),false,'secp-subs-msg');return;}
+  try{
+    const r=await fetch('/api/security/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+    if(!r.ok){secpMsg(await r.text(),false,'secp-subs-msg');return;}
+    const blob=new Blob([await r.text()],{type:'application/json'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='flowstation-keys.bost-keys.json';
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    document.getElementById('secp-export-pw').value='';
+    secpMsg(t('secp_export_ok'),true,'secp-subs-msg');
+  }catch(e){secpMsg(t('conn_error'),false,'secp-subs-msg');}
 }
 async function loadSecurity(){
   try{const r=await fetch('/api/security');if(!r.ok){secpMsg(t('conn_error'),false);return;}secpFill(await r.json());}

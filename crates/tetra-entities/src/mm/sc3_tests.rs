@@ -1,6 +1,7 @@
 use super::*;
 use tetra_config::bluestation::sec_security::{CfgAie, CfgClass3, CipherKey, SubscriberKey};
 use tetra_pdus::mm::pdus::otar_cck::AuthenticationUplink;
+use tetra_security::auth::answer_ms_challenge;
 use tetra_security::taa1::{ta11, ta12, ta32};
 
 #[test]
@@ -668,5 +669,241 @@ fn r4_encrypted_periodic_registration_switches_dck_at_result_ack_before_lu_accep
             assert!(q.pop_front().is_none());
             assert_eq!(mm.config.state_read().sc3_status[&MS].phase,"timeout");
         }
+    }
+}
+
+// ───────────── Key management: authentication data from the server (`keys-v1`) ─────────────
+
+use crate::net_control::auc::{AucStore, Handle};
+use crate::net_control::commands::{AuthVectorWire, ControlResponse};
+
+/// A class 3 station with `key_source = "server"`: no K in its config, sets from `auc`.
+fn server_station(known: &[u32], sets: &[[u8; 10]]) -> (MmBs, Handle) {
+    let mut mm = station();
+    {
+        let mut cfg = (*mm.config.config()).clone();
+        cfg.security.subscribers.clear();
+        cfg.security.key_source = tetra_config::bluestation::KeySource::Server;
+        mm.config = SharedConfig::from_parts(cfg, None);
+    }
+    let auc: Handle = std::sync::Arc::new(std::sync::Mutex::new(AucStore::default()));
+    {
+        let mut s = auc.lock().unwrap();
+        s.subscribers(known, &[]);
+        let wire: Vec<_> = sets.iter().map(|rs| AuthVectorWire::from_vector(&AuthVector::from_k(&AuthKey(K), *rs))).collect();
+        if !wire.is_empty() {
+            s.add(MS, &wire);
+        }
+        s.take_arrived();
+    }
+    (mm.with_auc(auc.clone()), auc)
+}
+
+fn reject_cause(q: &mut MessageQueue) -> Option<u8> {
+    while let Some(m) = q.pop_front() {
+        if let SapMsgInner::LmmMleUnitdataReq(mut req) = m.msg
+            && req.sdu.peek_bits(4) == Some(tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl::DLocationUpdateReject.into_raw())
+        {
+            req.sdu.read_field(4, "pdu_type").unwrap();
+            req.sdu.read_field(3, "location_update_type").unwrap();
+            return Some(req.sdu.read_field(5, "reject_cause").unwrap() as u8);
+        }
+    }
+    None
+}
+
+#[test]
+fn keys_server_registration_authenticates_with_one_stock_set_and_reports_it() {
+    let (mut mm, auc) = server_station(&[MS], &[[0x31; 10], [0x32; 10]]);
+    let mut q = MessageQueue::new();
+    mm.rx_u_location_update_demand(&mut q, registration(MS, None));
+    // EN 300 392-7 clause 4.1.1: RS of the set goes to the radio, RAND1 is the station's own.
+    assert_eq!(mm.auth_pending[&MS].challenge.rs, [0x31; 10]);
+    assert_eq!(auc.lock().unwrap().count(MS), 1, "the set is taken from the stock");
+    let (res1, dck) = answer(&mm, &K);
+    mm.rx_u_authentication_response(&mut q, MS, 0, UAuthenticationResponse { res1, rand2: None, proprietary: None });
+    let (_, receipt) = accept(&mut q);
+    receipt.mark_transmitted();
+    receipt.mark_acknowledged();
+    mm.process_pending_ciphering();
+    assert_eq!(mm.config.state_read().sc3_dcks.get(&MS).unwrap().0, dck);
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::AuthReport { issi: MS, ok: true, mutual: false, left: Some(1), rs }] if rs == "31313131313131313131"));
+}
+
+#[test]
+fn keys_server_wrong_res_is_rejected_and_reported_as_failed() {
+    let (mut mm, auc) = server_station(&[MS], &[[0x31; 10]]);
+    let mut q = MessageQueue::new();
+    mm.rx_u_location_update_demand(&mut q, registration(MS, None));
+    let (res1, _) = answer(&mm, &[0x88; 16]);
+    mm.rx_u_authentication_response(&mut q, MS, 0, UAuthenticationResponse { res1, rand2: None, proprietary: None });
+    assert!(mm.config.state_read().sc3_dcks.is_empty());
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::AuthReport { issi: MS, ok: false, .. }]));
+}
+
+#[test]
+fn keys_server_embedded_rand2_is_answered_from_ks_prime() {
+    let (mut mm, _auc) = server_station(&[MS], &[[0x41; 10]]);
+    let mut q = MessageQueue::new();
+    let rand2 = [0x19; 10];
+    mm.rx_u_location_update_demand(&mut q, registration(MS, Some(rand2)));
+    let (res1, dck1) = answer(&mm, &K);
+    // The station holds no K: RES2 / DCK2 come from KS' of the set (TA22) and match the radio's.
+    let dck2 = answer_ms_challenge(&AuthKey(K), &[0x41; 10], &rand2).dck2;
+    let expected = derive_dck(Some(&dck1), Some(&dck2));
+    mm.rx_u_authentication_result(&mut q, MS, 0, transmitted_ack(), UAuthenticationResult { r2: true, res1: Some(res1), proprietary: None });
+    let (_, receipt) = accept(&mut q);
+    receipt.mark_transmitted();
+    receipt.mark_acknowledged();
+    mm.process_pending_ciphering();
+    assert_eq!(mm.config.state_read().sc3_dcks.get(&MS).unwrap().0, expected.0);
+}
+
+#[test]
+fn keys_server_empty_stock_holds_the_registration_until_sets_arrive() {
+    let (mut mm, auc) = server_station(&[MS], &[]);
+    let mut q = MessageQueue::new();
+    mm.rx_u_location_update_demand(&mut q, registration(MS, None));
+    assert!(q.pop_front().is_none(), "nothing on air while the sets are requested");
+    assert!(matches!(&auc.lock().unwrap().drain_outbox()[..], [ControlResponse::AuthVectorRequest { issi: MS }]));
+    // A repeat of the registration only replaces the held one.
+    mm.rx_u_location_update_demand(&mut q, registration(MS, None));
+    assert!(q.pop_front().is_none() && auc.lock().unwrap().drain_outbox().is_empty());
+    mm.process_auth_waiting(&mut q);
+    assert!(q.pop_front().is_none() && !mm.auth_pending.contains_key(&MS));
+    auc.lock().unwrap().add(MS, &[AuthVectorWire::from_vector(&AuthVector::from_k(&AuthKey(K), [0x51; 10]))]);
+    mm.process_auth_waiting(&mut q);
+    assert_eq!(mm.auth_pending[&MS].challenge.rs, [0x51; 10], "challenge goes out with the new set");
+    assert!(!mm.auth_waiting.contains_key(&MS));
+}
+
+#[test]
+fn keys_server_no_sets_within_the_wait_rejects_when_required() {
+    let (mut mm, _auc) = server_station(&[MS], &[]);
+    let mut q = MessageQueue::new();
+    mm.rx_u_location_update_demand(&mut q, registration(MS, None));
+    mm.auth_waiting.get_mut(&MS).unwrap().since = Instant::now() - AUC_WAIT - Duration::from_millis(1);
+    mm.process_auth_waiting(&mut q);
+    assert_eq!(reject_cause(&mut q), Some(RejectCause::IllegalMs as u8));
+    assert!(!mm.auth_waiting.contains_key(&MS) && !mm.auth_pending.contains_key(&MS));
+}
+
+#[test]
+fn keys_server_radio_without_k_at_the_server_is_not_asked_for() {
+    let (mut mm, auc) = server_station(&[], &[]);
+    let mut q = MessageQueue::new();
+    mm.rx_u_location_update_demand(&mut q, registration(MS, None));
+    assert_eq!(reject_cause(&mut q), Some(RejectCause::IllegalMs as u8));
+    assert!(auc.lock().unwrap().drain_outbox().is_empty());
+}
+
+#[test]
+fn keys_server_otar_sck_is_refused_without_local_k() {
+    let (mut mm, _auc) = server_station(&[MS], &[[0x61; 10]]);
+    let mut q = MessageQueue::new();
+    mm.otar_sck_provide(&mut q, MS, "test");
+    assert!(q.pop_front().is_none() && mm.otar_pending.is_empty());
+}
+
+/// Simulation (project rule: 10 stations, 25 radios): a test authentication centre holds K of 25
+/// radios and serves 10 stations with `key_source = "server"` over the control channel's JSON.
+/// Radios register and move between stations; then the server goes away and the stations go on
+/// from their stock until it runs out.
+#[test]
+fn keys_server_simulation_10_stations_25_radios() {
+    use crate::net_control::codec::ControlCodecJson;
+    use crate::net_control::commands::ControlCommand;
+    const STATIONS: usize = 10;
+    const RADIOS: u32 = 25;
+    const STOCK: usize = 3;
+    let k_of = |issi: u32| -> [u8; 16] { std::array::from_fn(|i| (issi as u8).wrapping_mul(31).wrapping_add(i as u8 * 7)) };
+    let issis: Vec<u32> = (0..RADIOS).map(|i| 2_320_000 + i).collect();
+    let mut rs_counter: u64 = 0;
+    // The test AuC: fresh RS per set, KS / KS' from K (clause 4.1.1), sent as JSON like brew-server.
+    let mut auc_vectors = |issi: u32, n: usize| -> Vec<u8> {
+        let vectors: Vec<serde_json::Value> = (0..n)
+            .map(|_| {
+                rs_counter += 1;
+                let mut rs = [0u8; 10];
+                rs[..8].copy_from_slice(&rs_counter.to_be_bytes());
+                let w = AuthVectorWire::from_vector(&AuthVector::from_k(&AuthKey(k_of(issi)), rs));
+                serde_json::json!({"rs": w.rs, "ks": w.ks, "ks_p": w.ks_p})
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({"AuthVectors": {"issi": issi, "vectors": vectors}})).unwrap()
+    };
+    let deliver = |auc: &Handle, json: &[u8]| match ControlCodecJson.decode_command(json).unwrap() {
+        ControlCommand::AuthVectors { issi, vectors } => auc.lock().unwrap().add(issi, &vectors),
+        ControlCommand::AuthSubscribers { issis, drop } => {
+            auc.lock().unwrap().subscribers(&issis, &drop);
+        }
+        other => panic!("{other:?}"),
+    };
+    let subscribers = serde_json::to_vec(&serde_json::json!({"AuthSubscribers": {"issis": issis}})).unwrap();
+    let mut stations: Vec<(MmBs, Handle)> = (0..STATIONS)
+        .map(|_| {
+            let (mm, auc) = server_station(&[], &[]);
+            deliver(&auc, &subscribers);
+            (mm, auc)
+        })
+        .collect();
+
+    // One registration of `issi` at station `s`; `online`: the AuC answers requests.
+    let mut sent: Vec<ControlResponse> = Vec::new();
+    let mut register = |stations: &mut Vec<(MmBs, Handle)>, sent: &mut Vec<ControlResponse>, s: usize, issi: u32, online: bool| -> bool {
+        let (mm, auc) = &mut stations[s];
+        let mut q = MessageQueue::new();
+        mm.rx_u_location_update_demand(&mut q, registration(issi, None));
+        if mm.auth_waiting.contains_key(&issi) {
+            let out = auc.lock().unwrap().drain_outbox();
+            assert!(out.iter().any(|r| matches!(r, ControlResponse::AuthVectorRequest { issi: i } if *i == issi)));
+            sent.extend(out);
+            if online {
+                deliver(auc, &auc_vectors(issi, STOCK));
+            } else {
+                mm.auth_waiting.get_mut(&issi).unwrap().since = Instant::now() - AUC_WAIT - Duration::from_millis(1);
+            }
+            mm.process_auth_waiting(&mut q);
+        }
+        let Some(p) = mm.auth_pending.get(&issi) else { return false };
+        // The radio answers with its own K.
+        let res1 = ta12(&ta11(&k_of(issi), &p.challenge.rs), &p.challenge.rand1).res;
+        mm.rx_u_authentication_response(&mut q, issi, 0, UAuthenticationResponse { res1, rand2: None, proprietary: None });
+        let (_, receipt) = accept(&mut q);
+        receipt.mark_transmitted();
+        receipt.mark_acknowledged();
+        mm.process_pending_ciphering();
+        let ok = mm.config.state_read().sc3_dcks.contains_key(&issi);
+        sent.extend(auc.lock().unwrap().drain_outbox());
+        mm.clear_registration_transients(issi);
+        mm.config.state_write().sc3_dcks.remove(&issi);
+        ok
+    };
+
+    // Phase 1, server online: every radio registers at three stations in turn.
+    let mut ok = 0;
+    for (n, &issi) in issis.iter().enumerate() {
+        for hop in 0..3 {
+            ok += register(&mut stations, &mut sent, (n + hop * 3) % STATIONS, issi, true) as usize;
+        }
+    }
+    assert_eq!(ok, RADIOS as usize * 3, "every registration authenticated");
+    let reports = sent.iter().filter(|r| matches!(r, ControlResponse::AuthReport { ok: true, .. })).count();
+    assert_eq!(reports, RADIOS as usize * 3, "every set reported once");
+
+    // Phase 2, server gone: radio 0 comes back to station 0, which has STOCK - 1 sets left.
+    let issi = issis[0];
+    let left = stations[0].1.lock().unwrap().count(issi) as usize;
+    assert_eq!(left, STOCK - 1);
+    for _ in 0..left {
+        assert!(register(&mut stations, &mut sent, 0, issi, false), "authenticated from the stock while the server is away");
+    }
+    assert!(!register(&mut stations, &mut sent, 0, issi, false), "stock used up: no authentication (8d adds the fallback)");
+    // The stock file of every station keeps no K.
+    for (_, auc) in &stations {
+        let s = auc.lock().unwrap();
+        assert!(s.total() <= RADIOS * STOCK as u32);
     }
 }
