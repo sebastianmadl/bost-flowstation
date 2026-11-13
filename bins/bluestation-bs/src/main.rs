@@ -633,6 +633,8 @@ fn main() {
     };
     // Multi-cell: every cell advertises its siblings as neighbours for reselection.
     stack_cfg.add_sibling_neighbours();
+    // Key management (`sck-v1`): a class 2 cell keeps the server's SCK it was running with.
+    let server_sck_note = tetra_entities::net_control::auc::apply_server_sck(&args.config, &mut stack_cfg);
 
     // Build immutable, cheaply clonable SharedConfig and build the base station stack. The
     // primary config was already parsed+validated by load_config_with_fallback, so this should
@@ -663,6 +665,9 @@ fn main() {
     // data sets kept from the last run; with local keys an old stock is removed.
     let server_keys = cfg.config().security.key_source == tetra_config::bluestation::KeySource::Server;
     tetra_entities::net_control::auc::boot(&args.config, server_keys);
+    if let Some(note) = server_sck_note {
+        tracing::info!("{}", note);
+    }
 
     // Apply explicit systemd service name from config, if provided.
     // Used by SDS command control (restart/shutdown) and dashboard OTA.

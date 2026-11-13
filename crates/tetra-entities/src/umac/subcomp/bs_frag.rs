@@ -316,9 +316,9 @@ impl BsFragger {
                 if let Some(addr) = hdr.addr.as_mut()
                     && matches!(addr.ssi_type, SsiType::Ssi | SsiType::Issi | SsiType::Gssi)
                 {
-                    addr.ssi = c.cipher.esi(addr.ssi);
+                    addr.ssi = c.cipher.esi_at(c.time, addr.ssi);
                 }
-                hdr.encryption_mode = c.cipher.encryption_mode();
+                hdr.encryption_mode = c.cipher.encryption_mode_at(c.time);
                 hdr.to_bitbuf(mac_block);
             }
             _ => self.resource.to_bitbuf(mac_block),
@@ -422,7 +422,7 @@ mod tests {
         block.seek(0);
         let parsed = MacResource::from_bitbuf(&mut block).unwrap();
         assert_eq!(parsed.encryption_mode, 0b10, "even SCK-VN");
-        assert_eq!(parsed.addr.unwrap().ssi, cipher.esi(1234));
+        assert_eq!(parsed.addr.unwrap().ssi, cipher.esi_at(tetra_core::TdmaTime::default(), 1234));
         let hdr_len = parsed.compute_header_len();
 
         // Decrypt the TM-SDU with the same key stream: the clear bits come back.
@@ -479,7 +479,7 @@ mod tests {
             assert!(slot.used); block.seek(0);
             let offset = if first {
                 let header = MacResource::from_bitbuf(&mut block).unwrap();
-                assert_eq!(header.addr.unwrap().ssi,cipher.esi(1234));
+                assert_eq!(header.addr.unwrap().ssi,cipher.esi_at(tetra_core::TdmaTime::default(), 1234));
                 assert_eq!(header.encryption_mode,0b10); block.get_pos()
             } else if done { MacEndDl::from_bitbuf(&mut block).unwrap(); block.get_pos() }
               else { MacFragDl::from_bitbuf(&mut block).unwrap(); block.get_pos() };

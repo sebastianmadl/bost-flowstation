@@ -18,10 +18,16 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tetra_security::auth::AuthVector;
 
-use super::commands::{AuthVectorWire, ControlResponse, IssiCount};
+use tetra_config::bluestation::{CipherKey, SckKey, StackConfig};
+
+use super::commands::{AuthVectorWire, ControlResponse, IssiCount, SckRef, SckWire, SealedSckWire};
 
 /// Station capability: understands `AuthSubscribers` / `AuthVectors`.
 pub const CAP_KEYS: &str = "keys-v1";
+
+/// Station capability: understands `SckKeys` / `SckSealed` / `SckActivate` (security class 2 keys
+/// from the server).
+pub const CAP_SCK: &str = "sck-v1";
 
 /// A radio without sets is asked for at most this often.
 const REQUEST_EVERY: Duration = Duration::from_secs(5);
@@ -62,12 +68,67 @@ pub struct AucStore {
     requested: HashMap<u32, Instant>,
     /// Radios that got sets since MM last looked (to go on with a held registration).
     arrived: BTreeSet<u32>,
+    /// Class 2 SCKs from the server.
+    sck: SckFile,
+    /// Sealed SCK deliveries for MM to send.
+    sealed: VecDeque<(u32, String, Vec<SealedSckWire>, Instant)>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct File {
     known: Vec<u32>,
     sets: BTreeMap<u32, Vec<AuthVectorWire>>,
+    #[serde(default)]
+    sck: SckFile,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+struct SckFile {
+    /// The server's keys (current and next).
+    keys: Vec<SckWire>,
+    /// The key in use once the server's key took over (`None`: the config key).
+    active: Option<SckWire>,
+    /// Planned change: the key and the server time (Unix ms).
+    switch: Option<(SckWire, u64)>,
+}
+
+/// SHA-256(key), first 8 bytes, upper case hex: the check value the server shows.
+pub fn check_value(key: &[u8]) -> String {
+    let d = ring::digest::digest(&ring::digest::SHA256, key);
+    hex(&d.as_ref()[..8]).to_uppercase()
+}
+
+fn sck_key(w: &SckWire) -> Option<SckKey> {
+    if !(1..=32).contains(&w.sckn) {
+        return None;
+    }
+    Some(SckKey { sckn: w.sckn, vn: w.vn, key: CipherKey(unhex::<10>(&w.key.to_ascii_lowercase())?) })
+}
+
+fn sck_ref(k: &SckKey) -> SckRef {
+    SckRef { sckn: k.sckn, vn: k.vn, check: check_value(&k.key.0) }
+}
+
+/// The SCK in use when the station runs with its own config key.
+pub fn config_sck(cfg: &StackConfig) -> Option<SckKey> {
+    let aie = cfg.security.aie.as_ref().filter(|a| a.class3.is_none())?;
+    Some(SckKey { sckn: aie.sckn, vn: aie.sck_vn, key: aie.sck.clone() })
+}
+
+/// Before the stack is built: with `key_source = "server"` a class 2 cell runs with the server's
+/// SCK that was in use when the station stopped (kept in `<config>.auth-sets`), instead of the
+/// one in `[security.aie]`. Returns a line for the log (written once logging is up).
+pub fn apply_server_sck(config_path: &str, cfg: &mut StackConfig) -> Option<String> {
+    if cfg.security.key_source != tetra_config::bluestation::KeySource::Server {
+        return None;
+    }
+    let aie = cfg.security.aie.as_mut().filter(|a| a.class3.is_none())?;
+    let f = std::fs::read(format!("{config_path}.auth-sets")).ok().and_then(|b| serde_json::from_slice::<File>(&b).ok())?;
+    let key = f.sck.active.as_ref().and_then(sck_key)?;
+    aie.sckn = key.sckn;
+    aie.sck_vn = key.vn;
+    aie.sck = key.key;
+    Some(format!("Key management: class 2 runs with the server's SCK {} version {}", aie.sckn, aie.sck_vn))
 }
 
 impl AucStore {
@@ -80,6 +141,7 @@ impl AucStore {
                 .map(|(issi, v)| (issi, v.iter().filter_map(AuthVectorWire::to_vector).collect()))
                 .collect();
             tracing::info!("Key management: {} authentication data sets for {} radios loaded", self.total(), self.sets.len());
+            self.sck = f.sck;
         }
         self.path = Some(path);
     }
@@ -89,6 +151,7 @@ impl AucStore {
         let f = File {
             known: self.known.iter().copied().collect(),
             sets: self.sets.iter().map(|(i, v)| (*i, v.iter().map(AuthVectorWire::from_vector).collect())).collect(),
+            sck: self.sck.clone(),
         };
         let Ok(bytes) = serde_json::to_vec(&f) else { return };
         if let Err(e) = write_private(path, &bytes) {
@@ -185,7 +248,117 @@ impl AucStore {
     pub fn clear(&mut self) {
         self.known.clear();
         self.sets.clear();
+        self.sck = SckFile::default();
         self.save();
+    }
+
+    // ───────────── class 2 SCKs (`sck-v1`) ─────────────
+
+    /// The server's SCKs (current, next). Invalid entries are dropped. A planned change to a key
+    /// the server no longer lists is cancelled.
+    pub fn set_sck_keys(&mut self, keys: &[SckWire]) {
+        self.sck.keys = keys.iter().filter(|w| sck_key(w).is_some()).cloned().collect();
+        if let Some((w, _)) = &self.sck.switch
+            && !self.sck.keys.iter().any(|k| k.sckn == w.sckn && k.vn == w.vn && k.key == w.key)
+        {
+            tracing::warn!("Key management: planned SCK change cancelled, the server no longer has that key");
+            self.sck.switch = None;
+        }
+        self.save();
+    }
+
+    /// Plan the change to the server key (`sckn`, `vn`) at `at_ms`.
+    pub fn sck_activate(&mut self, sckn: u8, vn: u16, at_ms: u64) -> Result<(), &'static str> {
+        let Some(w) = self.sck.keys.iter().find(|k| k.sckn == sckn && k.vn == vn).cloned() else {
+            return Err("unknown key");
+        };
+        if self.sck.active.as_ref().is_some_and(|a| a.sckn == sckn && a.vn == vn && a.key == w.key) {
+            self.sck.switch = None;
+        } else {
+            self.sck.switch = Some((w, at_ms));
+        }
+        self.save();
+        Ok(())
+    }
+
+    /// The server key in use (`None`: the config key).
+    pub fn sck_active(&self) -> Option<SckKey> {
+        self.sck.active.as_ref().and_then(sck_key)
+    }
+
+    /// The planned change: key and server time (Unix ms).
+    pub fn sck_switch(&self) -> Option<(SckKey, u64)> {
+        let (w, at) = self.sck.switch.as_ref()?;
+        Some((sck_key(w)?, *at))
+    }
+
+    /// The change to `key` took place: it is the key in use and the current one of the set.
+    pub fn commit_sck(&mut self, key: &SckKey, config: Option<&SckKey>) {
+        if self.sck_active().as_ref() == Some(key) && self.sck.switch.is_none() {
+            return;
+        }
+        let w = SckWire { sckn: key.sckn, vn: key.vn, key: hex(&key.key.0), next: false };
+        self.sck.active = Some(w);
+        self.sck.switch = None;
+        // The server sends its new set once it hears of the change; until then only this key.
+        self.sck.keys.retain(|k| k.sckn == key.sckn && k.vn == key.vn);
+        for k in &mut self.sck.keys {
+            k.next = false;
+        }
+        self.save();
+        tracing::info!("Key management: SCK {} version {} is in use now", key.sckn, key.vn);
+        let state = self.sck_state(config);
+        self.outbox.push(state);
+    }
+
+    /// What the station runs with, for the server. `config`: the key of `[security.aie]`.
+    pub fn sck_state(&self, config: Option<&SckKey>) -> ControlResponse {
+        let active = self.sck_active();
+        ControlResponse::SckState {
+            from_config: active.is_none() && config.is_some(),
+            active: active.as_ref().or(config).map(sck_ref),
+            keys: self.sck.keys.iter().filter_map(sck_key).map(|k| sck_ref(&k)).collect(),
+            switch_at_ms: self.sck.switch.as_ref().map(|(_, at)| *at),
+        }
+    }
+
+    /// The server key with this number and version, if the station holds it.
+    pub fn sck_by_number(&self, sckn: u8) -> Vec<SckKey> {
+        self.sck.keys.iter().filter_map(sck_key).filter(|k| k.sckn == sckn).collect()
+    }
+
+    pub fn push_sealed(&mut self, issi: u32, rso: String, keys: Vec<SealedSckWire>) {
+        self.sealed.push_back((issi, rso, keys, Instant::now()));
+        while self.sealed.len() > 200 {
+            self.sealed.pop_front();
+        }
+    }
+
+    /// Sealed deliveries for radios `mine` says are here; the others stay for another cell.
+    pub fn take_sealed(&mut self, mine: impl Fn(u32) -> bool) -> Vec<(u32, String, Vec<SealedSckWire>)> {
+        let (take, keep): (Vec<_>, Vec<_>) = self.sealed.drain(..).partition(|(i, _, _, _)| mine(*i));
+        self.sealed = keep.into();
+        take.into_iter().map(|(i, r, k, _)| (i, r, k)).collect()
+    }
+
+    /// Deliveries no cell took within `age` (the radio is not registered here): reported to the
+    /// server as not delivered.
+    pub fn drop_stale_sealed(&mut self, age: Duration) {
+        let (stale, keep): (Vec<_>, Vec<_>) = self.sealed.drain(..).partition(|(_, _, _, t)| t.elapsed() >= age);
+        self.sealed = keep.into();
+        for (issi, _, keys, _) in stale {
+            for k in keys {
+                self.sck_result(issi, k.sckn, k.vn, false, Some("radio not registered".into()));
+            }
+        }
+    }
+
+    pub fn sck_demand(&mut self, issi: u32, sckns: Vec<u8>) {
+        self.outbox.push(ControlResponse::SckDemand { issi, sckns });
+    }
+
+    pub fn sck_result(&mut self, issi: u32, sckn: u8, vn: u16, ok: bool, detail: Option<String>) {
+        self.outbox.push(ControlResponse::SckResult { issi, sckn, vn, ok, detail });
     }
 }
 

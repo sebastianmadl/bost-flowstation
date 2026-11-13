@@ -1536,7 +1536,7 @@ fn test_encrypted_mac_access_is_decrypted() {
     MacAccess {
         fill_bits: false,
         encrypted: true,
-        addr: Some(TetraAddress { ssi: cipher.esi(issi), ssi_type: SsiType::Esi }),
+        addr: Some(TetraAddress { ssi: cipher.esi_at(tetra_core::TdmaTime::default(), issi), ssi_type: SsiType::Esi }),
         event_label: None,
         length_ind: Some(8),
         frag_flag: None,
@@ -1652,7 +1652,7 @@ fn test_downlink_to_encrypted_radio_is_encrypted() {
 
     let mut encrypted_seen = None;
     let mut clear_seen = None;
-    let esi = cipher.esi(encrypted_issi);
+    let esi = cipher.esi_at(tetra_core::TdmaTime::default(), encrypted_issi);
     for msg in test.dump_sinks() {
         let slots = match msg.msg {
             SapMsgInner::TmvUnitdataReq(slot) => vec![slot],
@@ -1869,7 +1869,7 @@ fn test_facch_to_encrypted_radio_is_encrypted_in_its_slot() {
             let kss = cipher.kss(carrier, slot.ts, false);
             let mut dec1 = slot.blk1.as_ref().unwrap().mac_block.clone();
             if issi == encrypted_issi {
-                assert_eq!(res.addr.unwrap().ssi, cipher.esi(issi), "ESI");
+                assert_eq!(res.addr.unwrap().ssi, cipher.esi_at(tetra_core::TdmaTime::default(), issi), "ESI");
                 assert_ne!(res.encryption_mode, 0);
                 kss.apply(&mut dec1, hdr_len, first_bits, 0);
             } else {
@@ -1933,7 +1933,7 @@ fn test_encrypted_mac_access_is_decrypted_tea2() {
     MacAccess {
         fill_bits: false,
         encrypted: true,
-        addr: Some(TetraAddress { ssi: cipher.esi(issi), ssi_type: SsiType::Esi }),
+        addr: Some(TetraAddress { ssi: cipher.esi_at(tetra_core::TdmaTime::default(), issi), ssi_type: SsiType::Esi }),
         event_label: None,
         length_ind: Some(8),
         frag_flag: None,
@@ -2056,7 +2056,7 @@ fn verify_tea2_downlink_mode(clear_override: bool) {
 
     let mut encrypted_seen = None;
     let mut clear_seen = None;
-    let esi = cipher.esi(encrypted_issi);
+    let esi = cipher.esi_at(tetra_core::TdmaTime::default(), encrypted_issi);
     for msg in test.dump_sinks() {
         let slots = match msg.msg {
             SapMsgInner::TmvUnitdataReq(slot) => vec![slot],

@@ -178,9 +178,25 @@ pub fn runtime_json(shared: &Option<tetra_config::bluestation::SharedConfig>) ->
             "cck": progress.map_or("not_sent", |p| p.cck),
         })
     }).collect() } else { vec![] };
+    drop(state);
     serde_json::json!({"class": cfg.security.aie.as_ref().map_or(1, |a| a.security_class()),
-        "require_sc3": state.security_class3_required, "revision": tetra_core::SC3_REVISION,
-        "cck_id": sc3.map(|c| c.cck_id), "radios": radios})
+        "require_sc3": state_require_sc3(shared), "revision": tetra_core::SC3_REVISION,
+        "cck_id": sc3.map(|c| c.cck_id), "radios": radios, "server_sck": server_sck_json(&cfg)})
+}
+
+fn state_require_sc3(shared: &tetra_config::bluestation::SharedConfig) -> bool {
+    shared.state_read().security_class3_required
+}
+
+/// Class 2 SCK from the Brew server (`sck-v1`): number, version and check value of the key in
+/// use and of the keys held, and a planned change. Never a key value.
+fn server_sck_json(cfg: &tetra_config::bluestation::StackConfig) -> serde_json::Value {
+    if cfg.security.key_source != tetra_config::bluestation::KeySource::Server || cfg.security.aie.as_ref().is_none_or(|a| a.class3.is_some()) {
+        return serde_json::Value::Null;
+    }
+    let config_key = crate::net_control::auc::config_sck(cfg);
+    let state = crate::net_control::auc::global().lock().unwrap_or_else(|e| e.into_inner()).sck_state(config_key.as_ref());
+    serde_json::to_value(&state).ok().and_then(|v| v.get("SckState").cloned()).unwrap_or(serde_json::Value::Null)
 }
 
 pub fn validate_startup_guard(edit: &SecurityEdit, shared: &Option<tetra_config::bluestation::SharedConfig>) -> Result<(), &'static str> {

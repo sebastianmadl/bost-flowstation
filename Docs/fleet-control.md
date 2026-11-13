@@ -293,8 +293,7 @@ restart while the server is away. No set for a radio the server has K for: the
 station asks for sets and holds the registration up to 2 s; without an answer
 the radio is treated as one without a key (`required`: rejected, `optional`:
 registered unauthenticated). With `key_source = "local"` an old stock file is
-deleted at start. OTAR of the SCK from the station is refused while it uses
-server keys (phase 8b).
+deleted at start. With server keys the SCK also comes from the server (below).
 
 The switch is a config change (`config-v1`): `{"keys": {"source": "server",
 "drop_local_keys": true}}` removes `[[security.subscribers]]` (refused without
@@ -307,6 +306,51 @@ characters) downloads `bost-keys-v1`: JSON `{format, kdf:
 `ISSI;K` sealed with AES-256-GCM under PBKDF2-HMAC-SHA256(password, salt).
 Import it on the server's Keys page. `POST /api/security/export
 {"password"}`.
+
+### Static cipher keys from the server (`sck-v1`, phase 8b)
+
+With server keys the station also takes the security class 2 SCK from the server
+(EN 300 392-7 clause 4.2.4.0). Per network the server holds the current key and,
+before a change, the next one. The station gets both in clear over the TLS control
+channel, because it encrypts the air interface with them; a radio gets them sealed
+under its own K by the server (clause 4.5.2.2: KSO = TA41(K, RSO),
+SSCK = TA51(SCK, SCK-VN, KSO, SCKN)), so the station never sees K. Messages (only
+acted on with `key_source = "server"`):
+
+```json
+{"SckKeys": {"keys": [{"sckn": 1, "vn": 3, "key": "<20 hex>"}, {"sckn": 2, "vn": 4, "key": "<20 hex>", "next": true}]}}
+{"SckSealed": {"issi": 2320972, "rso": "<20 hex>", "keys": [{"sckn": 1, "vn": 3, "ssck": "<30 hex>"}]}}
+{"SckActivate": {"sckn": 2, "vn": 4, "at_ms": 1763049600000}}
+{"SckState": {"active": {"sckn": 1, "vn": 3, "check": "<16 hex>"}, "from_config": false, "keys": [...], "switch_at_ms": null}}   // station
+{"SckDemand": {"issi": 2320972, "sckns": [2]}}                                                      // station
+{"SckResult": {"issi": 2320972, "sckn": 2, "vn": 4, "ok": true}}                                    // station
+```
+
+- `SckKeys`: the keys are kept in `<config>.auth-sets` (mode 600). At start the
+  station runs on the server key that was in use when it stopped, else on the key of its
+  own `[security.aie]` (`from_config`). It answers with `SckState` (keys named by
+  check value SHA-256(SCK)[:8], never the value).
+- `SckSealed`: MM sends a D-OTAR SCK PROVIDE to the radio if it is registered
+  here; otherwise, after 5 s, it reports `SckResult` with `ok: false` and
+  `detail: "radio not registered"`. Empty `keys` (the server has nothing for the
+  radio) becomes a D-OTAR SCK REJECT "key not available" per number asked for.
+  The radio's U-OTAR SCK RESULT goes back as `SckResult`. A radio's own
+  U-OTAR SCK DEMAND, and the dashboard's OTAR SCK button, go to the server as
+  `SckDemand`.
+- `SckActivate`: the network wide change (clause 4.5.5.4). The station turns the
+  server time `at_ms` into the first slot of the first frame of the multiframe
+  that starts at or after it (an absolute IV, clause 4.5.5.6), sends every radio
+  registered with encryption a D-CK CHANGE DEMAND (A.4.1, key change type SCK,
+  SCK use TMO, time type absolute IV) and switches on that slot: downlink,
+  SYSINFO SCKN / SCK-VN and the MAC-RESOURCE VN parity at once, the uplink two
+  slots later so bursts still under way are deciphered with the old key. 72 slots
+  later it keeps only the new key and reports `SckState`. A time in the past
+  switches at the next multiframe. A station that missed a change while offline is
+  switched by the server when it comes back; a station still on its own config key
+  only switches when the server activates the current key for it.
+
+**Back to local keys** writes the server's active SCK (key, `sckn`, `sck_vn`) into
+`[security.aie]`, so class 2 keeps running with the key the radios hold.
 
 ## HTTP API (dashboard)
 

@@ -55,6 +55,7 @@ use tetra_pdus::mm::pdus::authentication::{
 use tetra_pdus::mm::pdus::otar_sck::{self, DOtarSckProvide, DOtarSckReject, OtarSessionKey, SckKeyAndIdentifier, UOtarSckDemand, UOtarSckResult};
 use tetra_security::auth::{AuthVector, MsChallenge, answer_with_vector, derive_dck, random_nonce};
 use tetra_security::keys::{AuthKey, CipherKey as SecCipherKey};
+use tetra_pdus::mm::pdus::ck_change::{ChangeTime, DCkChangeDemand, KeyChange};
 use tetra_pdus::mm::pdus::otar_cck::{AuthenticationDownlink, CckInformation, CckLocations, DOtarCckProvide, UOtarCckDemand, UOtarCckResult};
 use tetra_security::taa1::{ta41, ta51};
 
@@ -98,8 +99,8 @@ struct PendingAuthResult {
 }
 
 struct PendingOtar {
-    sckn: u8,
-    sck_vn: u16,
+    /// The keys sent, (SCKN 1..=32, SCK-VN).
+    keys: Vec<(u8, u16)>,
     started: Instant,
 }
 
@@ -118,6 +119,25 @@ struct PendingCiphering {
 const T354: Duration = Duration::from_secs(30);
 /// How long a successful authentication stays valid for the held registration to go through.
 const AUTH_PASS_GRACE: Duration = Duration::from_secs(5);
+/// A planned SCK change is committed this many slots (one multiframe) after it took effect.
+const SCK_COMMIT_AFTER_SLOTS: i32 = 4 * 18;
+/// A sealed delivery no cell took (radio not registered here) is reported back after this.
+const SEALED_UNCLAIMED: Duration = Duration::from_secs(5);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// The slot of an SCK change at server time `at_ms`, seen from `ts` at `now_ms`: the first slot
+/// of the multiframe that starts at or after that time (a past time: the next multiframe,
+/// "immediate" in clause 4.5.5.6). One slot is 255/18 ms (TS 100 392-2 clause 7).
+pub(crate) fn sck_change_slot(ts: TdmaTime, at_ms: u64, now_ms: u64) -> TdmaTime {
+    let slots = (at_ms.saturating_sub(now_ms) * 18).div_ceil(255).min(i32::MAX as u64 / 2) as i32;
+    let t = ts.add_timeslots(slots.max(1));
+    let into_mf = t.to_int().rem_euclid(4 * 18);
+    if into_mf == 0 { t } else { t.add_timeslots(4 * 18 - into_mf) }
+}
+
 /// How long to wait for U-OTAR SCK RESULT after an individually addressed provide.
 const T_OTAR_RESULT: Duration = Duration::from_secs(30);
 /// Maximum time to retain a location-update ciphering transition without an LLC ACK.
@@ -158,6 +178,9 @@ pub struct MmBs {
     cck_pending: HashMap<u32, Instant>,
     /// SCK deliveries awaiting the radio's U-OTAR SCK RESULT.
     otar_pending: HashMap<u32, PendingOtar>,
+    /// Radios whose U-OTAR SCK DEMAND waits for the server's answer (ISSI → handle and the
+    /// requested numbers as on air).
+    sck_demands: HashMap<u32, (u32, Vec<u8>)>,
     /// Ciphering changes awaiting the LLC ACK of D-LOCATION-UPDATE-ACCEPT.
     pending_ciphering: HashMap<u32, PendingCiphering>,
     /// Transport mode of the current registration, independent of the old active DCK.
@@ -256,6 +279,7 @@ impl MmBs {
             auth_ack_pending: HashMap::new(),
             cck_pending: HashMap::new(),
             otar_pending: HashMap::new(),
+            sck_demands: HashMap::new(),
             pending_ciphering: HashMap::new(),
             registration_encryption: HashMap::new(),
             recovery: None,
@@ -744,6 +768,7 @@ impl MmBs {
         self.config.state_write().sc3_dcks.remove(&issi);
         self.config.state_write().sc3_status.remove(&issi);
         self.otar_pending.remove(&issi);
+        self.sck_demands.remove(&issi);
         self.pending_ciphering.remove(&issi);
         self.registration_encryption.remove(&issi);
         self.group_report_in_flight.remove(&issi);
@@ -1048,8 +1073,8 @@ impl MmBs {
         // Air interface encryption (EN 300 392-7 clause 6.5): class 2 radios register with the
         // cell's SCK; radios without AIE register in clear (mixed cell).
         let (ciphering, preferred) = {
-            let cfg = self.config.config();
-            let aie = crate::aie::effective(&cfg);
+            let aie_now = self.aie_now();
+            let aie = aie_now.as_ref();
             (
                 crate::aie::registration_decision(aie, pdu.cipher_control, pdu.ciphering_parameters),
                 aie.map(crate::aie::preferred_parameters),
@@ -2364,7 +2389,7 @@ impl MmBs {
             MmPduTypeUl::UItsiDetach => self.rx_u_itsi_detach(queue, message),
             MmPduTypeUl::ULocationUpdateDemand => self.rx_u_location_update_demand(queue, message),
             MmPduTypeUl::UMmStatus => self.rx_u_mm_status(queue, message),
-            MmPduTypeUl::UCkChangeResult => unimplemented_log!("UCkChangeResult"),
+            MmPduTypeUl::UCkChangeResult => self.rx_u_ck_change_result(message),
             MmPduTypeUl::UOtar => self.rx_u_otar(queue, message),
             MmPduTypeUl::UInformationProvide => unimplemented_log!("UInformationProvide"),
             MmPduTypeUl::UAttachDetachGroupIdentity => self.rx_u_attach_detach_group_identity(queue, message),
@@ -2940,10 +2965,7 @@ impl MmBs {
         // on reactive recovery / DMO->TMO re-attach, potentially downgrading an MS
         // that had just transmitted encrypted MAC-ACCESS. EN 300 392-7 6.6.2.1.2.
         // The COMMAND itself remains clear: the MS may not have a live L2 AIE context.
-        let ciphering = {
-            let cfg = self.config.config();
-            crate::aie::effective(&cfg).map(crate::aie::preferred_parameters)
-        };
+        let ciphering = self.aie_now().as_ref().map(crate::aie::preferred_parameters);
         tracing::info!(
             "MM: D-LOCATION-UPDATE-COMMAND to ISSI {}: group_report=true ciphering={:?}",
             issi, ciphering
@@ -3503,6 +3525,8 @@ impl TetraEntityTrait for MmBs {
         self.expire_authentication();
         self.process_auth_waiting(queue);
         self.expire_otar();
+        self.process_sck_sealed(queue);
+        self.sync_sck(queue, ts);
         self.process_authentication_acks(queue);
         self.process_pending_ciphering();
         // Drain control commands addressed to the MM entity. We collect into a Vec first so the
@@ -4308,9 +4332,10 @@ impl MmBs {
             return;
         };
         if self.server_keys() {
-            // K stays at the server (clause 4.1.1); SCK delivery through the server comes later.
-            tracing::warn!("MM: OTAR to ISSI {} ({}) refused — keys come from the server (key_source = server)", issi, why);
-            self.notify_otar(issi, aie.sckn, aie.sck_vn, "keys are managed by the server");
+            // K stays at the server (clause 4.1.1): the server seals the keys for this radio.
+            tracing::info!("MM: OTAR to ISSI {} ({}) — asking the server to seal the network's SCKs", issi, why);
+            self.auc_lock().sck_demand(issi, Vec::new());
+            self.notify_otar(issi, aie.sckn, aie.sck_vn, "asked the server");
             return;
         }
         let Some(k) = self.subscriber_key(issi) else {
@@ -4341,7 +4366,7 @@ impl MmBs {
         };
         tracing::info!("MM: OTAR ({}) — sending {} SCK {} v{} to ISSI {}", why, format!("TEA{}", aie.ksg), aie.sckn, aie.sck_vn, issi);
         self.send_auth_pdu(queue, issi, 0, "DOtarSckProvide", |b| pdu.to_bitbuf(b));
-        self.otar_pending.insert(issi, PendingOtar { sckn: aie.sckn, sck_vn: aie.sck_vn, started: Instant::now() });
+        self.otar_pending.insert(issi, PendingOtar { keys: vec![(aie.sckn, aie.sck_vn)], started: Instant::now() });
         self.notify_otar(issi, aie.sckn, aie.sck_vn, "sent");
     }
 
@@ -4375,6 +4400,20 @@ impl MmBs {
         self.sc3_cck(issi, "sent");
         self.send_auth_pdu(queue, issi, 0, "DOtarCckProvide", |b| pdu.to_bitbuf(b));
         tracing::info!("MM: explicit CCK OTAR to ISSI {}; awaiting U-OTAR CCK RESULT", issi);
+    }
+
+    /// The radio confirms a key change (clause 4.5.5.0). Only logged: the change is announced
+    /// without asking for an acknowledgement.
+    fn rx_u_ck_change_result(&mut self, mut message: SapMsg) {
+        let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
+        let issi = prim.received_address.ssi;
+        match tetra_pdus::mm::pdus::ck_change::UCkChangeResult::from_bitbuf(&mut prim.sdu) {
+            Ok(pdu) => tracing::info!("MM: ISSI {} selected the key change {:?}", issi, pdu.key),
+            Err(e) => tracing::warn!("MM: bad U-CK CHANGE RESULT from ISSI {}: {:?}", issi, e),
+        }
     }
 
     fn rx_u_otar(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
@@ -4443,6 +4482,14 @@ impl MmBs {
     /// The radio asks for SCK(s) by number (clause 4.5.2.1): provide ours if it is among
     /// them, otherwise reject each requested number.
     fn rx_u_otar_sck_demand(&mut self, queue: &mut MessageQueue, issi: u32, handle: u32, pdu: UOtarSckDemand) {
+        if self.server_keys() {
+            // The server holds K and the SCKs; it answers with sealed keys or a rejection.
+            let sckns: Vec<u8> = pdu.sckns.iter().map(|n| n + 1).collect();
+            tracing::info!("MM: ISSI {} requests SCK(s) {:?}; asking the server", issi, sckns);
+            self.sck_demands.insert(issi, (handle, pdu.sckns.clone()));
+            self.auc_lock().sck_demand(issi, sckns);
+            return;
+        }
         let cfg = self.config.config();
         let ours = cfg.security.aie.as_ref().filter(|a| a.class3.is_none()).map(|a| (a.sckn.saturating_sub(1) & 0x1f, a.ksg.saturating_sub(1)));
         tracing::info!(
@@ -4473,62 +4520,226 @@ impl MmBs {
         }
     }
 
-    /// The radio reports whether it could unseal and store the key.
+    /// The radio reports whether it could unseal and store each key.
     fn rx_u_otar_sck_result(&mut self, issi: u32, pdu: UOtarSckResult) {
         let Some(pending) = self.otar_pending.get(&issi) else {
             tracing::warn!("MM: ignoring unsolicited U-OTAR SCK RESULT from ISSI {} (no delivery pending)", issi);
             return;
         };
-        // We send exactly one SCK per DOtarSckProvide. A result naming another
-        // SCK must not consume this transaction or be displayed as success.
-        let [result] = pdu.results.as_slice() else {
+        // Every result must name a key of this delivery; a result naming another SCK must not
+        // consume the transaction or be displayed as success.
+        let named: Vec<(u8, u16)> = pdu
+            .results
+            .iter()
+            .filter_map(|r| pending.keys.iter().find(|(n, _)| *n == r.sckn + 1).copied())
+            .collect();
+        if pdu.results.is_empty() || named.len() != pdu.results.len() {
             tracing::warn!(
-                "MM: ignoring U-OTAR SCK RESULT from ISSI {} (expected one result for SCK {}, got {})",
+                "MM: ignoring U-OTAR SCK RESULT from ISSI {} (results for SCK {:?}, pending {:?})",
                 issi,
-                pending.sckn,
-                pdu.results.len()
-            );
-            return;
-        };
-        let sckn = result.sckn + 1; // SCKN on air is zero-based.
-        if sckn != pending.sckn {
-            tracing::warn!(
-                "MM: ignoring U-OTAR SCK RESULT from ISSI {} for SCK {} (pending SCK {})",
-                issi,
-                sckn,
-                pending.sckn
+                pdu.results.iter().map(|r| r.sckn + 1).collect::<Vec<_>>(),
+                pending.keys.iter().map(|(n, _)| *n).collect::<Vec<_>>()
             );
             return;
         }
-        let vn = pending.sck_vn;
         self.otar_pending.remove(&issi);
-        match result.result {
-            ProvisionResult::Accepted => {
-                tracing::info!("MM: ISSI {} accepted SCK {} (version {})", issi, sckn, vn);
-                self.notify_otar(issi, sckn, vn, "accepted");
-            }
-            other => {
-                let detail = match result.current_sck_vn {
-                    Some(cur) => format!("{} (radio holds version {})", other.describe(), cur),
-                    None => other.describe().to_string(),
-                };
-                tracing::warn!("MM: ISSI {} did not take SCK {}: {}", issi, sckn, detail);
-                self.notify_otar(issi, sckn, vn, &format!("failed: {detail}"));
+        let server = self.server_keys();
+        for (result, (sckn, vn)) in pdu.results.iter().zip(named) {
+            match result.result {
+                ProvisionResult::Accepted => {
+                    tracing::info!("MM: ISSI {} accepted SCK {} (version {})", issi, sckn, vn);
+                    self.notify_otar(issi, sckn, vn, "accepted");
+                    if server {
+                        self.auc_lock().sck_result(issi, sckn, vn, true, None);
+                    }
+                }
+                other => {
+                    let detail = match result.current_sck_vn {
+                        Some(cur) => format!("{} (radio holds version {})", other.describe(), cur),
+                        None => other.describe().to_string(),
+                    };
+                    tracing::warn!("MM: ISSI {} did not take SCK {}: {}", issi, sckn, detail);
+                    self.notify_otar(issi, sckn, vn, &format!("failed: {detail}"));
+                    if server {
+                        self.auc_lock().sck_result(issi, sckn, vn, false, Some(detail));
+                    }
+                }
             }
         }
     }
 
     fn expire_otar(&mut self) {
-        let expired: Vec<(u32, u8, u16)> = self
+        let expired: Vec<(u32, Vec<(u8, u16)>)> = self
             .otar_pending
             .iter()
             .filter(|(_, p)| p.started.elapsed() > T_OTAR_RESULT)
-            .map(|(i, p)| (*i, p.sckn, p.sck_vn))
+            .map(|(i, p)| (*i, p.keys.clone()))
             .collect();
-        for (issi, sckn, vn) in expired {
-            tracing::warn!("MM: no U-OTAR SCK RESULT from ISSI {} for SCK {} within {:?}", issi, sckn, T_OTAR_RESULT);
+        let server = self.server_keys();
+        for (issi, keys) in expired {
             self.otar_pending.remove(&issi);
-            self.notify_otar(issi, sckn, vn, "timeout: no result from the radio");
+            for (sckn, vn) in keys {
+                tracing::warn!("MM: no U-OTAR SCK RESULT from ISSI {} for SCK {} within {:?}", issi, sckn, T_OTAR_RESULT);
+                self.notify_otar(issi, sckn, vn, "timeout: no result from the radio");
+                if server {
+                    self.auc_lock().sck_result(issi, sckn, vn, false, Some("no result from the radio".into()));
+                }
+            }
+        }
+    }
+
+    // ───────────── SCKs from the server (`sck-v1`) ─────────────
+
+    /// The AIE settings in use now: `[security.aie]` with the server's SCK once it took over at
+    /// run time (a change since the start keeps the config file unchanged).
+    fn aie_now(&self) -> Option<tetra_config::bluestation::CfgAie> {
+        let cfg = self.config.config();
+        let mut aie = crate::aie::effective(&cfg)?.clone();
+        if aie.class3.is_none()
+            && let Some(k) = self.config.state_read().sck_run.as_ref().and_then(|r| r.active.clone())
+        {
+            aie.sckn = k.sckn;
+            aie.sck_vn = k.vn;
+            aie.sck = k.key;
+        }
+        Some(aie)
+    }
+
+    /// Send the sealed SCKs the server made for radios on this cell (D-OTAR SCK PROVIDE,
+    /// clause 4.5.2.2), or the rejection of a radio's demand when the server sent none.
+    fn process_sck_sealed(&mut self, queue: &mut MessageQueue) {
+        if !self.server_keys() {
+            return;
+        }
+        let deliveries = {
+            let known = |issi: u32| self.client_mgr.client_is_known(issi);
+            self.auc.lock().unwrap_or_else(|e| e.into_inner()).take_sealed(known)
+        };
+        let ksg = self.config.config().security.aie.as_ref().map_or(0, |a| a.ksg.saturating_sub(1));
+        for (issi, rso, keys) in deliveries {
+            let demand = self.sck_demands.remove(&issi);
+            let handle = demand.as_ref().map_or(0, |d| d.0);
+            let parsed: Option<Vec<SckKeyAndIdentifier>> = keys
+                .iter()
+                .map(|k| {
+                    let ssck = crate::net_control::auc::unhex::<15>(&k.ssck.to_ascii_lowercase())?;
+                    (1..=32).contains(&k.sckn).then(|| SckKeyAndIdentifier { sckn: (k.sckn - 1) & 0x1f, sck_vn: k.vn, dmo: false, ssck })
+                })
+                .collect();
+            let rso = crate::net_control::auc::unhex::<10>(&rso.to_ascii_lowercase());
+            match (parsed, rso) {
+                (Some(list), _) if list.is_empty() => {
+                    // The server has no key for this radio (no K, or not the requested number).
+                    tracing::info!("MM: server rejects the SCK request of ISSI {}", issi);
+                    if let Some((_, asked)) = demand {
+                        let reject = DOtarSckReject {
+                            rejected: asked.iter().take(7).map(|n| (*n, OtarRejectReason::KeyNotAvailable)).collect(),
+                            otar_retry_interval: 0,
+                            address_extension: None,
+                        };
+                        self.send_auth_pdu(queue, issi, handle, "DOtarSckReject", |b| reject.to_bitbuf(b));
+                    }
+                }
+                (Some(list), Some(rso)) => {
+                    let sent: Vec<(u8, u16)> = list.iter().map(|k| (k.sckn + 1, k.sck_vn)).collect();
+                    let pdu = DOtarSckProvide {
+                        ack_required: true,
+                        explicit_response: true,
+                        max_response_timer: 0,
+                        session_key: OtarSessionKey::Individual { rso },
+                        keys: list,
+                        ksg_number: ksg,
+                        otar_retry_interval: 0,
+                        address_extension: None,
+                        proprietary: None,
+                    };
+                    tracing::info!("MM: OTAR — sending server-sealed SCK(s) {:?} to ISSI {}", sent, issi);
+                    self.send_auth_pdu(queue, issi, handle, "DOtarSckProvide", |b| pdu.to_bitbuf(b));
+                    for &(n, v) in &sent {
+                        self.notify_otar(issi, n, v, "sent");
+                    }
+                    self.otar_pending.insert(issi, PendingOtar { keys: sent, started: Instant::now() });
+                }
+                _ => {
+                    tracing::warn!("MM: malformed sealed SCK delivery for ISSI {} from the server", issi);
+                    for k in keys {
+                        self.auc_lock().sck_result(issi, k.sckn, k.vn, false, Some("malformed delivery".into()));
+                    }
+                }
+            }
+        }
+        self.auc_lock().drop_stale_sealed(SEALED_UNCLAIMED);
+    }
+
+    /// Follow the server's SCK on this cell: the key in use, and a planned change, which gets
+    /// its slot on this cell's timebase (aligned to the next multiframe), is announced to the
+    /// encrypted radios with D-CK CHANGE DEMAND (clause 4.5.5, Table A.26 absolute IV) and is
+    /// committed one multiframe after it took effect.
+    fn sync_sck(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        if !self.server_keys() || self.config.config().security.aie.as_ref().is_none_or(|a| a.class3.is_some()) {
+            return;
+        }
+        let (active, switch) = {
+            let store = self.auc_lock();
+            (store.sck_active(), store.sck_switch())
+        };
+        let planned = self.config.state_read().sck_run.as_ref().and_then(|r| r.switch.clone());
+        match (switch, planned) {
+            (Some((key, _)), Some((at, k))) if k == key => {
+                if ts.diff(at) > SCK_COMMIT_AFTER_SLOTS {
+                    let config_key = crate::net_control::auc::config_sck(&self.config.config());
+                    self.auc_lock().commit_sck(&key, config_key.as_ref());
+                    let mut st = self.config.state_write();
+                    st.sck_run = Some(tetra_config::bluestation::SckRun { active: Some(key), switch: None });
+                }
+            }
+            (Some((key, at_ms)), _) => {
+                let at = sck_change_slot(ts, at_ms, now_ms());
+                tracing::info!(
+                    "MM: SCK change to SCK {} version {} on {}/{}/{}/{} (now {}/{}/{}/{})",
+                    key.sckn, key.vn, at.h, at.m, at.f, at.t, ts.h, ts.m, ts.f, ts.t
+                );
+                {
+                    let mut st = self.config.state_write();
+                    let run = st.sck_run.get_or_insert_with(Default::default);
+                    run.active = active.clone().or(run.active.take());
+                    run.switch = Some((at, key.clone()));
+                }
+                self.announce_sck_change(queue, &key, at);
+            }
+            (None, _) => {
+                let want = active.map(|a| tetra_config::bluestation::SckRun { active: Some(a), switch: None });
+                let mut st = self.config.state_write();
+                if want.is_some() && st.sck_run != want {
+                    st.sck_run = want;
+                } else if want.is_none() && st.sck_run.as_ref().is_some_and(|r| r.switch.is_some()) {
+                    // A planned change was cancelled.
+                    if let Some(r) = st.sck_run.as_mut() {
+                        r.switch = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// D-CK CHANGE DEMAND to every radio registered encrypted on this cell (clause 4.5.5.0:
+    /// "may also be transmitted addressed to a group"; sent individually, no acknowledgement).
+    fn announce_sck_change(&self, queue: &mut MessageQueue, key: &tetra_config::bluestation::SckKey, at: TdmaTime) {
+        let pdu = DCkChangeDemand {
+            ack_required: false,
+            change_of_class: 0,
+            key: KeyChange::Sck(vec![(key.sckn.saturating_sub(1) & 0x1f, key.vn)]),
+            time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
+        };
+        let mut radios: Vec<u32> = self
+            .registration_encryption
+            .iter()
+            .filter(|(i, e)| **e && self.client_mgr.client_is_known(**i))
+            .map(|(i, _)| *i)
+            .collect();
+        radios.sort_unstable();
+        for issi in radios {
+            self.send_auth_pdu(queue, issi, 0, "DCkChangeDemand", |b| pdu.to_bitbuf(b));
         }
     }
 
@@ -4803,7 +5014,7 @@ mod presence_tests {
         mm.replace_pending_ciphering(100, Some(CipheringParameters::class2(2, 3)), reporter.clone());
         mm.mark_group_report_pending(100);
         mm.group_report_requested_at.insert(100, Instant::now());
-        mm.otar_pending.insert(100, PendingOtar { sckn: 24, sck_vn: 2, started: Instant::now() });
+        mm.otar_pending.insert(100, PendingOtar { keys: vec![(24, 2)], started: Instant::now() });
         assert!(mm.pending_ciphering.contains_key(&100));
         assert!(mm.group_report_in_flight.contains_key(&100));
 
@@ -4847,11 +5058,7 @@ mod presence_tests {
         mm.rx_u_otar_sck_result(100, make_result(23));
         assert!(!mm.otar_pending.contains_key(&100));
 
-        mm.otar_pending.insert(100, PendingOtar {
-            sckn: 24,
-            sck_vn: 2,
-            started: Instant::now(),
-        });
+        mm.otar_pending.insert(100, PendingOtar { keys: vec![(24, 2)], started: Instant::now() });
         // SCK 23 must not consume a pending provision of SCK 24.
         mm.rx_u_otar_sck_result(100, make_result(22));
         assert!(mm.otar_pending.contains_key(&100));

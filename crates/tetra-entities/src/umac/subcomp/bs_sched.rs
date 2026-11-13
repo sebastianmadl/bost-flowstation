@@ -244,23 +244,23 @@ pub fn build_stch(
     mac_pdu: MacResource,
     sdu: &mut BitBuffer,
     chan_alloc: Option<ChanAllocElement>,
-    cipher: Option<(&crate::aie::cipher::CellCipher, &crate::aie::cipher::Kss)>,
+    cipher: Option<(&crate::aie::cipher::CellCipher, &crate::aie::cipher::Kss, TdmaTime)>,
 ) -> Option<(BitBuffer, Option<BitBuffer>)> {
     const STCH_CAP: usize = 124;
     let sdu_len = sdu.get_len();
     let ca_len = chan_alloc.as_ref().map_or(0, |ca| ca.compute_len());
 
     let mut mac_pdu = mac_pdu;
-    if let Some((c, _)) = cipher {
+    if let Some((c, _, t)) = cipher {
         if let Some(addr) = mac_pdu.addr.as_mut()
             && matches!(addr.ssi_type, SsiType::Ssi | SsiType::Issi | SsiType::Gssi)
         {
-            addr.ssi = c.esi(addr.ssi);
+            addr.ssi = c.esi_at(t, addr.ssi);
         }
-        mac_pdu.encryption_mode = c.encryption_mode();
+        mac_pdu.encryption_mode = c.encryption_mode_at(t);
     }
     let encrypt = |block: &mut BitBuffer, start: usize, len: usize, kss_offset: usize| {
-        if let Some((_, kss)) = cipher {
+        if let Some((_, kss, _)) = cipher {
             kss.apply(block, start, len, kss_offset);
         }
     };
@@ -335,7 +335,7 @@ const EMPTY_SCHED: [[TimeslotSchedule; MACSCHED_NUM_FRAMES]; 4] = [EMPTY_SCHED_C
 /// part of the IV is broadcast in turn with the SCK-VN; TS 100 392-2 Table 21.65).
 fn sysinfo_key_field(cipher: Option<&crate::aie::cipher::CellCipher>, ts: TdmaTime) -> (Option<u16>, Option<u16>) {
     match cipher {
-        Some(c) if ts.m % 4 == 0 => (None, Some(c.sck_vn())),
+        Some(c) if ts.m % 4 == 0 => (None, Some(c.sck_vn_at(ts))),
         _ => (Some(ts.h), None),
     }
 }
@@ -1644,7 +1644,7 @@ impl BsChannelScheduler {
                                 None if c.is_class3() => return None,
                                 _ => c.kss(self.carrier_num, ts, false),
                             };
-                            build_stch(pdu, &mut sdu, chan_alloc, Some((c, &kss)))
+                            build_stch(pdu, &mut sdu, chan_alloc, Some((c, &kss, ts)))
                         });
                         match built {
                             Some((first, second)) => (Some(first), second, tx_reporter),
@@ -1796,9 +1796,17 @@ impl BsChannelScheduler {
         let carrier_num = self.carrier_num;
         self.precomps.mac_sync.time = ts;
         let (hyperframe, sck_vn) = sysinfo_key_field(self.cipher.as_deref(), ts);
+        // A class 2 cell broadcasts the SCKN in use; it follows a key change on the same slot
+        // as the key stream (EN 300 392-7 clauses 4.5.5.4, 4.5.5.6).
+        let sckn = self.cipher.as_deref().filter(|c| !c.is_class3()).map(|c| c.sckn_at(ts));
         for sysinfo in [&mut self.precomps.mac_sysinfo1, &mut self.precomps.mac_sysinfo2] {
             sysinfo.hyperframe_number = hyperframe;
             sysinfo.cck_id = sck_vn;
+            if let (Some(n), Some(ext)) = (sckn, sysinfo.ext_services.as_mut())
+                && ext.sck_n.is_some()
+            {
+                ext.sck_n = Some(n.saturating_sub(1) & 0x1f);
+            }
         }
 
         let dl_circuit_active = self.circuits.is_active(Direction::Dl, self.carrier_num, ts.t) && ts.f != 18;
@@ -2370,7 +2378,7 @@ mod tests {
         sched.set_cipher(Some(cipher.clone()));
         let t = TdmaTime { t: 2, f: 3, m: 5, h: 0 };
         let kss = cipher.kss(sched.carrier_num(), t, false);
-        let mode = cipher.encryption_mode();
+        let mode = cipher.encryption_mode_at(t);
 
         for (sdu_len, two_blocks) in [(40, false), (150, true)] {
             let (clear1, clear2) = build_stch(facch_pdu(mode), &mut pattern_sdu(sdu_len), None, None).expect("fits one slot");
@@ -2382,7 +2390,7 @@ mod tests {
 
             let mut b = BitBuffer::from_bitstr(&enc1.to_bitstr());
             let hdr = MacResource::from_bitbuf(&mut b).expect("MAC-RESOURCE parses");
-            assert_eq!(hdr.addr.unwrap().ssi, cipher.esi(2320972), "ESI instead of the ISSI");
+            assert_eq!(hdr.addr.unwrap().ssi, cipher.esi_at(t, 2320972), "ESI instead of the ISSI");
             assert_eq!(hdr.encryption_mode, mode);
             let hdr_len = b.get_pos();
             let payload = if two_blocks { 124 - hdr_len } else { sdu_len };

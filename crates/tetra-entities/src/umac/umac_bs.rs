@@ -1087,7 +1087,7 @@ impl UmacBs {
             tracing::warn!("UMAC: encrypted uplink PDU from ESI {} but this cell runs no encryption; dropping", addr.ssi);
             return None;
         };
-        Some(TetraAddress { ssi: cipher.ssi(addr.ssi), ..addr })
+        Some(TetraAddress { ssi: cipher.ssi_at(self.dltime.add_timeslots(-2), addr.ssi), ..addr })
     }
 
     /// Whether a downlink PDU to `addr` is encrypted: non-zero marks it for the fragger, which

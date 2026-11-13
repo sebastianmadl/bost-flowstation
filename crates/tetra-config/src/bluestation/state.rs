@@ -624,6 +624,24 @@ impl Default for Sc3Status {
     fn default() -> Self { Self { phase: "not_authenticated", cck: "not_sent" } }
 }
 
+/// One static cipher key: number 1..=32, version number (EN 300 392-7 A.8.75) and value.
+/// `Debug` redacts the key (`CipherKey`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SckKey {
+    pub sckn: u8,
+    pub vn: u16,
+    pub key: super::sec_security::CipherKey,
+}
+
+/// The SCK a class 2 cell runs with when it comes from the server, and a planned change
+/// (EN 300 392-7 clause 4.5.5.4): from `switch.0` on the downlink uses the new key; the uplink
+/// two slots later, since the SwMI "will still receive two slots encrypted with the old SCK".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SckRun {
+    pub active: Option<SckKey>,
+    pub switch: Option<(tetra_core::TdmaTime, SckKey)>,
+}
+
 /// Fleet Control state shared by the control worker and the dashboard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FleetControlState {
@@ -670,6 +688,9 @@ pub struct StackState {
     /// Volatile SC3 DCKs. Never persisted; Debug redacts every key.
     pub sc3_dcks: HashMap<u32, super::sec_security::CipherKey>,
     pub sc3_status: HashMap<u32, Sc3Status>,
+    /// Class 2 SCK from the Brew server (Fleet Control key management). `None`: the cell uses the
+    /// SCK of `[security.aie]`.
+    pub sck_run: Option<SckRun>,
     /// Startup CLI guard, not persisted by dashboard edits.
     pub security_class3_required: bool,
     /// Queue of live SDS messages injected at runtime via the dashboard.
@@ -921,6 +942,7 @@ impl Default for StackState {
             multi_network: Default::default(),
             subscribers: SubscriberRegistry::new(),
             sc3_dcks: HashMap::new(),
+            sck_run: None,
             sc3_status: HashMap::new(),
             security_class3_required: false,
             live_sds_queue: VecDeque::new(),

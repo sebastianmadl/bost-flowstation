@@ -907,3 +907,277 @@ fn keys_server_simulation_10_stations_25_radios() {
         assert!(s.total() <= RADIOS * STOCK as u32);
     }
 }
+
+// ───────────── phase 8b: class 2 SCKs from the server (`sck-v1`) ─────────────
+
+use crate::net_control::commands::{SckWire, SealedSckWire};
+use tetra_pdus::mm::pdus::ck_change::{ChangeTime, DCkChangeDemand, KeyChange};
+use tetra_security::taa1::otar::{ta51, ta52};
+
+const SCK_CONFIG: [u8; 10] = [0x11; 10];
+
+/// A class 2 cell with `key_source = "server"`: config SCK 1 v1, K at the server only.
+fn sc2_server_station() -> (MmBs, Handle) {
+    let (mut mm, auc) = server_station(&[MS], &[]);
+    let mut cfg = (*mm.config.config()).clone();
+    cfg.security.aie = Some(CfgAie { enabled: true, ksg: 1, sck: CipherKey(SCK_CONFIG), sckn: 1, sck_vn: 1, clear_groups: vec![], class3: None });
+    cfg.security.authentication = AuthenticationMode::Optional;
+    mm.config = SharedConfig::from_parts(cfg, None);
+    (mm, auc)
+}
+
+fn wire(sckn: u8, vn: u16, key: [u8; 10], next: bool) -> SckWire {
+    SckWire { sckn, vn, key: crate::net_control::auc::hex(&key), next }
+}
+
+/// What the server does for one radio (EN 300 392-7 clause 4.5.2.2): KSO = TA41(K, RSO),
+/// SSCK = TA51(SCK, SCK-VN, KSO, SCKN with SCKN zero-based).
+fn seal(k: &[u8; 16], rso: [u8; 10], keys: &[(u8, u16, [u8; 10])]) -> (String, Vec<SealedSckWire>) {
+    let kso = tetra_security::taa1::ta41(k, &rso);
+    let sealed = keys
+        .iter()
+        .map(|&(n, vn, sck)| SealedSckWire { sckn: n, vn, ssck: crate::net_control::auc::hex(&ta51(&sck, vn, &kso, n - 1)) })
+        .collect();
+    (crate::net_control::auc::hex(&rso), sealed)
+}
+
+fn sent_pdus(q: &mut MessageQueue) -> Vec<(u32, BitBuffer)> {
+    let mut out = Vec::new();
+    while let Some(m) = q.pop_front() {
+        if let SapMsgInner::LmmMleUnitdataReq(req) = m.msg {
+            out.push((req.address.ssi, req.sdu));
+        }
+    }
+    out
+}
+
+#[test]
+fn sck_server_sealed_keys_reach_the_radio_and_its_result_goes_back() {
+    let (mut mm, auc) = sc2_server_station();
+    mm.client_mgr.try_register_client(MS, true).unwrap();
+    let current = [0x21; 10];
+    let next = [0x22; 10];
+    let (rso, sealed) = seal(&K, [0x5A; 10], &[(1, 7, current), (2, 8, next)]);
+    auc.lock().unwrap().push_sealed(MS, rso, sealed);
+    let mut q = MessageQueue::new();
+    mm.process_sck_sealed(&mut q);
+    let mut pdus = sent_pdus(&mut q);
+    assert_eq!(pdus.len(), 1);
+    let (to, sdu) = &mut pdus[0];
+    assert_eq!(*to, MS);
+    let pdu = DOtarSckProvide::from_bitbuf(sdu).unwrap();
+    let OtarSessionKey::Individual { rso } = pdu.session_key else { panic!("individual delivery") };
+    assert_eq!(rso, [0x5A; 10], "the server's RSO goes to the radio");
+    // The radio unseals with KSO from its own K (TA52): the station never saw K.
+    let kso = tetra_security::taa1::ta41(&K, &rso);
+    let got: Vec<_> = pdu.keys.iter().map(|k| (k.sckn, k.sck_vn, ta52(&k.ssck, &kso, k.sck_vn).unwrap())).collect();
+    assert_eq!(got, vec![(0, 7, (current, 0)), (1, 8, (next, 1))]);
+    assert_eq!(mm.otar_pending[&MS].keys, vec![(1, 7), (2, 8)]);
+
+    // The radio accepts SCK 1 and rejects SCK 2: one report per key to the server.
+    use tetra_pdus::mm::pdus::otar_sck::SckNumberAndResult;
+    let results = vec![
+        SckNumberAndResult { sckn: 0, result: ProvisionResult::Accepted, current_sck_vn: None },
+        SckNumberAndResult { sckn: 1, result: ProvisionResult::IncorrectKeyVersion, current_sck_vn: Some(3) },
+    ];
+    mm.rx_u_otar_sck_result(MS, UOtarSckResult { results, address_extension: None, proprietary: None });
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[0], ControlResponse::SckResult { issi: MS, sckn: 1, vn: 7, ok: true, .. }));
+    assert!(matches!(&out[1], ControlResponse::SckResult { issi: MS, sckn: 2, vn: 8, ok: false, detail: Some(d) } if d.contains("version 3")));
+    assert!(mm.otar_pending.is_empty());
+}
+
+#[test]
+fn sck_server_demand_is_forwarded_and_an_empty_answer_rejects_it() {
+    let (mut mm, auc) = sc2_server_station();
+    mm.client_mgr.try_register_client(MS, true).unwrap();
+    let mut q = MessageQueue::new();
+    // U-OTAR SCK DEMAND: KSG 0 (TEA1), one SCK, number 2 (on air 1).
+    mm.rx_u_otar(&mut q, otar_message(OtarSubType::SckDemandProvide, &[(0, 4), (1, 3), (1, 5)]));
+    assert!(sent_pdus(&mut q).is_empty(), "the station has no K: it asks the server");
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::SckDemand { issi: MS, sckns }] if sckns == &[2]));
+    auc.lock().unwrap().push_sealed(MS, crate::net_control::auc::hex(&[0; 10]), vec![]);
+    mm.process_sck_sealed(&mut q);
+    let mut pdus = sent_pdus(&mut q);
+    assert_eq!(pdus.len(), 1);
+    let reject = DOtarSckReject::from_bitbuf(&mut pdus[0].1).unwrap();
+    assert_eq!(reject.rejected, vec![(1, OtarRejectReason::KeyNotAvailable)], "each requested number");
+}
+
+#[test]
+fn sck_server_delivery_for_a_radio_elsewhere_goes_back_as_not_delivered() {
+    let (mut mm, auc) = sc2_server_station();
+    let (rso, sealed) = seal(&K, [1; 10], &[(1, 7, [0x21; 10])]);
+    auc.lock().unwrap().push_sealed(MS, rso, sealed);
+    let mut q = MessageQueue::new();
+    mm.process_sck_sealed(&mut q);
+    assert!(sent_pdus(&mut q).is_empty());
+    auc.lock().unwrap().drop_stale_sealed(Duration::ZERO);
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(matches!(&out[..], [ControlResponse::SckResult { ok: false, detail: Some(d), .. }] if d == "radio not registered"));
+}
+
+#[test]
+fn sck_change_slot_is_the_next_multiframe_start_at_or_after_the_time() {
+    let ts = TdmaTime { t: 3, f: 7, m: 10, h: 2 };
+    let at = super::sck_change_slot(ts, 1_000_000 + 60_000, 1_000_000);
+    assert_eq!((at.t, at.f), (1, 1), "a multiframe start");
+    let slots = at.diff(ts);
+    // 60 s = 4235.3 slots of 255/18 ms; the next multiframe start is less than 72 slots later.
+    assert!((4236..4236 + 72).contains(&slots), "{slots}");
+    let past = super::sck_change_slot(ts, 1_000, 1_000_000);
+    assert_eq!((past.t, past.f), (1, 1));
+    assert!(past.diff(ts) > 0 && past.diff(ts) <= 72, "a past time: the next multiframe (immediate)");
+}
+
+#[test]
+fn sck_server_change_is_announced_switched_on_its_slot_and_committed() {
+    let (mut mm, auc) = sc2_server_station();
+    mm.client_mgr.try_register_client(MS, true).unwrap();
+    mm.client_mgr.try_register_client(MS + 1, true).unwrap();
+    mm.registration_encryption.insert(MS, true);
+    mm.registration_encryption.insert(MS + 1, false);
+    let new = [0x33; 10];
+    {
+        let mut s = auc.lock().unwrap();
+        s.set_sck_keys(&[wire(1, 1, SCK_CONFIG, false), wire(2, 2, new, true)]);
+        s.sck_activate(2, 2, super::now_ms() + 10_000).unwrap();
+    }
+    let ts = TdmaTime { t: 2, f: 5, m: 30, h: 100 };
+    let mut q = MessageQueue::new();
+    mm.sync_sck(&mut q, ts);
+    let (at, key) = mm.config.state_read().sck_run.as_ref().and_then(|r| r.switch.clone()).expect("change planned");
+    assert_eq!((key.sckn, key.vn, key.key.0), (2, 2, new));
+    // One D-CK CHANGE DEMAND, to the radio registered encrypted, with the absolute IV.
+    let mut pdus = sent_pdus(&mut q);
+    assert_eq!(pdus.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![MS]);
+    let d = DCkChangeDemand::from_bitbuf(&mut pdus[0].1).unwrap();
+    assert_eq!(d.key, KeyChange::Sck(vec![(1, 2)]), "SCKN zero-based on air");
+    assert_eq!(d.time, ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h });
+    // Seen again: no second announcement.
+    mm.sync_sck(&mut q, ts.add_timeslots(4));
+    assert!(sent_pdus(&mut q).is_empty());
+    // A registration asking for the new SCKN is accepted once the change took place.
+    assert_eq!(mm.aie_now().unwrap().sckn, 1);
+    mm.sync_sck(&mut q, at.add_timeslots(super::SCK_COMMIT_AFTER_SLOTS + 1));
+    assert_eq!(auc.lock().unwrap().sck_active().map(|k| (k.sckn, k.vn)), Some((2, 2)));
+    let run = mm.config.state_read().sck_run.clone().unwrap();
+    assert!(run.switch.is_none());
+    assert_eq!(run.active.map(|k| k.key.0), Some(new));
+    assert_eq!((mm.aie_now().unwrap().sckn, mm.aie_now().unwrap().sck_vn), (2, 2));
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(
+        matches!(&out[..], [ControlResponse::SckState { active: Some(a), from_config: false, switch_at_ms: None, .. }] if a.sckn == 2 && a.check == crate::net_control::auc::check_value(&new)),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn sck_server_keys_are_ignored_on_a_station_with_local_keys() {
+    let mut mm = station();
+    let auc: Handle = std::sync::Arc::new(std::sync::Mutex::new(AucStore::default()));
+    auc.lock().unwrap().set_sck_keys(&[wire(2, 2, [0x33; 10], false)]);
+    auc.lock().unwrap().sck_activate(2, 2, 0).unwrap();
+    let mut mm2 = std::mem::replace(&mut mm, station()).with_auc(auc);
+    let mut q = MessageQueue::new();
+    mm2.sync_sck(&mut q, TdmaTime::default());
+    assert!(mm2.config.state_read().sck_run.is_none() && q.pop_front().is_none());
+}
+
+/// Simulation (project rule: 10 stations, 25 radios) of an SCK change run by the server: the
+/// stations get the key set as JSON, every radio gets current + next sealed under its own K at
+/// the station it is registered at and confirms them, then one activation time switches every
+/// station (each on its own timebase) and each reports the new key.
+#[test]
+fn sck_server_simulation_10_stations_25_radios() {
+    use crate::net_control::codec::ControlCodecJson;
+    use crate::net_control::commands::ControlCommand;
+    const STATIONS: usize = 10;
+    const RADIOS: u32 = 25;
+    let k_of = |issi: u32| -> [u8; 16] { std::array::from_fn(|i| (issi as u8).wrapping_mul(13).wrapping_add(i as u8 * 3)) };
+    let issis: Vec<u32> = (0..RADIOS).map(|i| 2_330_000 + i).collect();
+    let current = [0x41; 10];
+    let next = [0x42; 10];
+    let set_json = serde_json::json!({"SckKeys": {"keys": [
+        {"sckn": 1, "vn": 5, "key": crate::net_control::auc::hex(&current), "next": false},
+        {"sckn": 2, "vn": 6, "key": crate::net_control::auc::hex(&next), "next": true},
+    ]}});
+    let mut stations: Vec<(MmBs, Handle, TdmaTime)> = (0..STATIONS)
+        .map(|s| {
+            let (mm, auc) = sc2_server_station();
+            let ControlCommand::SckKeys { keys } = ControlCodecJson.decode_command(set_json.to_string().as_bytes()).unwrap() else { panic!() };
+            auc.lock().unwrap().set_sck_keys(&keys);
+            // Unsynchronised stations: each its own TDMA time.
+            (mm, auc, TdmaTime::from_int(s as i32 * 7919 + 13))
+        })
+        .collect();
+    let home = |n: usize| n % STATIONS;
+    for (n, &issi) in issis.iter().enumerate() {
+        let (mm, _, _) = &mut stations[home(n)];
+        mm.client_mgr.try_register_client(issi, true).unwrap();
+        mm.registration_encryption.insert(issi, true);
+    }
+
+    // Delivery: the server seals for each radio and sends it to every station; only the
+    // station the radio is registered at sends it, the radio confirms both keys.
+    let mut confirmed = 0;
+    for (n, &issi) in issis.iter().enumerate() {
+        let rso: [u8; 10] = std::array::from_fn(|i| (n as u8) ^ (i as u8 * 17));
+        let (rso_hex, sealed) = seal(&k_of(issi), rso, &[(1, 5, current), (2, 6, next)]);
+        for (s, (mm, auc, _)) in stations.iter_mut().enumerate() {
+            auc.lock().unwrap().push_sealed(issi, rso_hex.clone(), sealed.clone());
+            let mut q = MessageQueue::new();
+            mm.process_sck_sealed(&mut q);
+            let pdus = sent_pdus(&mut q);
+            if s != home(n) {
+                assert!(pdus.is_empty(), "only the radio's station sends");
+                auc.lock().unwrap().drop_stale_sealed(Duration::ZERO);
+                auc.lock().unwrap().drain_outbox();
+                continue;
+            }
+            let (to, mut sdu) = pdus.into_iter().next().expect("provide sent");
+            assert_eq!(to, issi);
+            let pdu = DOtarSckProvide::from_bitbuf(&mut sdu).unwrap();
+            let OtarSessionKey::Individual { rso } = pdu.session_key else { panic!() };
+            let kso = tetra_security::taa1::ta41(&k_of(issi), &rso);
+            use tetra_pdus::mm::pdus::otar_sck::SckNumberAndResult;
+            let results = pdu
+                .keys
+                .iter()
+                .map(|k| {
+                    let (sck, n) = ta52(&k.ssck, &kso, k.sck_vn).expect("the radio unseals with its own K");
+                    assert_eq!(sck, if n == 0 { current } else { next });
+                    SckNumberAndResult { sckn: n, result: ProvisionResult::Accepted, current_sck_vn: None }
+                })
+                .collect();
+            mm.rx_u_otar_sck_result(issi, UOtarSckResult { results, address_extension: None, proprietary: None });
+            confirmed += auc.lock().unwrap().drain_outbox().iter().filter(|r| matches!(r, ControlResponse::SckResult { ok: true, .. })).count();
+        }
+    }
+    assert_eq!(confirmed, RADIOS as usize * 2, "every radio confirmed current and next");
+
+    // Activation: one server time for all stations.
+    let at_ms = super::now_ms() + 30_000;
+    let activate = serde_json::json!({"SckActivate": {"sckn": 2, "vn": 6, "at_ms": at_ms}}).to_string();
+    let mut announced = 0;
+    for (mm, auc, ts) in stations.iter_mut() {
+        let ControlCommand::SckActivate { sckn, vn, at_ms } = ControlCodecJson.decode_command(activate.as_bytes()).unwrap() else { panic!() };
+        auc.lock().unwrap().sck_activate(sckn, vn, at_ms).unwrap();
+        let mut q = MessageQueue::new();
+        mm.sync_sck(&mut q, *ts);
+        announced += sent_pdus(&mut q).len();
+        let (at, _) = mm.config.state_read().sck_run.as_ref().and_then(|r| r.switch.clone()).unwrap();
+        // ~30 s ahead on this station's own timebase, on a multiframe start.
+        assert!((2117..2117 + 73).contains(&at.diff(*ts)), "{}", at.diff(*ts));
+        *ts = at;
+    }
+    assert_eq!(announced, RADIOS as usize, "each registered radio told once");
+    for (mm, auc, ts) in stations.iter_mut() {
+        let mut q = MessageQueue::new();
+        mm.sync_sck(&mut q, ts.add_timeslots(super::SCK_COMMIT_AFTER_SLOTS + 1));
+        assert_eq!(auc.lock().unwrap().sck_active().map(|k| (k.sckn, k.vn, k.key.0)), Some((2, 6, next)));
+        let out = auc.lock().unwrap().drain_outbox();
+        assert!(matches!(&out[..], [ControlResponse::SckState { active: Some(a), .. }] if a.sckn == 2 && a.vn == 6));
+    }
+}

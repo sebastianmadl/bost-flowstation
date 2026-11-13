@@ -5751,6 +5751,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         <div class="card-body">
           <div class="help-text" style="margin-bottom:12px" data-i18n="secp_keys_help"></div>
           <div id="secp-server-keys" class="help-text" style="margin-bottom:12px;display:none;color:var(--accent)" data-i18n="secp_keys_server">Authentication keys are held by the Brew server (key_source = server). The station gets one-time authentication data sets from it; manage the keys on the server's Keys page.</div>
+          <div id="secp-server-sck" class="help-text" style="margin-bottom:12px;display:none"></div>
           <div class="table-wrap">
             <table>
               <thead><tr><th data-i18n="secp_th_issi">ISSI</th><th data-i18n="secp_th_k">Key K</th><th></th></tr></thead>
@@ -8317,6 +8318,8 @@ const LANGS={
     secp_restart_needed:'The saved settings differ from what is running. Restart the station to apply them.',secp_restart:'Restart station',
     secp_restarting:'Restarting… the page will reconnect in a few seconds.',
     secp_keys_server:'Authentication keys are held by the Brew server (key_source = server). The station gets one-time authentication data sets from it; manage the keys on the server\'s Keys page.',
+    secp_sck_in_use:'Cipher key (SCK) in use',secp_sck_check:'check value',secp_sck_from_config:'from this station\'s config, the server has not switched it yet',secp_sck_from_server:'from the Brew server',secp_sck_next:'Next key, already sent to the radios',secp_sck_change_at:'Key change planned at',
+
     secp_export_help:'Export for the Brew server (encrypted):',secp_export_pw:'Password (min. 10)',secp_export:'Export keys',
     secp_export_short:'The export password needs at least 10 characters.',
     secp_export_ok:'Export file saved. Import it on the Brew server\'s Keys page with this password.',secp_parse_error:'config.toml does not parse — fix it on the Config page first: ',
@@ -9102,6 +9105,8 @@ const LANGS={
     secp_restart_needed:'La configuración guardada difiere de la que está en ejecución. Reinicia la estación para aplicarla.',secp_restart:'Reiniciar estación',
     secp_restarting:'Reiniciando… la página se reconectará en unos segundos.',
     secp_keys_server:'Las claves de autenticación las guarda el servidor Brew (key_source = server). La estación recibe de él juegos de datos de autenticación de un solo uso; gestiona las claves en la página Claves del servidor.',
+    secp_sck_in_use:'Clave de cifrado (SCK) en uso',secp_sck_check:'valor de comprobación',secp_sck_from_config:'de la configuración de esta estación, el servidor aún no la ha cambiado',secp_sck_from_server:'del servidor Brew',secp_sck_next:'Clave siguiente, ya enviada a los equipos',secp_sck_change_at:'Cambio de clave previsto el',
+
     secp_export_help:'Exportar para el servidor Brew (cifrado):',secp_export_pw:'Contraseña (mín. 10)',secp_export:'Exportar claves',
     secp_export_short:'La contraseña de exportación necesita al menos 10 caracteres.',
     secp_export_ok:'Archivo de exportación guardado. Impórtalo en la página Claves del servidor Brew con esta contraseña.',secp_parse_error:'config.toml no se puede analizar; corrígelo primero en la página Config: ',
@@ -17610,6 +17615,15 @@ function secpFill(d){
   secpSubs=(s.subscribers||[]).map(x=>({issi:x.issi,k:'keep',k_masked:x.k_masked}));
   const srvKeys=s.key_source==='server';
   document.getElementById('secp-server-keys').style.display=srvKeys?'':'none';
+  const ss=(d.runtime||{}).server_sck, ssEl=document.getElementById('secp-server-sck');
+  if(ss&&ss.active){
+    const k=x=>`SCK ${x.sckn} v${x.vn} (${t('secp_sck_check')} ${secpEsc(x.check)})`;
+    let h=`${t('secp_sck_in_use')}: <b>${k(ss.active)}</b> — ${t(ss.from_config?'secp_sck_from_config':'secp_sck_from_server')}`;
+    const nx=(ss.keys||[]).filter(x=>!(x.sckn===ss.active.sckn&&x.vn===ss.active.vn));
+    if(nx.length)h+=`<br>${t('secp_sck_next')}: ${nx.map(k).join(', ')}`;
+    if(ss.switch_at_ms)h+=`<br>${t('secp_sck_change_at')} ${new Date(ss.switch_at_ms).toLocaleString()}`;
+    ssEl.innerHTML=h;ssEl.style.display='';
+  }else{ssEl.style.display='none';}
   document.getElementById('secp-add-row').style.display=srvKeys?'none':'flex';
   document.getElementById('secp-export-row').style.display=(!srvKeys&&secpSubs.length)?'flex':'none';
   const inv=document.getElementById('secp-invalid');

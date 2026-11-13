@@ -162,7 +162,14 @@ impl<T: NetworkTransport> ControlWorker<T> {
             self.send_response(&response);
             return;
         }
-        if matches!(command, ControlCommand::AuthSubscribers { .. } | ControlCommand::AuthVectors { .. }) {
+        if matches!(
+            command,
+            ControlCommand::AuthSubscribers { .. }
+                | ControlCommand::AuthVectors { .. }
+                | ControlCommand::SckKeys { .. }
+                | ControlCommand::SckSealed { .. }
+                | ControlCommand::SckActivate { .. }
+        ) {
             self.auc_command(command);
             return;
         }
@@ -315,6 +322,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
             tracing::debug!("Key management: command ignored, key_source is not server or Fleet Control is off");
             return;
         }
+        let config_key = self.shared.as_ref().and_then(|s| auc::config_sck(&s.config()));
         let answer = {
             let mut store = self.auc.lock().unwrap_or_else(|e| e.into_inner());
             match &command {
@@ -327,6 +335,26 @@ impl<T: NetworkTransport> ControlWorker<T> {
                     store.add(*issi, vectors);
                     None
                 }
+                ControlCommand::SckKeys { keys } => {
+                    tracing::info!("Key management: server sent {} SCK(s)", keys.len());
+                    store.set_sck_keys(keys);
+                    Some(store.sck_state(config_key.as_ref()))
+                }
+                ControlCommand::SckSealed { issi, rso, keys } => {
+                    tracing::debug!("Key management: {} sealed SCK(s) for {}", keys.len(), issi);
+                    store.push_sealed(*issi, rso.clone(), keys.clone());
+                    None
+                }
+                ControlCommand::SckActivate { sckn, vn, at_ms } => match store.sck_activate(*sckn, *vn, *at_ms) {
+                    Ok(()) => {
+                        tracing::info!("Key management: SCK {} version {} planned for server time {}", sckn, vn, at_ms);
+                        Some(store.sck_state(config_key.as_ref()))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Key management: SCK {} version {} cannot be activated: {}", sckn, vn, e);
+                        Some(store.sck_state(config_key.as_ref()))
+                    }
+                },
                 _ => None,
             }
         };
@@ -589,7 +617,7 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string()]), (false, vec![])]);
     }
 
     fn fake_metrics(_: &mut metrics::CpuSampler) -> ControlResponse {

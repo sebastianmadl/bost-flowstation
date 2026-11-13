@@ -3,8 +3,9 @@
 //! generators (TEA1/2/3) all live in the `tetra-security` crate; this module only drives them.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use tetra_config::bluestation::CfgAie;
+use tetra_config::bluestation::{CfgAie, SckKey};
 use tetra_core::{BitBuffer, SsiType, TdmaTime, TetraAddress};
 use tetra_security::keys::CipherKey as SecCipherKey;
 use tetra_security::ksg::{Iv, KsgId, new_ksg};
@@ -50,7 +51,32 @@ pub fn tch_s_kss_codec_order(kss: &Kss) -> [u8; 274] {
     std::array::from_fn(|i| kss.bit(i))
 }
 
+/// The key material of one SCK (or the class 3 CCK) on this cell: ESI mapping and ECK per
+/// carrier.
+struct KeyMat {
+    sckn: u8,
+    vn: u16,
+    ta61: Ta61,
+    /// ECK per carrier number.
+    eck: HashMap<u16, [u8; 10]>,
+}
+
+impl KeyMat {
+    fn new(sckn: u8, vn: u16, ck: &[u8; 10], carriers: &[u16], location_area: u16, colour_code: u8) -> Self {
+        KeyMat {
+            sckn,
+            vn,
+            ta61: Ta61::new(ck),
+            eck: carriers.iter().map(|&cn| (cn, tb5(ck, cn, location_area, colour_code))).collect(),
+        }
+    }
+}
+
 /// Class 2 encryption context of one cell.
+///
+/// The SCK is the one of `[security.aie]` unless the Brew server supplies it
+/// (`StackState::sck_run`, Fleet Control key management). A planned change applies from its
+/// timeslot on the downlink and two slots later on the uplink (EN 300 392-7 clause 4.5.5.4).
 pub struct CellCipher {
     /// 1 = TEA1 (this crate's generator), 2 / 3 = TEA2 / TEA3 from `tetra-security`.
     ksg: u8,
@@ -58,35 +84,36 @@ pub struct CellCipher {
     config: Option<tetra_config::bluestation::SharedConfig>,
     location_area: u16,
     colour_code: u8,
-    sck_vn: u16,
-    ta61: Ta61,
-    /// ECK per carrier number.
-    eck: HashMap<u16, [u8; 10]>,
+    carriers: Vec<u16>,
+    /// The key of `[security.aie]` (class 3: the CCK).
+    base: Arc<KeyMat>,
+    /// Key material of server keys already used, newest last.
+    cache: Mutex<Vec<(SckKey, Arc<KeyMat>)>>,
     /// Main carrier, used when a carrier is not known (never expected).
     main_carrier: u16,
 }
 
+/// Uplink slots still encrypted with the old SCK after a change (EN 300 392-7 clause 4.5.5.4).
+pub const UPLINK_OLD_KEY_SLOTS: i32 = 2;
+
 impl CellCipher {
     /// `carriers` lists every carrier of the cell, main carrier first.
     pub fn new(aie: &CfgAie, carriers: &[u16], location_area: u16, colour_code: u8) -> Self {
-        let sck = aie.class3.as_ref().map_or(aie.sck.0, |c| c.cck.0);
+        let (sckn, vn, ck) = match &aie.class3 {
+            Some(c) => (0, c.cck_id, c.cck.0),
+            None => (aie.sckn, aie.sck_vn, aie.sck.0),
+        };
         CellCipher {
             ksg: aie.ksg,
-            sck_vn: aie.class3.as_ref().map_or(aie.sck_vn, |c| c.cck_id),
             class3: aie.class3.is_some(),
             config: None,
             location_area,
             colour_code,
-            ta61: Ta61::new(&sck),
-            eck: carriers.iter().map(|&cn| (cn, tb5(&sck, cn, location_area, colour_code))).collect(),
+            carriers: carriers.to_vec(),
+            base: Arc::new(KeyMat::new(sckn, vn, &ck, carriers, location_area, colour_code)),
+            cache: Mutex::new(Vec::new()),
             main_carrier: carriers[0],
         }
-    }
-
-    /// The downlink MAC-RESOURCE encryption mode of an encrypted PDU (TS 100 392-7 Table 6.6):
-    /// 10 with an even SCK-VN, 11 with an odd one.
-    pub fn encryption_mode(&self) -> u8 {
-        0b10 | (self.sck_vn & 1) as u8
     }
 
     pub fn with_config(mut self, config: tetra_config::bluestation::SharedConfig) -> Self {
@@ -96,6 +123,55 @@ impl CellCipher {
 
     pub fn is_class3(&self) -> bool {
         self.class3
+    }
+
+    fn mat_for(&self, key: &SckKey) -> Arc<KeyMat> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, m)) = cache.iter().find(|(k, _)| k == key) {
+            return m.clone();
+        }
+        let m = Arc::new(KeyMat::new(key.sckn, key.vn, &key.key.0, &self.carriers, self.location_area, self.colour_code));
+        cache.push((key.clone(), m.clone()));
+        if cache.len() > 3 {
+            cache.remove(0);
+        }
+        m
+    }
+
+    /// The SCK in use at `t` (class 3: the CCK).
+    fn mat(&self, t: TdmaTime, uplink: bool) -> Arc<KeyMat> {
+        if self.class3 {
+            return self.base.clone();
+        }
+        let Some(run) = self.config.as_ref().and_then(|c| c.state_read().sck_run.clone()) else {
+            return self.base.clone();
+        };
+        if let Some((at, key)) = &run.switch {
+            let lag = if uplink { UPLINK_OLD_KEY_SLOTS } else { 0 };
+            if t.diff(*at) >= lag {
+                return self.mat_for(key);
+            }
+        }
+        match &run.active {
+            Some(key) => self.mat_for(key),
+            None => self.base.clone(),
+        }
+    }
+
+    /// The downlink MAC-RESOURCE encryption mode of an encrypted PDU sent at `t`
+    /// (TS 100 392-7 Table 6.6): 10 with an even SCK-VN, 11 with an odd one.
+    pub fn encryption_mode_at(&self, t: TdmaTime) -> u8 {
+        0b10 | (self.mat(t, false).vn & 1) as u8
+    }
+
+    /// SCK-VN (class 3: CCK-id) on the downlink at `t`.
+    pub fn sck_vn_at(&self, t: TdmaTime) -> u16 {
+        self.mat(t, false).vn
+    }
+
+    /// SCKN (1..=32) on the downlink at `t`; 0 on a class 3 cell.
+    pub fn sckn_at(&self, t: TdmaTime) -> u8 {
+        self.mat(t, false).sckn
     }
 
     /// UL and individual DL use the terminal DCK; group DL uses the CCK.
@@ -118,26 +194,23 @@ impl CellCipher {
         self.generate(&eck, t, uplink)
     }
 
-    pub fn sck_vn(&self) -> u16 {
-        self.sck_vn
+    /// SSI → ESI for a downlink PDU sent at `t` (TS 100 392-7 clause 4.2.6).
+    pub fn esi_at(&self, t: TdmaTime, ssi: u32) -> u32 {
+        self.mat(t, false).ta61.encrypt(ssi)
     }
 
-    /// SSI → ESI (TS 100 392-7 clause 4.2.6).
-    pub fn esi(&self, ssi: u32) -> u32 {
-        self.ta61.encrypt(ssi)
-    }
-
-    /// ESI → SSI, for addresses received in encrypted uplink MAC PDUs.
-    pub fn ssi(&self, esi: u32) -> u32 {
-        self.ta61.decrypt(esi)
+    /// ESI → SSI, for an address received in an encrypted uplink MAC PDU sent at `t`.
+    pub fn ssi_at(&self, t: TdmaTime, esi: u32) -> u32 {
+        self.mat(t, true).ta61.decrypt(esi)
     }
 
     /// The key stream segment of timeslot `t` on `carrier`.
     pub fn kss(&self, carrier: u16, t: TdmaTime, uplink: bool) -> Kss {
-        let eck = self
+        let mat = self.mat(t, uplink);
+        let eck = mat
             .eck
             .get(&carrier)
-            .or_else(|| self.eck.get(&self.main_carrier))
+            .or_else(|| mat.eck.get(&self.main_carrier))
             .expect("main carrier has an ECK");
         self.generate(&SecCipherKey(*eck), t, uplink)
     }
@@ -224,7 +297,7 @@ mod tests {
 
     #[test]
     fn encryption_mode_follows_sck_vn_parity() {
-        assert_eq!(cipher().encryption_mode(), 0b11);
+        assert_eq!(cipher().encryption_mode_at(tetra_core::TdmaTime::default()), 0b11);
     }
 
     /// Each KSG number selects a distinct generator: TEA1, TEA2 and TEA3 produce different key
@@ -251,6 +324,50 @@ mod tests {
         assert_ne!(streams[0], streams[1], "TEA1 and TEA2 differ");
         assert_ne!(streams[0], streams[2], "TEA1 and TEA3 differ");
         assert_ne!(streams[1], streams[2], "TEA2 and TEA3 differ");
+    }
+    #[test]
+    fn a_server_sck_change_switches_downlink_on_its_slot_and_uplink_two_slots_later() {
+        use tetra_config::bluestation::{SckRun, SharedConfig};
+        let cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        let shared = SharedConfig::from_parts(cfg, None);
+        let c = cipher().with_config(shared.clone());
+        let t0 = TdmaTime { t: 1, f: 1, m: 9, h: 4 };
+        let base_dl = c.kss(3681, t0, false).0;
+        let base_esi = c.esi_at(t0, 100);
+        assert_eq!((c.sckn_at(t0), c.sck_vn_at(t0)), (1, 3), "no server key: [security.aie]");
+
+        let old = SckKey { sckn: 1, vn: 8, key: CipherKey([0x44; 10]) };
+        let new = SckKey { sckn: 2, vn: 9, key: CipherKey([0x55; 10]) };
+        shared.state_write().sck_run = Some(SckRun { active: Some(old.clone()), switch: None });
+        assert_eq!((c.sckn_at(t0), c.sck_vn_at(t0), c.encryption_mode_at(t0)), (1, 8, 0b10), "the server's active key replaces the config key");
+        assert_ne!(c.kss(3681, t0, false).0, base_dl);
+        assert_ne!(c.esi_at(t0, 100), base_esi);
+        let old_dl = c.kss(3681, t0, false).0;
+        let old_esi = c.esi_at(t0, 100);
+
+        let at = t0.add_timeslots(8);
+        shared.state_write().sck_run = Some(SckRun { active: Some(old), switch: Some((at, new.clone())) });
+        let before = at.add_timeslots(-1);
+        assert_eq!(c.kss(3681, before, false).0, cipher_with(&shared, before, false, &[0x44; 10]));
+        assert_eq!((c.sckn_at(before), c.sck_vn_at(before)), (1, 8));
+        assert_eq!((c.sckn_at(at), c.sck_vn_at(at), c.encryption_mode_at(at)), (2, 9, 0b11), "downlink from the change slot on");
+        assert_eq!(c.kss(3681, at, false).0, cipher_with(&shared, at, false, &[0x55; 10]));
+        assert_ne!(c.esi_at(at, 100), old_esi);
+        // Uplink: still the old key for two slots (clause 4.5.5.4).
+        for k in 0..UPLINK_OLD_KEY_SLOTS {
+            let ut = at.add_timeslots(k);
+            assert_eq!(c.kss(3681, ut, true).0, cipher_with(&shared, ut, true, &[0x44; 10]), "uplink slot {k} after the change");
+            assert_eq!(c.ssi_at(ut, old_esi), 100);
+        }
+        let ut = at.add_timeslots(UPLINK_OLD_KEY_SLOTS);
+        assert_eq!(c.kss(3681, ut, true).0, cipher_with(&shared, ut, true, &[0x55; 10]));
+        assert_ne!(old_dl, c.kss(3681, at, false).0);
+    }
+
+    /// Key stream of a plain cell whose config key is `ck`.
+    fn cipher_with(_: &tetra_config::bluestation::SharedConfig, t: TdmaTime, uplink: bool, ck: &[u8; 10]) -> [u8; KSS_BITS / 8] {
+        let aie = CfgAie { class3: None, enabled: true, ksg: 1, sckn: 1, sck: CipherKey(*ck), sck_vn: 0, clear_groups: vec![] };
+        CellCipher::new(&aie, &[3681, 3684], 2, 1).kss(3681, t, uplink).0
     }
 }
 
@@ -292,8 +409,8 @@ mod sc3_tests {
             c.kss_for(1521, t, false, TetraAddress::new(900, SsiType::Gssi)).unwrap().0,
             c.kss(1521, t, false).0
         );
-        assert_eq!(c.esi(100), Ta61::new(&[0x33; 10]).encrypt(100));
-        assert_eq!(c.encryption_mode(), 0b11);
+        assert_eq!(c.esi_at(tetra_core::TdmaTime::default(), 100), Ta61::new(&[0x33; 10]).encrypt(100));
+        assert_eq!(c.encryption_mode_at(tetra_core::TdmaTime::default()), 0b11);
         shared.state_write().sc3_dcks.remove(&100);
         assert!(c.kss_for(1521, t, true, TetraAddress::issi(100)).is_none());
         let (_, ext) = super::super::sysinfo_security(Some(&aie));
@@ -317,4 +434,5 @@ mod sc3_tests {
             CipherDecision::Encrypted(CipheringParameters::class3(2))
         );
     }
+
 }

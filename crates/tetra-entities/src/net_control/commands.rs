@@ -203,6 +203,49 @@ pub enum ControlCommand {
     /// Fleet Control (`keys-v1`): authentication data sets (RS, KS, KS') for `issi`
     /// (EN 300 392-7 clause 4.1.1), added to the station's stock. Empty: the server has no K.
     AuthVectors { issi: u32, vectors: Vec<AuthVectorWire> },
+
+    /// Fleet Control (`sck-v1`): the network's static cipher keys for security class 2: the
+    /// current one and, before a change, the next one. The station keeps them (file mode 600)
+    /// and answers with [`ControlResponse::SckState`]. Only used with `key_source = "server"`.
+    SckKeys { keys: Vec<SckWire> },
+
+    /// Fleet Control (`sck-v1`): SCKs sealed by the server for one radio
+    /// (KSO = TA41(K, RSO), SSCK = TA51(SCK, SCK-VN, KSO, SCKN); EN 300 392-7 clause 4.5.2.2),
+    /// sent by MM in a D-OTAR SCK PROVIDE. Empty `keys`: the server rejects the radio's demand.
+    SckSealed { issi: u32, rso: String, keys: Vec<SealedSckWire> },
+
+    /// Fleet Control (`sck-v1`): make the SCK (`sckn`, `vn`) the one in use at the server time
+    /// `at_ms` (Unix ms), network wide (clause 4.5.5.4). The station announces the change with
+    /// D-CK CHANGE DEMAND on the matching IV and changes the key on that slot.
+    SckActivate { sckn: u8, vn: u16, at_ms: u64 },
+}
+
+/// One SCK on the wire ([`ControlCommand::SckKeys`]): number 1..=32, version, 20 hex digits,
+/// `next` for the key that is not in use yet.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct SckWire {
+    pub sckn: u8,
+    pub vn: u16,
+    pub key: String,
+    #[serde(default)]
+    pub next: bool,
+}
+
+/// One sealed SCK ([`ControlCommand::SckSealed`]): SCKN 1..=32, version, SSCK as 30 hex digits.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct SealedSckWire {
+    pub sckn: u8,
+    pub vn: u16,
+    pub ssck: String,
+}
+
+/// An SCK named without its value ([`ControlResponse::SckState`]): number, version and check
+/// value SHA-256(SCK), first 8 bytes in hex.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct SckRef {
+    pub sckn: u8,
+    pub vn: u16,
+    pub check: String,
 }
 
 /// One authentication data set on the wire: RS (80 bit), KS and KS' (128 bit each) as hex.
@@ -281,7 +324,10 @@ impl ControlCommand {
             | Self::ConfirmConfig { .. }
             | Self::RollbackConfig { .. }
             | Self::AuthSubscribers { .. }
-            | Self::AuthVectors { .. } => TetraEntity::Cmce,
+            | Self::AuthVectors { .. }
+            | Self::SckKeys { .. }
+            | Self::SckSealed { .. }
+            | Self::SckActivate { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -431,6 +477,35 @@ pub enum ControlResponse {
         mutual: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         left: Option<u32>,
+    },
+
+    /// Fleet Control (`sck-v1`): the SCK the station runs with (`active`; from its own config
+    /// until the server's key is in use), the server keys it holds and a planned change.
+    SckState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active: Option<SckRef>,
+        /// True while `active` is the key of the station's own config.
+        #[serde(default)]
+        from_config: bool,
+        #[serde(default)]
+        keys: Vec<SckRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switch_at_ms: Option<u64>,
+    },
+
+    /// Fleet Control (`sck-v1`): a radio asked for SCKs (U-OTAR SCK DEMAND, numbers 1..=32;
+    /// empty: send the network's keys), or the dashboard asked to send them.
+    SckDemand { issi: u32, #[serde(default)] sckns: Vec<u8> },
+
+    /// Fleet Control (`sck-v1`): the radio's answer to a D-OTAR SCK PROVIDE, per key
+    /// (U-OTAR SCK RESULT), or a delivery that could not be made (`ok` false, `detail`).
+    SckResult {
+        issi: u32,
+        sckn: u8,
+        vn: u16,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
 }
 
