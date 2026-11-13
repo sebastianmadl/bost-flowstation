@@ -235,6 +235,26 @@ pub enum ControlCommand {
         #[serde(default)]
         overlap_s: u32,
     },
+
+    /// Fleet Control (`dck-v1`): DCKs of class 3 radios that authenticated at another station of
+    /// the same location area or next door (EN 300 392-7 clause 6.6.1.1: "all cells shall have
+    /// knowledge of the DCK in use for each ITSI operating in that LA"; clause 4.5.1.3). `drop`:
+    /// radios whose DCK is no longer valid. Sent once after the hello even when empty: the server
+    /// forwards DCKs.
+    DckKeys {
+        #[serde(default)]
+        keys: Vec<DckWire>,
+        #[serde(default)]
+        drop: Vec<u32>,
+    },
+}
+
+/// One DCK on the wire ([`ControlCommand::DckKeys`], [`ControlResponse::DckReport`]): radio and
+/// 20 hex digits.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct DckWire {
+    pub issi: u32,
+    pub dck: String,
 }
 
 /// One CCK on the wire ([`ControlCommand::CckKeys`]): location area (`None`: every LA), CCK-id,
@@ -365,7 +385,8 @@ impl ControlCommand {
             | Self::SckSealed { .. }
             | Self::SckActivate { .. }
             | Self::CckKeys { .. }
-            | Self::CckActivate { .. } => TetraEntity::Cmce,
+            | Self::CckActivate { .. }
+            | Self::DckKeys { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -569,6 +590,10 @@ pub enum ControlResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+
+    /// Fleet Control (`dck-v1`): a class 3 radio authenticated here; its new DCK, for the other
+    /// stations of the location area and the neighbours (clause 6.6.1.1).
+    DckReport { key: DckWire },
 }
 
 /// One cell in [`ControlResponse::FleetMetrics`].

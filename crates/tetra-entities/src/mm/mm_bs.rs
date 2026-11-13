@@ -379,7 +379,7 @@ impl MmBs {
                 tracing::error!("MM: refusing SC3 activation for ISSI {} without authenticated DCK", issi);
                 return;
             };
-            self.config.state_write().sc3_dcks.insert(issi, tetra_config::bluestation::CipherKey(dck.0));
+            self.set_sc3_dck(issi, dck);
             self.sc3_phase(issi, "active");
         } else {
             self.config.state_write().sc3_dcks.remove(&issi);
@@ -4279,6 +4279,20 @@ impl MmBs {
         }
     }
 
+    /// The class 3 radio `issi` runs with `dck` here now. A DCK forwarded from another station is
+    /// no longer needed; with server keys a new DCK goes to the server for the other stations of
+    /// the location area and the neighbours (`dck-v1`, EN 300 392-7 clause 6.6.1.1).
+    fn set_sc3_dck(&mut self, issi: u32, dck: &SecCipherKey) {
+        let previous = {
+            let mut state = self.config.state_write();
+            state.dck_roam.remove(&issi);
+            state.sc3_dcks.insert(issi, tetra_config::bluestation::CipherKey(dck.0))
+        };
+        if previous.is_none_or(|p| p.0 != dck.0) && self.server_keys() {
+            self.auc_lock().dck_report(issi, &dck.0);
+        }
+    }
+
     fn is_class3(&self) -> bool {
         self.config.config().security.aie.as_ref().is_some_and(|a| a.class3.is_some())
     }
@@ -4288,7 +4302,7 @@ impl MmBs {
     fn complete_confirmed_authentication(&mut self, queue: &mut MessageQueue, issi: u32, dck: SecCipherKey, held: Option<SapMsg>) {
         if self.is_class3() && self.config.state_read().subscribers.encrypted(issi) == Some(true)
             && self.registration_encryption.get(&issi).copied().unwrap_or(true) {
-            self.config.state_write().sc3_dcks.insert(issi, tetra_config::bluestation::CipherKey(dck.0));
+            self.set_sc3_dck(issi, &dck);
             tracing::info!("MM: SC3 ISSI {} DCK changed after authentication RESULT ACK", issi);
         }
         self.complete_authentication(queue, issi, dck, held);
@@ -4304,8 +4318,8 @@ impl MmBs {
             self.rx_u_location_update_demand_replay(queue, held);
         } else if self.is_class3() {
             // Standalone authentication is completed only after final RESULT's LLC ACK.
-            let dck = self.dck.get(&issi).unwrap();
-            self.config.state_write().sc3_dcks.insert(issi, tetra_config::bluestation::CipherKey(dck.0));
+            let dck = self.dck.get(&issi).unwrap().clone();
+            self.set_sc3_dck(issi, &dck);
             self.sc3_phase(issi, "active");
         }
     }
@@ -4315,22 +4329,12 @@ impl MmBs {
     }
 
     fn cck_information_for_key(&self, dck: &SecCipherKey) -> Option<CckInformation> {
-        let (cck_id, cck) = self.current_cck()?;
-        Some(CckInformation {
-            cck_id, future: false,
-            sealed: tetra_security::taa1::ta31(&cck.0, cck_id, &dck.0),
-            locations: CckLocations::List(vec![self.config.config().cell.location_area]), next_sealed: None,
-        })
+        cck_information_for(&self.config, self.config.config().cell.location_area, &dck.0)
     }
 
     /// The CCK the cell runs with now: the server's (Fleet Control) or the one of `[security.aie]`.
     fn current_cck(&self) -> Option<(u16, tetra_config::bluestation::CipherKey)> {
-        if let Some(k) = self.config.state_read().cck_run.as_ref().and_then(|r| r.active.clone()) {
-            return Some((k.vn, k.key));
-        }
-        let cfg = self.config.config();
-        let sc3 = cfg.security.aie.as_ref()?.class3.as_ref()?;
-        Some((sc3.cck_id, sc3.cck.clone()))
+        current_cck(&self.config)
     }
 
     /// D-OTAR CCK PROVIDE with a CCK for future use (key type flag "future", Table A.42; the SwMI
@@ -4585,10 +4589,15 @@ impl MmBs {
                     // OTAR outside the combined registration uses the active key, never
                     // a newly derived key still awaiting its registration ACK.
                     let active = if prim.encrypted { self.cck_delivery_key(issi) } else { None };
-                    let cck = if pdu.location_area == self.config.config().cell.location_area {
-                        active.as_ref().and_then(|k| self.cck_information_for_key(k))
-                    } else { None };
-                    if cck.is_some() { self.cck_pending.insert(issi, Instant::now()); self.sc3_cck(issi, "sent"); }
+                    let own_la = pdu.location_area == self.config.config().cell.location_area;
+                    // Another LA (clause 4.5.1.3 case 2: the radio asks before it moves): that
+                    // LA's CCK when the server sent it, else "provision not possible".
+                    let cck = active.as_ref().and_then(|k| cck_information_for(&self.config, pdu.location_area, &k.0));
+                    if !own_la {
+                        tracing::info!("MM: ISSI {} asks for the CCK of LA {}: {}", issi, pdu.location_area,
+                            if cck.is_some() { "provided" } else { "not known here" });
+                    }
+                    if cck.is_some() && own_la { self.cck_pending.insert(issi, Instant::now()); self.sc3_cck(issi, "sent"); }
                     let pdu = DOtarCckProvide { cck };
                     self.send_auth_pdu(queue, issi, handle, "DOtarCckProvide", |b| pdu.to_bitbuf(b));
                 },
@@ -5538,3 +5547,60 @@ mod presence_tests {
 #[cfg(test)]
 #[path = "sc3_tests.rs"]
 mod sc3_tests;
+
+/// The CCK a class 3 cell runs with now: the server's (Fleet Control) or the one of
+/// `[security.aie]`.
+fn current_cck(config: &SharedConfig) -> Option<(u16, tetra_config::bluestation::CipherKey)> {
+    if let Some(k) = config.state_read().cck_run.as_ref().and_then(|r| r.active.clone()) {
+        return Some((k.vn, k.key));
+    }
+    let cfg = config.config();
+    let sc3 = cfg.security.aie.as_ref()?.class3.as_ref()?;
+    Some((sc3.cck_id, sc3.cck.clone()))
+}
+
+/// The CCK of location area `la`, sealed for a radio with `dck` (TA31, EN 300 392-7 clause
+/// 4.2.3): this cell's own CCK, or for another LA the server's current CCK of that LA
+/// (`key_source = "server"`, clause 4.5.1.3 case 2). `None`: not known here.
+pub(crate) fn cck_information_for(config: &SharedConfig, la: u16, dck: &[u8; 10]) -> Option<CckInformation> {
+    let (cck_id, cck) = if la == config.config().cell.location_area {
+        current_cck(config)?
+    } else {
+        if config.config().security.key_source != tetra_config::bluestation::KeySource::Server {
+            return None;
+        }
+        let state = config.state_read();
+        let k = state.cck_server.iter().find(|(l, _)| *l == Some(la)).or_else(|| state.cck_server.iter().find(|(l, _)| l.is_none()))?;
+        (k.1.vn, k.1.key.clone())
+    };
+    Some(CckInformation {
+        cck_id,
+        future: false,
+        sealed: tetra_security::taa1::ta31(&cck.0, cck_id, dck),
+        locations: CckLocations::List(vec![la]),
+        next_sealed: None,
+    })
+}
+
+/// D-OTAR CCK PROVIDE for a class 3 radio that asked in its U-PREPARE for the CCK of location
+/// area `la` (U-OTAR CCK DEMAND, EN 300 392-7 clause 4.5.1.3): carried by D-NEW-CELL. Without the
+/// key it says that provision is not possible (CCK absent). `None`: the radio has no active DCK
+/// here.
+pub(crate) fn cck_provide_for_prepare(config: &SharedConfig, issi: u32, la: u16) -> Option<tetra_core::BitBuffer> {
+    let dck = {
+        let state = config.state_read();
+        if state.sc3_status.get(&issi).is_none_or(|s| s.phase != "active") {
+            return None;
+        }
+        state.sc3_dcks.get(&issi)?.0
+    };
+    let pdu = DOtarCckProvide { cck: cck_information_for(config, la, &dck) };
+    let mut body = tetra_core::BitBuffer::new_autoexpand(64);
+    pdu.to_bitbuf(&mut body).ok()?;
+    let len = body.get_pos();
+    body.seek(0);
+    let mut sdu = tetra_core::BitBuffer::new(len);
+    sdu.copy_bits(&mut body, len);
+    sdu.seek(0);
+    Some(sdu)
+}

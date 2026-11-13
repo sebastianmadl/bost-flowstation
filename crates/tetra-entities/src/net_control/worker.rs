@@ -171,6 +171,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 | ControlCommand::SckActivate { .. }
                 | ControlCommand::CckKeys { .. }
                 | ControlCommand::CckActivate { .. }
+                | ControlCommand::DckKeys { .. }
         ) {
             self.auc_command(command);
             return;
@@ -362,7 +363,25 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 ControlCommand::CckKeys { keys } => {
                     tracing::info!("Key management: server sent {} CCK(s)", keys.len());
                     store.set_cck_keys(keys);
+                    if let Some(shared) = &self.shared {
+                        shared.state_write().cck_server = store.cck_currents();
+                    }
                     Some(store.cck_state(cell_la, config_cck.as_ref()))
+                }
+                ControlCommand::DckKeys { keys, drop } => {
+                    if let Some(shared) = &self.shared {
+                        let mut state = shared.state_write();
+                        for issi in drop {
+                            state.dck_roam.remove(issi);
+                        }
+                        // A DCK this station runs itself stays first: it ends when the radio
+                        // registers elsewhere (the server's "moved" clears it).
+                        for (issi, dck) in auc::AucStore::dck_keys(keys) {
+                            state.dck_roam.insert(issi, dck);
+                        }
+                    }
+                    tracing::info!("Key management: server forwarded {} DCK(s), dropped {}", keys.len(), drop.len());
+                    None
                 }
                 ControlCommand::CckActivate { la, cck_id, at_ms, overlap_s } => match store.cck_activate(cell_la, *la, *cck_id, *at_ms, *overlap_s) {
                     Ok(true) => {
@@ -637,7 +656,7 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string(), "cck-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string(), "cck-v1".to_string(), "dck-v1".to_string()]), (false, vec![])]);
     }
 
     fn fake_metrics(_: &mut metrics::CpuSampler) -> ControlResponse {
@@ -717,6 +736,32 @@ mod tests {
             worker.send_auc_outbox();
             let requests = sent(&worker).into_iter().filter(|r| matches!(r, ControlResponse::AuthVectorRequest { issi: 200 })).count();
             assert_eq!(requests, used as usize);
+        }
+    }
+
+    /// `dck-v1`: forwarded DCKs land in the shared state (only with server keys and the switch),
+    /// `drop` removes them, a CCK set fills the per-LA list for neighbour requests.
+    #[test]
+    fn forwarded_dcks_and_server_ccks_reach_the_shared_state() {
+        for used in [false, true] {
+            let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+            if used {
+                cfg.security.key_source = tetra_config::bluestation::KeySource::Server;
+            }
+            let shared = SharedConfig::from_parts(cfg, None);
+            shared.state_write().fleet_control.enabled = true;
+            let auc: auc::Handle = std::sync::Arc::new(std::sync::Mutex::new(auc::AucStore::default()));
+            let mut mock = MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL]);
+            mock.push_inbound(br#"{"DckKeys":{"keys":[{"issi":100,"dck":"0102030405060708090A"},{"issi":101,"dck":"11111111111111111111"}]}}"#.to_vec());
+            mock.push_inbound(br#"{"DckKeys":{"drop":[101]}}"#.to_vec());
+            mock.push_inbound(br#"{"CckKeys":{"keys":[{"la":7,"cck_id":5,"key":"22222222222222222222"},{"la":7,"cck_id":6,"key":"33333333333333333333","next":true}]}}"#.to_vec());
+            let mut worker = ControlWorker::new(HashMap::new(), mock).with_shared(shared.clone()).with_auc(auc);
+            worker.try_connect();
+            worker.poll_commands();
+            let st = shared.state_read();
+            assert_eq!(st.dck_roam.get(&100).map(|k| k.0), used.then_some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+            assert!(!st.dck_roam.contains_key(&101), "dropped");
+            assert_eq!(st.cck_server.iter().map(|(la, k)| (*la, k.vn)).collect::<Vec<_>>(), if used { vec![(Some(7), 5)] } else { vec![] }, "current keys only");
         }
     }
 

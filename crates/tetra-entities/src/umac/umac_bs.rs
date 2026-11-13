@@ -1095,7 +1095,8 @@ impl UmacBs {
             && let Some(old) = cipher.ssi_old_cck_at(t, addr.ssi)
         {
             let st = self.config.state_read();
-            if !st.sc3_dcks.contains_key(&ssi) && st.sc3_dcks.contains_key(&old) {
+            let has_dck = |i: u32| st.sc3_dcks.contains_key(&i) || st.dck_roam.contains_key(&i);
+            if !has_dck(ssi) && has_dck(old) {
                 return Some(TetraAddress { ssi: old, ..addr });
             }
         }

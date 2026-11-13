@@ -1,6 +1,6 @@
 # SC3 DCK/CCK – experimenteller Stand r4 vom 09.11.2026
 
-> English summary: security class 3 (per-radio DCK, common CCK, TEA2, no GCK) as contributed in revision sc3-r4, merged into Bost FlowStation 0.5.6. Single cell only: a config with SC3 and `[[cells]]` is refused, and an SC3 station does not offer roaming between stations to the Brew server. The notes below are the contributor's (German).
+> English summary: security class 3 (per-radio DCK, common CCK, TEA2, no GCK) as contributed in revision sc3-r4, merged into Bost FlowStation 0.5.6. Single cell only: a config with SC3 and `[[cells]]` is refused, and with local keys an SC3 station does not offer roaming between stations to the Brew server (with the keys from the Brew server it does since Fleet Control phase 8e, see `fleet-control.md`). The notes below are the contributor's (German).
 
 Diese Erweiterung ergänzt die bestehende SC2-Implementierung um SC3 ohne GCK.
 Zielkonfiguration: eine Zelle/Location Area, TEA2, individuell provisioniertes K,

@@ -48,7 +48,7 @@ pub const CAP_RESTART: &str = "restart-v1";
 
 /// Capability names the station lists in its hello while the switch is on.
 pub fn capabilities(ota_available: bool) -> Vec<String> {
-    let mut caps = vec![CAP_FLEET.to_string(), CAP_MAINTENANCE.to_string(), CAP_RESTART.to_string(), super::metrics::CAP_METRICS.to_string(), super::auc::CAP_KEYS.to_string(), super::auc::CAP_SCK.to_string(), super::auc::CAP_CCK.to_string()];
+    let mut caps = vec![CAP_FLEET.to_string(), CAP_MAINTENANCE.to_string(), CAP_RESTART.to_string(), super::metrics::CAP_METRICS.to_string(), super::auc::CAP_KEYS.to_string(), super::auc::CAP_SCK.to_string(), super::auc::CAP_CCK.to_string(), super::auc::CAP_DCK.to_string()];
     if super::fleet_config::config_path().is_some() {
         caps.push(super::fleet_config::CAP_CONFIG.to_string());
     }
@@ -390,8 +390,8 @@ mod tests {
 
     #[test]
     fn capabilities_list_update_only_with_an_ota() {
-        assert_eq!(capabilities(false), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "keys-v1", "sck-v1", "cck-v1"]);
-        assert_eq!(capabilities(true), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "keys-v1", "sck-v1", "cck-v1", "update-v1", "update-live-v1"]);
+        assert_eq!(capabilities(false), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "keys-v1", "sck-v1", "cck-v1", "dck-v1"]);
+        assert_eq!(capabilities(true), vec!["fleet-v1", "maintenance-v1", "restart-v1", "metrics-v1", "keys-v1", "sck-v1", "cck-v1", "dck-v1", "update-v1", "update-live-v1"]);
     }
 
     fn prog(running: bool, stage: OtaStage, percent: u8) -> Progress {

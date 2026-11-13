@@ -728,7 +728,8 @@ fn keys_server_registration_authenticates_with_one_stock_set_and_reports_it() {
     mm.process_pending_ciphering();
     assert_eq!(mm.config.state_read().sc3_dcks.get(&MS).unwrap().0, dck);
     let out = auc.lock().unwrap().drain_outbox();
-    assert!(matches!(&out[..], [ControlResponse::AuthReport { issi: MS, ok: true, mutual: false, left: Some(1), rs }] if rs == "31313131313131313131"));
+    assert!(matches!(&out[..], [ControlResponse::AuthReport { issi: MS, ok: true, mutual: false, left: Some(1), rs }, ControlResponse::DckReport { key }]
+        if rs == "31313131313131313131" && key.issi == MS && key.dck == crate::net_control::auc::hex(&dck)), "{out:?}");
 }
 
 #[test]
@@ -1376,5 +1377,118 @@ fn cck_server_simulation_10_stations_25_radios() {
         assert_eq!(mm.current_cck().map(|c| c.0), Some(43));
         let out = auc.lock().unwrap().drain_outbox();
         assert!(out.iter().any(|r| matches!(r, ControlResponse::CckState { active: Some(a), .. } if a.cck_id == 43)), "{out:?}");
+    }
+}
+
+// ───────────── class 3 roaming between stations (`dck-v1`, Fleet Control phase 8e) ─────────────
+
+#[test]
+fn dck_server_new_dck_goes_to_the_server_once_and_replaces_a_forwarded_one() {
+    let (mut mm, auc) = sc3_server_station_with(&[]);
+    mm.config.state_write().dck_roam.insert(MS, CipherKey([0x99; 10]));
+    mm.set_sc3_dck(MS, &SecCipherKey([0x77; 10]));
+    mm.set_sc3_dck(MS, &SecCipherKey([0x77; 10]));
+    let out = auc.lock().unwrap().drain_outbox();
+    assert!(
+        matches!(&out[..], [ControlResponse::DckReport { key }] if key.issi == MS && key.dck == crate::net_control::auc::hex(&[0x77; 10])),
+        "one report per new DCK: {out:?}"
+    );
+    assert!(!mm.config.state_read().dck_roam.contains_key(&MS), "the forwarded DCK is no longer needed");
+    // A new authentication gives a new DCK: reported again.
+    mm.set_sc3_dck(MS, &SecCipherKey([0x78; 10]));
+    assert_eq!(auc.lock().unwrap().drain_outbox().len(), 1);
+}
+
+#[test]
+fn dck_local_keys_station_reports_no_dck() {
+    let auc = crate::net_control::auc::Handle::default();
+    let mut mm = station().with_auc(auc.clone());
+    mm.set_sc3_dck(MS, &SecCipherKey([0x77; 10]));
+    assert!(auc.lock().unwrap().drain_outbox().is_empty());
+}
+
+#[test]
+fn cck_demand_for_a_neighbour_la_gets_that_las_server_cck_sealed_with_the_dck() {
+    let (mut mm, _auc) = sc3_server_station_with(&[MS]);
+    let own = mm.config.config().cell.location_area;
+    let neighbour = own + 5;
+    let key = [0x5A; 10];
+    mm.config.state_write().cck_server = vec![(Some(neighbour), tetra_config::bluestation::SckKey { sckn: 0, vn: 55, key: CipherKey(key) })];
+    let mut q = MessageQueue::new();
+    mm.rx_u_otar(&mut q, otar_message(OtarSubType::CckDemandProvide, &[(neighbour as u64, 14)]));
+    let sent = cck_provides(&mut q);
+    assert_eq!(sent.len(), 1, "D-OTAR CCK PROVIDE (clause 4.5.1.3 case 2)");
+    let (to, info) = &sent[0];
+    assert_eq!(*to, MS);
+    assert_eq!(info.cck_id, 55);
+    assert_eq!(info.locations, CckLocations::List(vec![neighbour]));
+    assert_eq!(ta32(&info.sealed, 55, &[0x60; 10]), Ok(key), "sealed with this radio's DCK (TA31)");
+    // An LA the server sent no CCK for: "provision not possible" (no CCK information).
+    mm.rx_u_otar(&mut q, otar_message(OtarSubType::CckDemandProvide, &[((neighbour + 1) as u64, 14)]));
+    let pdus = sent_pdus(&mut q);
+    assert_eq!(pdus.len(), 1);
+    assert!(cck_provides(&mut q).is_empty());
+}
+
+#[test]
+fn cck_for_a_prepare_needs_an_active_class3_session() {
+    let (mm, _auc) = sc3_server_station_with(&[MS]);
+    let own = mm.config.config().cell.location_area;
+    let sdu = super::cck_provide_for_prepare(&mm.config, MS, own).expect("active session");
+    let mut b = sdu.clone();
+    b.read_field(8, "header").unwrap();
+    assert_eq!(b.read_field(1, "present").unwrap(), 1);
+    let info = CckInformation::from_bitbuf(&mut b).unwrap();
+    assert_eq!(info.cck_id, mm.current_cck().unwrap().0);
+    assert!(super::cck_provide_for_prepare(&mm.config, MS + 1, own).is_none(), "no DCK, nothing to seal with");
+}
+
+/// Ten class 3 stations with server keys, 25 radios. Each radio authenticates at its station,
+/// which reports the DCK; the server (simulated here as the JSON it sends) forwards it to the
+/// next station; there the cipher finds the radio's DCK before the radio authenticated there,
+/// and a fresh authentication there replaces the forwarded key and is reported in turn.
+#[test]
+fn dck_server_simulation_10_stations_25_radios() {
+    use crate::net_control::codec::ControlCodecJson;
+    use crate::net_control::commands::ControlCommand;
+    const STATIONS: usize = 10;
+    const RADIOS: u32 = 25;
+    let issis: Vec<u32> = (0..RADIOS).map(|i| 2_350_000 + i).collect();
+    let mut stations: Vec<(MmBs, Handle)> = (0..STATIONS).map(|_| sc3_server_station_with(&[])).collect();
+    let mut reports: Vec<(usize, crate::net_control::commands::DckWire)> = Vec::new();
+    for (n, &issi) in issis.iter().enumerate() {
+        let s = n % STATIONS;
+        let (mm, auc) = &mut stations[s];
+        mm.set_sc3_dck(issi, &SecCipherKey([n as u8 + 1; 10]));
+        for r in auc.lock().unwrap().drain_outbox() {
+            let ControlResponse::DckReport { key } = r else { panic!("{r:?}") };
+            reports.push((s, key));
+        }
+    }
+    assert_eq!(reports.len(), RADIOS as usize);
+    for (from, key) in &reports {
+        let to = (from + 1) % STATIONS;
+        let json = serde_json::json!({"DckKeys": {"keys": [{"issi": key.issi, "dck": key.dck}]}}).to_string();
+        let ControlCommand::DckKeys { keys, drop } = ControlCodecJson.decode_command(json.as_bytes()).unwrap() else { panic!() };
+        assert!(drop.is_empty());
+        let (mm, _) = &stations[to];
+        let mut st = mm.config.state_write();
+        for (issi, dck) in crate::net_control::auc::AucStore::dck_keys(&keys) {
+            st.dck_roam.insert(issi, dck);
+        }
+    }
+    for (n, &issi) in issis.iter().enumerate() {
+        let to = (n % STATIONS + 1) % STATIONS;
+        let (mm, auc) = &mut stations[to];
+        let cfg = mm.config.config();
+        let cipher = crate::aie::cipher::CellCipher::new(cfg.security.aie.as_ref().unwrap(), &[cfg.cell.main_carrier], cfg.cell.location_area, 1)
+            .with_config(mm.config.clone());
+        drop(cfg);
+        let addr = TetraAddress::issi(issi);
+        assert_eq!(cipher.dck_for_address(addr).map(|k| k.0), Some([n as u8 + 1; 10]), "forwarded DCK used before the radio authenticates here");
+        mm.set_sc3_dck(issi, &SecCipherKey([0xA0 + n as u8; 10]));
+        assert_eq!(cipher.dck_for_address(addr).map(|k| k.0), Some([0xA0 + n as u8; 10]), "own DCK after authenticating here");
+        assert!(!mm.config.state_read().dck_roam.contains_key(&issi));
+        assert_eq!(auc.lock().unwrap().drain_outbox().len(), 1, "new DCK reported");
     }
 }

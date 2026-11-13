@@ -387,6 +387,42 @@ so the station does the OTAR itself:
 **Back to local keys** on a class 3 cell writes the server's CCK in use (`cck`,
 `cck_id`) into `[security.aie]`.
 
+### Class 3 radios moving between stations (`dck-v1`, phase 8e)
+
+A class 3 radio encrypts its uplink with its DCK, which only the station it authenticated
+at knows. EN 300 392-7 clause 6.6.1.1: "Within an LA of security class 3 all cells shall
+have knowledge of the DCK in use for each ITSI operating in that LA"; on an announced
+reselection the SwMI "shall ensure that the new serving cell ... has DCK of the roaming
+ITSI" (clause 4.5.1.3). With server keys:
+
+```json
+{"DckReport": {"key": {"issi": 2320972, "dck": "<20 hex>"}}}            // station, new DCK
+{"DckKeys": {"keys": [{"issi": 2320972, "dck": "<20 hex>"}], "drop": []}}  // server
+```
+
+- A station reports every new DCK (after the authentication's RESULT ACK or the location
+  update accept ACK). The server passes it to the other stations of the network that share a
+  location area with that station or are its neighbours, and sends a station that connects
+  the DCKs it should hold (an empty `DckKeys` too). `drop`: the radio's K changed.
+- A forwarded DCK is kept in memory (`dck_roam`) and used to decrypt and encrypt for the
+  radio until it authenticates at this station; then the station's own DCK replaces it. A DCK
+  the station runs itself is not replaced by a forwarded one; it ends when the server reports
+  that the radio registered elsewhere.
+- **CCK of another LA** (clause 4.5.1.3 case 2): a radio may ask its serving cell for the CCK
+  of the LA it is about to move to (U-OTAR CCK DEMAND with that LA, alone or in U-PREPARE).
+  The station answers with that LA's current server CCK (`CckKeys` carries every LA of the
+  network), sealed with the radio's DCK; in U-PREPARE the D-OTAR CCK PROVIDE goes in the
+  D-NEW-CELL. Without that key: D-OTAR CCK PROVIDE without CCK ("provision not possible").
+- **Forward registration** (U-LOCATION UPDATE DEMAND in U-PREPARE, case 3) is not passed to
+  the other station on a class 3 cell: it would have to accept the radio without
+  authenticating it. The D-NEW-CELL carries "forward registration failure" and the radio
+  registers on arrival (TS 100 392-2 clause 18.3.4.7.6, figure 18.12), where its DCK is
+  already known and the new station authenticates it.
+- A class 3 station with server keys now offers `handover-v1` (and `ms-moved`,
+  `call-restore`) to the Brew server like a class 1/2 station. With local keys nothing
+  changes: no roaming offer, a radio from another station registers and authenticates
+  again. Class 3 with `[[cells]]` stays refused.
+
 **Back to local keys** on a class 2 cell writes the server's active SCK (key, `sckn`, `sck_vn`) into
 `[security.aie]`, so class 2 keeps running with the key the radios hold.
 

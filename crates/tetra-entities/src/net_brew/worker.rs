@@ -369,11 +369,14 @@ fn broadcast_values(config: &StackConfig, cell: &tetra_config::bluestation::CfgC
 /// requests (`handover-v1` offered). A linked multi-cell station too: its site switch hands each
 /// request to the cell of the target carrier and each answer back to the asking cell (between its
 /// own cells it never asks the server).
-/// Not with security class 3: the DCK stays in the station that authenticated the radio, so this
-/// build neither prepares a target nor restores calls for it; a radio that comes along registers
-/// and authenticates afresh.
+/// Security class 3 only with the keys from the server (`key_source = "server"`): the server
+/// forwards each radio's DCK to the other stations of its location area and next door
+/// (`dck-v1`, EN 300 392-7 clause 6.6.1.1), so the new station can decrypt the radio. With local
+/// keys the DCK stays in the station that authenticated the radio; a radio that comes along
+/// registers and authenticates afresh.
 fn handles_handover(config: &StackConfig, server_extensions: &[String]) -> bool {
-    !config.security_class3() && server_extensions.iter().any(|e| e == BREW_EXT_HANDOVER)
+    (!config.security_class3() || config.security.key_source == tetra_config::bluestation::KeySource::Server)
+        && server_extensions.iter().any(|e| e == BREW_EXT_HANDOVER)
 }
 
 /// This station restores individual calls of radios that come from another station: it takes
@@ -2446,10 +2449,11 @@ password = "x"
         assert_eq!(json_of(&multi)["capabilities"], serde_json::json!(["handover-v1"]), "a multi-cell station is a target too");
     }
 
-    /// SC3 and roaming between stations are either/or: an SC3 station keeps each DCK to itself, so
-    /// it offers neither handover nor its follow-ups (ms-moved, call-restore) to the server.
+    /// With local keys an SC3 station keeps each DCK to itself, so it offers neither handover nor
+    /// its follow-ups (ms-moved, call-restore) to the server. With the keys from the server it
+    /// does: the server forwards the DCKs (`dck-v1`, clause 6.6.1.1).
     #[test]
-    fn bts_info_offers_no_handover_with_security_class_3() {
+    fn bts_info_offers_handover_with_security_class_3_only_with_server_keys() {
         const SC3: &str = "\n[security]\nauthentication = \"required\"\n[[security.subscribers]]\nissi = 100\nk = \"11111111111111111111111111111111\"\n[security.aie]\nclass = 3\nksg = 2\ncck = \"22222222222222222222\"\ncck_id = 42\n";
         let mut offered: Vec<String> = HANDOVER.iter().map(|e| e.to_string()).collect();
         offered.extend([BREW_EXT_MS_MOVED.to_string(), BREW_EXT_CALL_RESTORE.to_string()]);
@@ -2458,6 +2462,12 @@ password = "x"
         let msg = bts_info_message(&sc3.config(), &offered).unwrap();
         assert_eq!(json_of(&msg)["capabilities"], serde_json::json!([]));
         assert!(!restores_calls(&sc3.config(), &offered));
+
+        let server = config("\n[security]\nauthentication = \"required\"\nkey_source = \"server\"\n[security.aie]\nclass = 3\nksg = 2\ncck = \"22222222222222222222\"\ncck_id = 42\n");
+        assert_eq!(server.config().security.key_source, tetra_config::bluestation::KeySource::Server);
+        let msg = bts_info_message(&server.config(), &offered).unwrap();
+        assert!(json_of(&msg)["capabilities"].as_array().unwrap().iter().any(|c| c == "handover-v1"));
+        assert!(restores_calls(&server.config(), &offered));
     }
 
     #[test]

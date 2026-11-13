@@ -20,7 +20,7 @@ use tetra_security::auth::AuthVector;
 
 use tetra_config::bluestation::{CipherKey, SckKey, StackConfig};
 
-use super::commands::{AuthVectorWire, CckRef, CckWire, ControlResponse, IssiCount, SckRef, SckWire, SealedSckWire};
+use super::commands::{AuthVectorWire, CckRef, CckWire, ControlResponse, DckWire, IssiCount, SckRef, SckWire, SealedSckWire};
 
 /// Station capability: understands `AuthSubscribers` / `AuthVectors`.
 pub const CAP_KEYS: &str = "keys-v1";
@@ -32,6 +32,10 @@ pub const CAP_SCK: &str = "sck-v1";
 /// Station capability: understands `CckKeys` / `CckActivate` (security class 3 CCKs from the
 /// server).
 pub const CAP_CCK: &str = "cck-v1";
+
+/// Station capability: the station sends the DCKs of its class 3 radios and takes those of other stations
+/// (`DckKeys` / `DckReport`).
+pub const CAP_DCK: &str = "dck-v1";
 
 /// A radio without sets is asked for at most this often.
 const REQUEST_EVERY: Duration = Duration::from_secs(5);
@@ -294,6 +298,16 @@ impl AucStore {
         ControlResponse::AuthStock { counts: self.sets.iter().map(|(i, q)| IssiCount { issi: *i, count: q.len() as u32 }).collect() }
     }
 
+    /// A class 3 radio authenticated here: its DCK goes to the server (`dck-v1`).
+    pub fn dck_report(&mut self, issi: u32, dck: &[u8; 10]) {
+        self.outbox.push(ControlResponse::DckReport { key: DckWire { issi, dck: hex(dck) } });
+    }
+
+    /// DCKs forwarded by the server, as the cipher holds them; unreadable entries are skipped.
+    pub fn dck_keys(keys: &[DckWire]) -> Vec<(u32, CipherKey)> {
+        keys.iter().filter_map(|w| Some((w.issi, CipherKey(unhex::<10>(&w.dck.to_ascii_lowercase())?)))).collect()
+    }
+
     pub fn drain_outbox(&mut self) -> Vec<ControlResponse> {
         std::mem::take(&mut self.outbox)
     }
@@ -325,6 +339,11 @@ impl AucStore {
             self.cck.switch = None;
         }
         self.save();
+    }
+
+    /// The server's current CCK of each location area it sent (`None`: every LA).
+    pub fn cck_currents(&self) -> Vec<(Option<u16>, SckKey)> {
+        self.cck.keys.iter().filter(|k| !k.next).filter_map(|k| Some((k.la, cck_key(k)?))).collect()
     }
 
     /// Plan the change of this cell's LA (`cell_la`) to the server CCK `cck_id` at `at_ms`.

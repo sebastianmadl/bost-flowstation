@@ -204,9 +204,12 @@ every one checked against independent test vectors:
 - **Encryption (class 3, experimental):** each radio gets its own derived cipher key (DCK) from
   authentication with its K (mutual authentication too); group downlinks use a common cipher key
   (CCK) the station delivers sealed (TA31/TA32) with the location update accept and on request,
-  and the Security page can send it again. No GCK, no CCK rotation. Class 3 runs on a single
-  cell: a config with `[[cells]]` is refused, and a class 3 station offers no roaming between
-  stations to the Brew server (a radio from another station registers and authenticates again).
+  and the Security page can send it again. No GCK. Class 3 runs on a single cell: a config
+  with `[[cells]]` is refused. With local keys a class 3 station offers no roaming between
+  stations to the Brew server (a radio from another station registers and authenticates
+  again); with the keys from the Brew server (Fleet Control) it does, and the server rotates
+  the CCK and passes each radio's DCK to the stations next door
+  ([`Docs/fleet-control.md`](Docs/fleet-control.md)).
   See [`Docs/sc3-implementation.md`](Docs/sc3-implementation.md).
 - **Over-the-air rekeying (OTAR):** **Send SCK** next to a radio's key delivers the SCK sealed
   under that radio's K (clause 4.5.2); the radio's answer appears under the key. Leave

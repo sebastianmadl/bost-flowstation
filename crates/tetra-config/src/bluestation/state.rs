@@ -697,6 +697,14 @@ pub struct StackState {
     /// After a CCK change: the old CCK, still tried for uplink ESIs that do not resolve with the
     /// new one until this slot (the overlap; EN 300 392-7 clause 4.5.5.2 requires two slots).
     pub cck_overlap: Option<(SckKey, tetra_core::TdmaTime)>,
+    /// Fleet Control (`dck-v1`): DCKs of class 3 radios that authenticated at another station of
+    /// this location area or next door, forwarded by the server (EN 300 392-7 clause 6.6.1.1).
+    /// Used for a radio that has no DCK here yet, until it authenticates here.
+    pub dck_roam: HashMap<u32, super::sec_security::CipherKey>,
+    /// Fleet Control (`cck-v1`): the server's current CCK of every location area it sent
+    /// (`None`: one CCK for every LA), for radios that ask for the CCK of a neighbour LA before
+    /// they move (EN 300 392-7 clause 4.5.1.3, case 2).
+    pub cck_server: Vec<(Option<u16>, SckKey)>,
     /// Startup CLI guard, not persisted by dashboard edits.
     pub security_class3_required: bool,
     /// Queue of live SDS messages injected at runtime via the dashboard.
@@ -951,6 +959,8 @@ impl Default for StackState {
             sck_run: None,
             cck_run: None,
             cck_overlap: None,
+            dck_roam: HashMap::new(),
+            cck_server: Vec::new(),
             sc3_status: HashMap::new(),
             security_class3_required: false,
             live_sds_queue: VecDeque::new(),

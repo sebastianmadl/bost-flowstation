@@ -67,6 +67,9 @@ struct PendingPrepare {
     /// assigned channel rather than on the MCCH: the answer is stolen there, since an MS on an
     /// assigned channel receives its signalling on that channel (clause 23.8.4.2).
     stch: Option<(u16, u8)>,
+    /// MM SDU for the D-NEW-CELL when the target gives none: the D-OTAR CCK PROVIDE a class 3
+    /// radio asked for, or the "forward registration failure" for a class 3 forward registration.
+    extra: Option<BitBuffer>,
 }
 
 /// How long the serving cell waits for the target cell's answer to a forwarded registration
@@ -150,8 +153,9 @@ impl MleBs {
     /// multi-cell station through the site switch, a cell of another station through Brew
     /// (`handover-v1`, also from a cell of a multi-cell station, whose switch passes the request
     /// on). Only a station with neither answers D-NEW-CELL at once.
-    fn rx_u_prepare(&mut self, queue: &mut MessageQueue, addr: TetraAddress, link_id: LinkId, endpoint_id: EndpointId, pdu: UPrepare) {
+    fn rx_u_prepare(&mut self, queue: &mut MessageQueue, addr: TetraAddress, link_id: LinkId, endpoint_id: EndpointId, mut pdu: UPrepare) {
         let cfg = self.config.config();
+        let extra = self.sc3_prepare_sdu(addr.ssi, &mut pdu);
         if pdu.cell_identifier_ca.is_none() {
             // Announced type 3 (clause 18.3.4.7.4): no preferred cell yet, so nothing to prepare.
             // D-PREPARE-FAIL "shall not be a valid response" here; answer D-NEW-CELL "change
@@ -159,7 +163,7 @@ impl MleBs {
             tracing::info!("MLE: U-PREPARE from {} without a cell (type 3) → D-NEW-CELL", addr.ssi);
             let new_cell = DNewCell {
                 channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
-                sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))),
+                sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))).or(extra),
             };
             let stch = Self::stch_of_link(cfg.cell.main_carrier, link_id);
             self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| {
@@ -179,7 +183,7 @@ impl MleBs {
             );
             let fail = DPrepareFail {
                 fail_cause: FAIL_CAUSE_TEMPORARY_BREAK,
-                sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))),
+                sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))).or(extra.filter(is_lu_reject)),
             };
             let stch = Self::stch_of_link(cfg.cell.main_carrier, link_id);
             self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| fail.to_bitbuf(b));
@@ -195,6 +199,7 @@ impl MleBs {
             forwarded,
             cross_station,
             stch,
+            extra: extra.clone(),
         };
         if crate::net_brew::is_site_linked(&self.config) && cfg.is_station_carrier(target_carrier) {
             tracing::info!(
@@ -257,12 +262,45 @@ impl MleBs {
         );
         let new_cell = DNewCell {
             channel_command_valid: CHANNEL_COMMAND_CHANGE_IMMEDIATELY,
-            sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))),
+            sdu: pdu.sdu.as_ref().map(|demand| forward_registration_failure(location_update_type(demand))).or(extra),
         };
         self.send_l2(queue, addr, link_id, endpoint_id, MleProtocolDiscriminator::Mle, None, stch, None, |b| {
             new_cell.to_bitbuf(b)
         });
         self.report_reselection(queue, addr.ssi, CellReselection::AnnouncedType2);
+    }
+
+    /// Class 3 (EN 300 392-7 clause 4.5.1.3): the MM PDU a U-PREPARE carries is taken out here.
+    /// A U-OTAR CCK DEMAND for the new cell's LA is answered by D-OTAR CCK PROVIDE in the
+    /// D-NEW-CELL (case 2). A forward registration (case 3) is not passed on: the new cell would
+    /// have to accept it without authenticating the radio, so the D-NEW-CELL carries "forward
+    /// registration failure" and the radio registers on arrival (clause 18.3.4.7.6, figure
+    /// 18.12), where the server has given the new station its DCK (clause 6.6.1.1). Returns the
+    /// MM SDU for the D-NEW-CELL.
+    fn sc3_prepare_sdu(&self, issi: u32, pdu: &mut UPrepare) -> Option<BitBuffer> {
+        let sdu = pdu.sdu.as_ref()?;
+        let mm_type = sdu.peek_bits_startoffset(0, 4)?;
+        if mm_type == tetra_pdus::mm::enums::mm_pdu_type_ul::MmPduTypeUl::UOtar as u64 {
+            let mut demand = sdu.clone();
+            demand.seek(0);
+            let la = tetra_pdus::mm::pdus::otar_cck::UOtarCckDemand::from_bitbuf(&mut demand).ok()?.location_area;
+            pdu.sdu = None;
+            let provide = crate::mm::mm_bs::cck_provide_for_prepare(&self.config, issi, la);
+            tracing::info!(
+                "MLE: U-PREPARE from {} asks for the CCK of LA {} → D-NEW-CELL {}",
+                issi,
+                la,
+                if provide.is_some() { "with D-OTAR CCK PROVIDE" } else { "without it (no class 3 session)" }
+            );
+            return provide;
+        }
+        if self.config.config().security_class3() {
+            let lu_type = location_update_type(sdu);
+            pdu.sdu = None;
+            tracing::info!("MLE: class 3 forward registration from {} not passed on, registers on arrival", issi);
+            return Some(forward_registration_failure(lu_type));
+        }
+        None
     }
 
     /// The MS leaves by announced reselection of this type (D-NEW-CELL sent): Brew tells the
@@ -329,7 +367,7 @@ impl MleBs {
             (HandoverOutcome::Rejected, a, _) if !a.as_ref().is_some_and(is_reject) => HandoverOutcome::NotPrepared,
             (o, _, _) => o,
         };
-        let local_reject = || p.forwarded.map(forward_registration_failure);
+        let local_reject = || p.forwarded.map(forward_registration_failure).or(p.extra.clone().filter(is_lu_reject));
         match outcome {
             HandoverOutcome::Rejected | HandoverOutcome::TargetGone => {
                 let (fail_cause, sdu) = if outcome == HandoverOutcome::Rejected {
@@ -358,7 +396,7 @@ impl MleBs {
                     self.grant_type1(queue, addr, &p, channel, accept.clone());
                     return;
                 }
-                let sdu = if outcome == HandoverOutcome::Accepted { answer } else { local_reject() };
+                let sdu = if outcome == HandoverOutcome::Accepted { answer } else { local_reject() }.or(p.extra.clone());
                 tracing::info!(
                     "MLE: D-NEW-CELL to {}{}",
                     issi,
@@ -1023,6 +1061,11 @@ fn location_update_type(demand: &BitBuffer) -> u8 {
     demand.peek_bits_startoffset(4, 3).unwrap_or(0) as u8
 }
 
+/// The MM SDU is a D-LOCATION UPDATE REJECT.
+fn is_lu_reject(sdu: &BitBuffer) -> bool {
+    sdu.peek_bits_startoffset(0, 4).is_some_and(|t| t == MmPduTypeDl::DLocationUpdateReject.into_raw())
+}
+
 /// "Reject cause" of a D-LOCATION UPDATE REJECT (after PDU type and location update type, table 16.13).
 fn reject_cause(reject: &BitBuffer) -> Option<u8> {
     reject.peek_bits_startoffset(7, 5).map(|c| c as u8)
@@ -1494,6 +1537,93 @@ location_area = 7
         };
         mle.rx_prim(&mut q, uplink_mle(|b| prepare.to_bitbuf(b).unwrap()));
         assert_eq!(sent_mle_pdus(&drain(&mut q)), vec![format!("001000{}", FRF_REJECT)]);
+    }
+
+    // ── Security class 3 (Fleet Control phase 8e) ───────────────────────────────────────────
+
+    /// A class 3 station with the keys from the server, connected to Brew, whose radio `MS` runs
+    /// an active class 3 session.
+    fn sc3_config() -> SharedConfig {
+        let cfg = config_with(
+            false,
+            r#"
+[brew]
+host = "brew.example"
+port = 3000
+tls = false
+username = 1
+password = "x"
+
+[security]
+authentication = "required"
+key_source = "server"
+
+[security.aie]
+class = 3
+ksg = 2
+cck = "22222222222222222222"
+cck_id = 42
+"#,
+        );
+        {
+            let mut st = cfg.state_write();
+            st.sc3_dcks.insert(MS, tetra_config::bluestation::CipherKey([0x31; 10]));
+            st.sc3_status.insert(MS, tetra_config::bluestation::Sc3Status { phase: "active", cck: "accepted" });
+            st.cck_server = vec![(Some(7), tetra_config::bluestation::SckKey { sckn: 0, vn: 77, key: tetra_config::bluestation::CipherKey([0x77; 10]) })];
+        }
+        cfg
+    }
+
+    /// U-OTAR CCK DEMAND for location area `la`: PDU type, OTAR sub-type, LA, O-bit.
+    fn cck_demand(la: u16) -> String {
+        let mut b = BitBuffer::new_autoexpand(32);
+        b.write_bits(tetra_pdus::mm::enums::mm_pdu_type_ul::MmPduTypeUl::UOtar as u64, 4);
+        b.write_bits(tetra_pdus::mm::enums::otar_sub_type::OtarSubType::CckDemandProvide.into_raw(), 4);
+        b.write_bits(la as u64, 14);
+        b.write_bit(0);
+        let len = b.get_pos();
+        b.seek(0);
+        b.to_bitstr()[..len].to_string()
+    }
+
+    #[test]
+    fn class3_u_prepare_with_a_cck_demand_gets_the_new_las_cck_in_d_new_cell() {
+        let cfg = sc3_config();
+        let mut mle = MleBs::new(cfg.clone());
+        let mut q = MessageQueue::new();
+        let msgs = cross_station_prepare(&mut mle, &mut q, Some(&cck_demand(7)));
+        // The station of the neighbour is still asked (call restore), without an MM SDU.
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest { issi: MS, sdu: None, .. })));
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, None));
+        let sent = sent_mle_pdus(&drain(&mut q));
+        let provide = crate::mm::mm_bs::cck_provide_for_prepare(&cfg, MS, 7).unwrap().to_bitstr();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with("000") && sent[0].ends_with(&provide), "D-NEW-CELL with D-OTAR CCK PROVIDE (clause 4.5.1.3 case 2): {sent:?}");
+        // The CCK in it is LA 7's server key, sealed with this radio's DCK.
+        let mut b = BitBuffer::from_bitstr(&provide);
+        b.read_field(8, "header").unwrap();
+        assert_eq!(b.read_field(1, "present").unwrap(), 1);
+        let info = tetra_pdus::mm::pdus::otar_cck::CckInformation::from_bitbuf(&mut b).unwrap();
+        assert_eq!(info.cck_id, 77);
+        assert_eq!(tetra_security::taa1::ta32(&info.sealed, 77, &[0x31; 10]), Ok([0x77; 10]));
+    }
+
+    #[test]
+    fn class3_forward_registration_is_not_passed_on_and_registers_on_arrival() {
+        let mut mle = MleBs::new(sc3_config());
+        let mut q = MessageQueue::new();
+        let msgs = cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest { issi: MS, sdu: None, .. })), "no forward registration to the other station");
+        mle.rx_prim(&mut q, result(HandoverOutcome::Accepted, None));
+        assert_eq!(sent_mle_pdus(&drain(&mut q)), vec![format!("000010{}", FRF_REJECT)], "D-NEW-CELL with forward registration failure");
+    }
+
+    #[test]
+    fn class2_forward_registration_is_still_passed_on() {
+        let mut mle = MleBs::new(brew_config());
+        let mut q = MessageQueue::new();
+        let msgs = cross_station_prepare(&mut mle, &mut q, Some(MM_DEMAND));
+        assert!(told_brew(&msgs, |cc| matches!(cc, CallControl::HandoverRequest { sdu: Some(_), .. })));
     }
 
     // ── Neighbour on another station, prepared through Brew ─────────────────────────────────

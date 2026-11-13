@@ -187,7 +187,10 @@ impl CellCipher {
 
     pub(crate) fn dck_for_address(&self, addr: TetraAddress) -> Option<tetra_config::bluestation::CipherKey> {
         if !matches!(addr.ssi_type, SsiType::Issi | SsiType::Ssi) { return None; }
-        self.config.as_ref()?.state_read().sc3_dcks.get(&addr.ssi).cloned()
+        let state = self.config.as_ref()?.state_read();
+        // A radio that authenticated at another station of this LA or next door and has not
+        // authenticated here yet: its DCK forwarded by the server (clause 6.6.1.1).
+        state.sc3_dcks.get(&addr.ssi).or_else(|| state.dck_roam.get(&addr.ssi)).cloned()
     }
 
     pub(crate) fn kss_for_dck(&self, carrier: u16, t: TdmaTime, uplink: bool, dck: &tetra_config::bluestation::CipherKey) -> Kss {
