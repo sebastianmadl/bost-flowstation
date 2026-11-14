@@ -1518,6 +1518,24 @@ impl MmBs {
             {
                 tracing::info!("MM: visitor {}:{} registered on (V)ASSI {}", mni, v.issi, issi);
             }
+            if let (Some(v), Some(sink)) = (self.visitors.get(issi), &self.telemetry) {
+                // The dashboard lists the visitor under its home identity (display only).
+                let network = self
+                    .config
+                    .state_read()
+                    .multi_network
+                    .server
+                    .as_ref()
+                    .and_then(|(_, nets)| nets.iter().find(|n| n.mni == mni).map(|n| n.name.clone()))
+                    .unwrap_or_default();
+                sink.send(crate::net_telemetry::TelemetryEvent::MsVisitor {
+                    issi,
+                    mcc: mni.mcc,
+                    mnc: mni.mnc,
+                    home_issi: v.issi,
+                    network,
+                });
+            }
             self.visitors.confirm(issi);
         } else if migration == Migration::Home {
             tracing::info!("MM: ISSI {} back from another network (migration case c)", issi);

@@ -15,7 +15,7 @@ use crate::net_dashboard::conn_stream::{
 };
 use crate::net_dashboard::dashboard_ports::{LEGACY_HTTP_PORT, LEGACY_HTTPS_PORT};
 use crate::net_dashboard::html::DASHBOARD_HTML;
-use crate::net_dashboard::state::{CallEntry, DashboardState, DashboardStateInner, MsEntry, MsGroupState};
+use crate::net_dashboard::state::{CallEntry, DashboardState, DashboardStateInner, MsEntry, MsGroupState, MsHome};
 use crate::net_telemetry::TelemetryEvent;
 use crate::net_telemetry::events::CellRfEvent;
 use crate::tpg2200::build_tpg2200_callout_payload;
@@ -2522,6 +2522,12 @@ impl DashboardServer {
                     let level = if status == "accepted" || status == "sent" { "INFO" } else { "WARN" };
                     s.push_log(level, format!("OTAR SCK {} v{} to ISSI {}: {}", sckn, sck_vn, issi, status));
                 }
+                TelemetryEvent::MsVisitor { issi, mcc, mnc, home_issi, network } => {
+                    let home = MsHome { issi: *home_issi, mcc: *mcc, mnc: *mnc, network: network.clone() };
+                    if s.ms_home.insert(*issi, home).is_none() {
+                        s.push_log("INFO", format!("MS {} is visitor {}/{}:{}", issi, mcc, mnc, home_issi));
+                    }
+                }
                 TelemetryEvent::MsMovedAway { issi, cell } => {
                     // Moved to a sibling cell: its MsCell already put the row on the new cell, so
                     // it stays listed. A row still on the cell it left means the radio went to
@@ -2529,6 +2535,7 @@ impl DashboardServer {
                     if s.ms_map.get(issi).is_some_and(|e| e.cell.unwrap_or(0) == *cell) {
                         s.ms_map.remove(issi);
                         s.ms_security.remove(issi);
+                        s.ms_home.remove(issi);
                         s.push_log("INFO", format!("MS {} moved to another station", issi));
                     } else {
                         s.push_log("INFO", format!("MS {} moved to another cell", issi));
@@ -2537,6 +2544,7 @@ impl DashboardServer {
                 TelemetryEvent::MsDeregistration { issi } => {
                     s.ms_map.remove(issi);
                     s.ms_security.remove(issi);
+                    s.ms_home.remove(issi);
                     s.push_log("INFO", format!("MS {} deregistered", issi));
                 }
                 TelemetryEvent::MsTimeoutDrop { issi } => {
@@ -2544,6 +2552,7 @@ impl DashboardServer {
                     // distinct event only matters to alert consumers that report the reason.
                     s.ms_map.remove(issi);
                     s.ms_security.remove(issi);
+                    s.ms_home.remove(issi);
                     s.push_log("WARN", format!("MS {} dropped (no response to T351)", issi));
                 }
                 TelemetryEvent::MsGroupAttach { issi, gssis } => {
@@ -3151,6 +3160,9 @@ fn event_to_ws_msg(event: &TelemetryEvent) -> Option<String> {
             serde_json::json!({"type":"otar_sck","issi":issi,"sckn":sckn,"sck_vn":sck_vn,"status":status})
         }
         TelemetryEvent::MsMovedAway { issi, cell } => serde_json::json!({"type":"ms_moved_away","issi":issi,"cell":cell}),
+        TelemetryEvent::MsVisitor { issi, mcc, mnc, home_issi, network } => serde_json::json!({
+            "type":"ms_visitor","issi":issi,"home":{"issi":home_issi,"mcc":mcc,"mnc":mnc,"network":network}
+        }),
         TelemetryEvent::GroupCallStarted {
             call_id,
             gssi,
@@ -10010,12 +10022,12 @@ fn serve_dapnet_send(
 mod tests {
 
     use super::{
-        DashboardServer, LoginThrottle, MAX_TETRA_SSI, UpdateState, activate_config_profile, binary_built_from,
+        DashboardServer, LoginThrottle, MAX_TETRA_SSI, event_to_ws_msg, UpdateState, activate_config_profile, binary_built_from,
         handle_ws_command, is_masked_secret_key, mask_config_secrets, normalize_mojibake_html,
         restore_config_from_backup, save_config_profile, timing_safe_eq, write_config_validated,
     };
     use crate::net_control::commands::ControlCommand;
-    use crate::net_dashboard::state::DashboardStateInner;
+    use crate::net_dashboard::state::{DashboardStateInner, MsHome};
     use crate::net_telemetry::TelemetryEvent;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -10668,6 +10680,58 @@ dest_issi = 2632585
         server.handle_telemetry(TelemetryEvent::MsDeregistration { issi: 2358245 });
         server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 2358245 });
         assert_eq!(snap(2358245), Some((false, false)), "flags are per registration");
+    }
+
+    /// Multi Network: a visitor is listed on its (V)ASSI with its home identity (field question
+    /// 2026-11-14: the list showed only 15728641); it goes with the row, other radios have none.
+    #[test]
+    fn a_visitor_is_listed_with_its_home_identity() {
+        let server = DashboardServer::new("/tmp/fs_visitor_home_test_config.toml".to_string());
+        let home = |issi: u32| server.state.read().unwrap().snapshot_ms().into_iter().find(|m| m.issi == issi).map(|m| m.home);
+
+        // MM reports the visitor with the accept, before the registration creates the row.
+        server.handle_telemetry(TelemetryEvent::MsVisitor {
+            issi: 0xF0_0001,
+            mcc: 901,
+            mnc: 9999,
+            home_issi: 2_320_972,
+            network: String::new(),
+        });
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 0xF0_0001 });
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 2_320_973 });
+        assert_eq!(
+            home(0xF0_0001),
+            Some(Some(MsHome { issi: 2_320_972, mcc: 901, mnc: 9999, network: String::new() }))
+        );
+        assert_eq!(home(2_320_973), Some(None), "a radio of this network has no home entry");
+
+        // Gone with the row: a later radio on the same (V)ASSI is not taken for it.
+        server.handle_telemetry(TelemetryEvent::MsDeregistration { issi: 0xF0_0001 });
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 0xF0_0001 });
+        assert_eq!(home(0xF0_0001), Some(None));
+
+        // The name of a linked network, when the server gave one.
+        server.handle_telemetry(TelemetryEvent::MsVisitor {
+            issi: 0xF0_0009,
+            mcc: 901,
+            mnc: 1638,
+            home_issi: 2_089_258,
+            network: "TetraPack".into(),
+        });
+        server.handle_telemetry(TelemetryEvent::MsRegistration { issi: 0xF0_0009 });
+        assert_eq!(home(0xF0_0009).flatten().map(|h| h.network), Some("TetraPack".to_string()));
+        let msg = event_to_ws_msg(&TelemetryEvent::MsVisitor {
+            issi: 1,
+            mcc: 901,
+            mnc: 1638,
+            home_issi: 2,
+            network: "TP".into(),
+        })
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["type"], "ms_visitor");
+        assert_eq!(v["home"]["issi"], 2);
+        assert_eq!(v["home"]["network"], "TP");
     }
 
     /// Field case (M5a, H): the radio went to another station, the stack here dropped it (a kick

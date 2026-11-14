@@ -490,3 +490,34 @@ fn test_group_access_checks_a_migrated_radio_of_the_servers_network_by_its_home_
     assert!(state.group_may_talk(GSSI, vassi) && state.group_may_join(GSSI, vassi), "checked by its home ISSI");
     assert!(!state.group_may_join(GSSI, 4013), "others stay refused");
 }
+
+/// The dashboard learns a visitor's home identity with its accept (`MsVisitor`), with the
+/// network's name when the server listed it; a radio of this network sends none.
+#[test]
+fn test_visitor_accept_tells_the_dashboard_its_home_identity() {
+    use tetra_config::bluestation::BrewNetwork;
+    use tetra_entities::mm::mm_bs::MmBs;
+    use tetra_entities::net_telemetry::{TelemetryEvent, telemetry_channel};
+    debug::setup_logging_verbose();
+    const VISITOR: u32 = 2320972;
+    let mut test = ComponentTest::from_config(multi_network_config(0), Some(TdmaTime::default()));
+    test.populate_entities(vec![], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+    let (sink, source) = telemetry_channel();
+    test.register_entity(MmBs::new(test.get_shared_config(), Some(sink), None));
+    test.config.state_write().multi_network.server = Some((OWN, vec![BrewNetwork { mni: HOME, name: "Home net".into(), up: true }]));
+    let (vassi, _) = migrate(&mut test, VISITOR, vec![]);
+    let mut seen = Vec::new();
+    while let Some(e) = source.try_recv() {
+        if let TelemetryEvent::MsVisitor { issi, mcc, mnc, home_issi, network } = e {
+            seen.push((issi, mcc, mnc, home_issi, network));
+        }
+    }
+    assert_eq!(seen, vec![(vassi, HOME.mcc, HOME.mnc, VISITOR, "Home net".to_string())]);
+
+    // A radio of this network: no visitor event.
+    submit_demand(&mut test, ussi(2320973), demand(LocationUpdateType::ItsiAttach, None, None, vec![]));
+    let _ = test.dump_sinks();
+    while let Some(e) = source.try_recv() {
+        assert!(!matches!(e, TelemetryEvent::MsVisitor { .. }), "{e:?}");
+    }
+}

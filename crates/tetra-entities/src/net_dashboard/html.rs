@@ -8252,7 +8252,7 @@ const LANGS={
     roam_help_n_rxlev:'Minimum RX access level of the neighbour (clause 18.5.12). Empty: radios assume the same as this cell (table 18.64, note 2).',
     roam_help_n_txpwr:'Maximum MS transmit power in the neighbour (table 18.57), used by the radio for C2. Empty: same as this cell.',
     cells_title:'Cells',cells_help:"Each extra SDR runs one more cell. Pick a free carrier; its frequencies follow from the primary cell's band plan. The station restarts to apply changes.",
-    cells_carrier:'Carrier',cells_cc:'Colour code',cells_la_help:'Location area of the new cell. Empty = same as the primary cell. With its own location area a radio registers on every change of cell (TS 100 392-2 clause 18.3.4.7.1a).',cells_add:'Add cell',cells_remove:'Remove',cells_cell:'Cell {n}',cells_radios:'{n} radio(s)',
+    cells_carrier:'Carrier',cells_cc:'Colour code',cells_la_help:'Location area of the new cell. Empty = same as the primary cell. With its own location area a radio registers on every change of cell (TS 100 392-2 clause 18.3.4.7.1a).',cells_add:'Add cell',cells_remove:'Remove',cells_cell:'Cell {n}',ms_visitor:'Guest · {net}',ms_vassi:'(V)ASSI here',ms_visitor_title:'Radio of network {net} (migration, TS 100 392-2 clause 16.4.1.1 b)). It has a (V)ASSI on this cell; calls and SDS to its own ISSI reach it here.',cells_radios:'{n} radio(s)',
     cells_net_local:'local',cells_net_up:'core up',cells_net_down:'core down',
     cells_single:'Single cell',rf_cells_note:'Pick a cell to show its SDR on this page.',cells_linked:'Cells linked',cells_independent:'Independent cells',
     cells_need_fields:'Device and carrier are required.',cells_confirm_add:'Add this cell? The station restarts.',cells_confirm_remove:'Remove cell {n}? The station restarts.',
@@ -8804,7 +8804,7 @@ const LANGS={
     dapnet_title:'DAPNET',dapnet_log:'DAPNET-Log',dapnet_routing:'Routing',dapnet_send:'DAPNET-Nachricht senden',dapnet_saved:'✓ Gespeichert',
     terminals:'Radios',registered:'registriert',
     active_calls:'Aktive Anrufe',circuits:'Schaltkreise aktiv',
-    registered_terminals:'Registrierte Radios',
+    registered_terminals:'Registrierte Radios',ms_visitor:'Gast · {net}',ms_vassi:'(V)ASSI hier',ms_visitor_title:'Funkgerät aus Netz {net} (Migration, TS 100 392-2 Abschnitt 16.4.1.1 b)). Es hat auf dieser Zelle eine (V)ASSI; Rufe und SDS an seine eigene ISSI erreichen es hier.',
     no_terminals:'Keine Radios registriert',no_calls:'Keine aktiven Anrufe',
     live_log:'Live-Log',autoscroll:'Auto-Scroll',filter_all:'Alle',
     clear:'Löschen',export:'Exportieren',restart:'Neustart',shutdown:'Herunterfahren',save:'Speichern',
@@ -8930,7 +8930,7 @@ const LANGS={
     roam_help_n_rxlev:'Nivel mínimo de acceso RX de la vecina (cláusula 18.5.12). Vacío: las radios suponen el mismo que esta celda (tabla 18.64, nota 2).',
     roam_help_n_txpwr:'Potencia de transmisión máxima de la radio en la vecina (tabla 18.57), la usa la radio para C2. Vacío: igual que esta celda.',
     cells_title:'Celdas',cells_help:'Cada SDR adicional ejecuta una celda más. Elige una portadora libre; sus frecuencias salen del plan de banda de la celda principal. La estación se reinicia para aplicar los cambios.',
-    cells_carrier:'Portadora',cells_cc:'Código de color',cells_la_help:'Área de localización de la nueva celda. Vacío = la misma que la celda principal. Con un área propia la radio se registra en cada cambio de celda (TS 100 392-2 cláusula 18.3.4.7.1a).',cells_add:'Añadir celda',cells_remove:'Quitar',cells_cell:'Celda {n}',cells_radios:'{n} radio(s)',
+    cells_carrier:'Portadora',cells_cc:'Código de color',cells_la_help:'Área de localización de la nueva celda. Vacío = la misma que la celda principal. Con un área propia la radio se registra en cada cambio de celda (TS 100 392-2 cláusula 18.3.4.7.1a).',cells_add:'Añadir celda',cells_remove:'Quitar',cells_cell:'Celda {n}',ms_visitor:'Invitado · {net}',ms_vassi:'(V)ASSI aquí',ms_visitor_title:'Radio de la red {net} (migración, TS 100 392-2 cláusula 16.4.1.1 b)). Tiene una (V)ASSI en esta celda; las llamadas y SDS a su propia ISSI le llegan aquí.',cells_radios:'{n} radio(s)',
     cells_net_local:'local',cells_net_up:'núcleo conectado',cells_net_down:'núcleo desconectado',
     cells_single:'Celda única',rf_cells_note:'Elige una celda para ver su SDR en esta página.',cells_linked:'Celdas enlazadas',cells_independent:'Celdas independientes',
     cells_need_fields:'Hacen falta el dispositivo y la portadora.',cells_confirm_add:'¿Añadir esta celda? La estación se reinicia.',cells_confirm_remove:'¿Quitar la celda {n}? La estación se reinicia.',
@@ -14537,7 +14537,7 @@ async function wifiCall(url, body){
 function escAttr(s){ return String(s).replace(/&/g,'&amp;').replace(/'/g,"&#39;").replace(/"/g,'&quot;'); }
 
 // ── State + WS ────────────────────────────────────────────────────────────
-let ws=null,state={ms:{},calls:{},emergencies:{},secByIssi:{},cellSec:null,lastHeard:[],sdsLog:[],dapnetLog:[],geoalarmEvents:[],brewOnline:false,brewVer:0,dgnaDefaultAttachmentMode:0,dgnaAttachmentModePickerEnabled:false},sdsDest=0,lstSdsSource=0;
+let ws=null,state={ms:{},calls:{},emergencies:{},secByIssi:{},homeByIssi:{},cellSec:null,lastHeard:[],sdsLog:[],dapnetLog:[],geoalarmEvents:[],brewOnline:false,brewVer:0,dgnaDefaultAttachmentMode:0,dgnaAttachmentModePickerEnabled:false},sdsDest=0,lstSdsSource=0;
 let dgnaUi={selectedGssi:0,targetChecks:{},statusLog:[],lastByIssi:{}};
 
 // ── RadioID callsigns (indicativ) ──────────────────────────────────────────────
@@ -14574,7 +14574,7 @@ function refreshCallsigns(){
   if(_csInflight||document.hidden)return;
   if(typeof dashLinkState!=='undefined'&&dashLinkState!=='online')return;
   const ids=new Set();
-  Object.values(state.ms).forEach(m=>ids.add(m.issi));
+  Object.values(state.ms).forEach(m=>{ids.add(m.issi);if(m.home&&m.home.issi)ids.add(m.home.issi);});
   Object.values(state.calls).forEach(c=>{if(c.caller_issi)ids.add(c.caller_issi);if(c.called_issi&&c.call_type!=='group')ids.add(c.called_issi);if(c.active_speaker)ids.add(c.active_speaker);});
   state.lastHeard.forEach(e=>{if(e.issi)ids.add(e.issi);});
   (state.sdsLog||[]).forEach(e=>{if(e.source_issi)ids.add(e.source_issi);if(e.dest_issi&&!e.is_group)ids.add(e.dest_issi);});
@@ -14836,6 +14836,7 @@ function handleMsg(msg){
       if(msg.log&&msg.log.length){document.getElementById('log-container').innerHTML='';msg.log.forEach(e=>appendLog(e));}
       setBrewStatus(!!msg.brew_online,Math.max(1,msg.brew_version||0));
       state.secByIssi={};(msg.ms||[]).forEach(m=>{state.secByIssi[m.issi]={authenticated:!!m.authenticated,encrypting:!!m.encrypting};});
+      state.homeByIssi={};(msg.ms||[]).forEach(m=>{if(m.home)state.homeByIssi[m.issi]=m.home;});
       setCellSecurity(msg.cell_security||null);
       if(msg.fallback_config_active){showFallbackBanner(msg.fallback_config_reason||'');}
       // If the server already has recent RF snapshots, paint them instantly
@@ -14857,10 +14858,10 @@ function handleMsg(msg){
       // registered entries must have a defined-but-null selected_group so the equality
       // comparison `g === sel` in renderStations behaves consistently with the server-side
       // None initialiser in server.rs.
-      state.ms[msg.issi]=Object.assign({issi:msg.issi,groups:[],group_catalog:[],selected_group:null,rssi_dbfs:null,energy_saving_mode:0,authenticated:false,encrypting:false},state.ms[msg.issi]||{},state.secByIssi[msg.issi]||{},{issi:msg.issi,_last_seen_ts:Date.now()});
+      state.ms[msg.issi]=Object.assign({issi:msg.issi,groups:[],group_catalog:[],selected_group:null,rssi_dbfs:null,energy_saving_mode:0,authenticated:false,encrypting:false},state.ms[msg.issi]||{},state.secByIssi[msg.issi]||{},{home:state.homeByIssi[msg.issi]||null},{issi:msg.issi,_last_seen_ts:Date.now()});
       renderStations();renderDgnaPage();break;
     case 'ms_deregistered':
-      delete state.ms[msg.issi];delete state.secByIssi[msg.issi];renderStations();renderDgnaPage();break;
+      delete state.ms[msg.issi];delete state.secByIssi[msg.issi];delete state.homeByIssi[msg.issi];renderStations();renderDgnaPage();break;
     case 'otar_sck':
       secpOtar[msg.issi]=msg.status;if(document.getElementById('page-security').classList.contains('active'))secpRenderSubs();break;
     case 'ms_security':{
@@ -14871,12 +14872,17 @@ function handleMsg(msg){
       if(msg.encrypting!=null)f.encrypting=!!msg.encrypting;
       if(state.ms[msg.issi])Object.assign(state.ms[msg.issi],f);
       renderStations();break;}
+    case 'ms_visitor':
+      // Multi Network visitor: the row is its (V)ASSI; show its own ISSI and network too.
+      state.homeByIssi[msg.issi]=msg.home;
+      if(state.ms[msg.issi]){state.ms[msg.issi].home=msg.home;renderStations();}
+      refreshCallsigns();break;
     case 'ms_cell':
       if(state.ms[msg.issi]){state.ms[msg.issi].cell=msg.cell;renderStations();}
       break;
     case 'ms_moved_away':
       // Still on the cell it left: it went to another station (a sibling cell's ms_cell moves the row).
-      if(state.ms[msg.issi]&&(state.ms[msg.issi].cell??0)===msg.cell){delete state.ms[msg.issi];delete state.secByIssi[msg.issi];renderStations();renderDgnaPage();}
+      if(state.ms[msg.issi]&&(state.ms[msg.issi].cell??0)===msg.cell){delete state.ms[msg.issi];delete state.secByIssi[msg.issi];delete state.homeByIssi[msg.issi];renderStations();renderDgnaPage();}
       break;
     case 'ms_rssi':
       if(state.ms[msg.issi]){state.ms[msg.issi].rssi_dbfs=msg.rssi_dbfs;state.ms[msg.issi]._last_seen_ts=Date.now();}
@@ -15560,6 +15566,14 @@ function scheduleStationsRender(){
   },250);
 }
 
+// A Multi Network visitor is listed under its own ISSI (with its callsign), its (V)ASSI on this
+// cell below and a chip with its home network; every other radio as before.
+function msIdCell(m,cellChip){
+  const h=m.home;
+  if(!h||!h.issi)return idCell(m.issi)+cellChip;
+  const net=h.network?h.network:`${h.mcc}/${h.mnc}`;
+  return `${idCell(h.issi)} <span class="badge badge-blue" title="${escHtmlAttr(t('ms_visitor_title',{net:`${h.mcc}/${h.mnc}`}))}">${escHtml(t('ms_visitor',{net}))}</span>${cellChip}<div style="font-size:11px;color:var(--text2);margin-top:2px">${t('ms_vassi')} <code>${m.issi}</code></div>`;
+}
 function renderStations(){
   const ms=Object.values(state.ms);
   const msCount=ms.length,callCount=Object.keys(state.calls).length;
@@ -15582,7 +15596,7 @@ function renderStations(){
     const ls=m._last_seen_ts?Math.floor((Date.now()-m._last_seen_ts)/1000):m.last_seen_secs_ago;
     const emg=!!state.emergencies[m.issi];
     return`<tr${emg?' class="row-emergency"':''} data-ms-issi="${m.issi}">
-      <td>${emg?'<span class="badge badge-emergency">'+t('call_emergency')+'</span> ':''}${idCell(m.issi)}${m.cell!=null?' <span class="badge badge-dim" title="'+escHtmlAttr(t('cells_cell',{n:m.cell}))+'">C'+m.cell+'</span>':''}</td><td>${grps}</td>
+      <td>${emg?'<span class="badge badge-emergency">'+t('call_emergency')+'</span> ':''}${msIdCell(m,m.cell!=null?' <span class="badge badge-dim" title="'+escHtmlAttr(t('cells_cell',{n:m.cell}))+'">C'+m.cell+'</span>':'')}</td><td>${grps}</td>
       <td class="col-mobile-hide">${eeLabel(m.energy_saving_mode||0)}</td>
       <td><div class="gauge ${gcls}"><div class="gauge-track"><div class="gauge-fill" style="width:${pct}%"></div></div><span class="gauge-value">${rL}</span></div></td>
       <td>${secCell(m)}</td>
