@@ -267,7 +267,7 @@ impl BsFragger {
         assert!(!self.is_fully_transmitted && !self.discarded, "PDU already finished");
         if self.encrypted {
             let Some(c) = cipher.as_deref_mut() else { return self.discard("cipher unavailable"); };
-            if c.cipher.is_class3() {
+            if c.cipher.class3_at(c.time, false) {
                 let Some(addr) = self.resource.addr else { return self.discard("address unavailable"); };
                 if addr.ssi_type != SsiType::Gssi {
                     let Some(dck) = c.cipher.dck_for_address(addr) else { return self.discard("DCK unavailable (session ended)"); };

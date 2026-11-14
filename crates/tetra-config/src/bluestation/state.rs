@@ -642,6 +642,35 @@ pub struct SckRun {
     pub switch: Option<(tetra_core::TdmaTime, SckKey)>,
 }
 
+/// Fleet Control key fallback (phase 8d): the station lost its key server (the Brew server as
+/// authentication centre) and a radio could no longer be authenticated. While this is set the
+/// cell broadcasts "system wide services temporarily not supported" (TS 100 392-2 clause 18.5.2)
+/// and may answer registrations with "temporary registration" (clause 16.4.8).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeyFallbackRun {
+    /// A class 3 cell on the fallback SCK (EN 300 392-7 clause 4.2.4.0, SCKN 31 or 32): the slot
+    /// from which the downlink uses it and the key. `None`: the cell keeps its security class.
+    pub sck: Option<(tetra_core::TdmaTime, SckKey)>,
+    /// The slot the cell goes back to class 3 (clause 4.5.6.3), once planned.
+    pub back_at: Option<tetra_core::TdmaTime>,
+}
+
+impl KeyFallbackRun {
+    /// The fallback SCK in use at `t`. The uplink follows two slots later, as on a key change
+    /// (EN 300 392-7 clause 4.5.5.4).
+    pub fn sck_at(&self, t: tetra_core::TdmaTime, uplink: bool) -> Option<&SckKey> {
+        let lag = if uplink { 2 } else { 0 };
+        let (from, key) = self.sck.as_ref()?;
+        if t.diff(*from) < lag {
+            return None;
+        }
+        if self.back_at.is_some_and(|b| t.diff(b) >= lag) {
+            return None;
+        }
+        Some(key)
+    }
+}
+
 /// Fleet Control state shared by the control worker and the dashboard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FleetControlState {
@@ -697,6 +726,8 @@ pub struct StackState {
     /// After a CCK change: the old CCK, still tried for uplink ESIs that do not resolve with the
     /// new one until this slot (the overlap; EN 300 392-7 clause 4.5.5.2 requires two slots).
     pub cck_overlap: Option<(SckKey, tetra_core::TdmaTime)>,
+    /// Fleet Control key fallback (phase 8d), `None` in normal mode.
+    pub key_fallback: Option<KeyFallbackRun>,
     /// Fleet Control (`dck-v1`): DCKs of class 3 radios that authenticated at another station of
     /// this location area or next door, forwarded by the server (EN 300 392-7 clause 6.6.1.1).
     /// Used for a radio that has no DCK here yet, until it authenticates here.
@@ -959,6 +990,7 @@ impl Default for StackState {
             sck_run: None,
             cck_run: None,
             cck_overlap: None,
+            key_fallback: None,
             dck_roam: HashMap::new(),
             cck_server: Vec::new(),
             sc3_status: HashMap::new(),

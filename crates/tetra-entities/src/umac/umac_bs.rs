@@ -347,6 +347,11 @@ impl UmacBs {
     /// Otherwise, value from config is used.
     fn get_system_wide_services_state(config: &SharedConfig) -> bool {
         let cfg = config.config();
+        // Fleet Control key fallback (phase 8d): the key server is away, "system wide services
+        // temporarily not supported" (TS 100 392-2 clauses 16.4.8, 18.5.2).
+        if config.state_read().key_fallback.is_some() {
+            return false;
+        }
         if cfg.brew.is_some() {
             config.state_read().network_connected
         } else {

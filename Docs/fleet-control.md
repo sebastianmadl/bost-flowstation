@@ -426,6 +426,53 @@ ITSI" (clause 4.5.1.3). With server keys:
 **Back to local keys** on a class 2 cell writes the server's active SCK (key, `sckn`, `sck_vn`) into
 `[security.aie]`, so class 2 keeps running with the key the radios hold.
 
+### Key fallback (`fallback-v1`, phase 8d)
+
+What a station with server keys does while the Brew server (its authentication centre) is
+unreachable, and how it comes back. Designed with Patrick, OE1LHP. The server only sends the
+settings and the network's fallback SCK; the station decides on its own, because it is cut off
+when it matters:
+
+```json
+{"FallbackKeys": {"key": {"sckn": 31, "vn": 4, "key": "<20 hex>"}, "after_s": 300, "reauth_per_s": 2}}
+{"FallbackState": {"phase": "fallback", "key": {"sckn": 31, "vn": 4, "check": "<16 hex>"},
+                   "episodes": [{"from_ms": 1794610800000, "to_ms": null, "class2": true, "temporary": 0}]}}
+```
+
+- **Stock first.** While the server is away the station keeps authenticating from its stock of
+  data sets (phase 8a). A radio with no set left is no longer held for 2 s.
+- **Fallback** starts once the server has been away for `after_s` (default 5 min, 1 to 60 min
+  on the server) and a known radio could not be authenticated for lack of sets:
+  - the cell sends "system wide services temporarily not supported" in D-MLE-SYSINFO
+    (TS 100 392-2 clause 18.5.2);
+  - on a class 1/2 cell a known radio without sets gets a **temporary registration** (accept
+    type 001, clause 16.4.8 NOTE 2, Table 16.68), counted in the period;
+  - a **class 3** cell holding the network's fallback SCK (SCKN 31 or 32, EN 300 392-7 clause
+    4.2.4.0, Table A.96) switches to **class 2 on that key** at the next multiframe (at least
+    2 s ahead), announced with D-CK CHANGE DEMAND "transition to security class 2" (clause
+    4.5.6.2). The SYSINFO shows class 2 with that SCKN. Radios stay registered (clause
+    4.5.6.0). Without a fallback SCK class 3 stays and radios without sets cannot register.
+- **Return** once the server is back and has sent the subscriber list:
+  1. wait up to 30 s until the radios that registered without authentication have sets again;
+  2. authenticate them again (D-AUTHENTICATION DEMAND, clause 4.1.2) at no more than
+     `reauth_per_s` per second (default 2, 1 to 20);
+  3. 5 s later (the whole return is capped at 120 s) back to normal mode; a class 3 cell on
+     the fallback SCK goes back to class 3 at the next multiframe with D-CK CHANGE DEMAND
+     "transition to security class 3" and the CCK-id (clause 4.5.6.3). The DCKs of radios
+     authenticated meanwhile (every authentication yields a DCK, clause 4.2.1) take over on
+     that slot. Temporary radios register again by themselves (clause 16.4.8).
+  If the server goes away again during the return, the station stays in fallback.
+- `FallbackState` goes to the server after `FallbackKeys` and on every change; ended periods
+  are dropped once the server has them. Settings, fallback SCK and open periods are kept in
+  `<config>.auth-sets`.
+- The Security page shows the fallback SCK held and, during a fallback, the phase.
+- **DCKs after a reconnect.** A station now sends the DCKs of all class 3 radios it runs
+  (`DckReport`) again after every reconnect to the server, so the neighbours learn DCKs that
+  were created while the server was away (phase 8e).
+- Roaming during an outage: authentication at the new station runs from its own stock (the
+  server sends sets for radios of neighbour stations too); an announced reselection is not
+  prepared through the server and falls back to type 2 unprepared.
+
 ## HTTP API (dashboard)
 
 | Route | Body | Answer |

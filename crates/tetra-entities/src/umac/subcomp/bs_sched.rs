@@ -415,7 +415,7 @@ impl BsChannelScheduler {
         if !self.tch_encrypted.get(ts as usize - 1).copied().unwrap_or(false) {
             return None;
         }
-        let kss = if cipher.is_class3() {
+        let kss = if cipher.class3_at(t, uplink) {
             let addr = if uplink { TetraAddress::issi(self.tch_ul_issi[ts as usize - 1]?) }
                 else { self.tch_dl_address[ts as usize - 1]? };
             cipher.kss_for(self.carrier_num, t, uplink, addr)?
@@ -1638,10 +1638,10 @@ impl BsChannelScheduler {
                             // SC3: individual addresses use the recipient's DCK, groups the CCK.
                             // No DCK (session ended): dropped below, never sent in clear.
                             let kss = match pdu.addr {
-                                Some(addr) if c.is_class3() && addr.ssi_type != SsiType::Gssi => c
+                                Some(addr) if c.class3_at(ts, false) && addr.ssi_type != SsiType::Gssi => c
                                     .dck_for_address(addr)
                                     .map(|dck| c.kss_for_dck(self.carrier_num, ts, false, &dck))?,
-                                None if c.is_class3() => return None,
+                                None if c.class3_at(ts, false) => return None,
                                 _ => c.kss(self.carrier_num, ts, false),
                             };
                             build_stch(pdu, &mut sdu, chan_alloc, Some((c, &kss, ts)))
@@ -1798,11 +1798,25 @@ impl BsChannelScheduler {
         let (hyperframe, sck_vn) = sysinfo_key_field(self.cipher.as_deref(), ts);
         // A class 2 cell broadcasts the SCKN in use; it follows a key change on the same slot
         // as the key stream (EN 300 392-7 clauses 4.5.5.4, 4.5.5.6).
-        let sckn = self.cipher.as_deref().filter(|c| !c.is_class3()).map(|c| c.sckn_at(ts));
+        // A class 3 cell on the fallback SCK broadcasts class 2 and the fallback SCKN, on the
+        // slot it switches (EN 300 392-7 clauses 4.5.6.2, 4.5.6.3; Table A.96: SCKN 31/32).
+        let fallback = self.cipher.as_deref().filter(|c| c.is_class3()).map(|c| !c.class3_at(ts, false));
+        let sckn = self.cipher.as_deref().filter(|c| !c.class3_at(ts, false)).map(|c| c.sckn_at(ts));
         for sysinfo in [&mut self.precomps.mac_sysinfo1, &mut self.precomps.mac_sysinfo2] {
             sysinfo.hyperframe_number = hyperframe;
             sysinfo.cck_id = sck_vn;
-            if let (Some(n), Some(ext)) = (sckn, sysinfo.ext_services.as_mut())
+            if let (Some(sc2), Some(ext)) = (fallback, sysinfo.ext_services.as_mut()) {
+                if sc2 {
+                    ext.class2_supported = true;
+                    ext.class3_supported = false;
+                    ext.sck_n = sckn.map(|n| n.saturating_sub(1) & 0x1f);
+                } else if ext.dck_retrieval_during_cell_select.is_some() {
+                    // Back to the class 3 fields the cell was built with.
+                    ext.class2_supported = false;
+                    ext.class3_supported = true;
+                    ext.sck_n = None;
+                }
+            } else if let (Some(n), Some(ext)) = (sckn, sysinfo.ext_services.as_mut())
                 && ext.sck_n.is_some()
             {
                 ext.sck_n = Some(n.saturating_sub(1) & 0x1f);
@@ -2441,6 +2455,36 @@ mod tests {
         assert_eq!(sysinfo_key_field(None, t(4)), (Some(77), None), "clear cell: always the hyperframe");
         assert_eq!(sysinfo_key_field(Some(&cipher), t(3)), (Some(77), None));
         assert_eq!(sysinfo_key_field(Some(&cipher), t(4)), (None, Some(0x1234)));
+    }
+
+    /// Key fallback (phase 8d): a class 3 cell broadcasts class 2 with the fallback SCKN from the
+    /// switch slot (EN 300 392-7 clause 4.5.6.2, Table A.96) and class 3 again after the return.
+    #[test]
+    fn sysinfo_follows_the_key_fallback_of_a_class3_cell() {
+        use tetra_config::bluestation::{CfgAie, CfgClass3, CipherKey, KeyFallbackRun, SckKey, SharedConfig};
+        let cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../../example_config/config.toml")).unwrap();
+        let shared = SharedConfig::from_parts(cfg, None);
+        let aie = CfgAie { enabled: true, ksg: 2, sck: CipherKey([0; 10]), sckn: 1, sck_vn: 0, clear_groups: vec![],
+            class3: Some(CfgClass3 { cck: CipherKey([0x33; 10]), cck_id: 42 }) };
+        let mut sched = get_testing_slotter();
+        sched.precomps.mac_sysinfo1.ext_services = Some(crate::aie::sysinfo_security(Some(&aie)).1);
+        sched.precomps.mac_sysinfo2.ext_services = Some(crate::aie::sysinfo_security(Some(&aie)).1);
+        sched.set_cipher(Some(std::sync::Arc::new(crate::aie::cipher::CellCipher::new(&aie, &[sched.carrier_num()], 1, 1).with_config(shared.clone()))));
+        let t0 = TdmaTime { t: 1, f: 1, m: 4, h: 5 };
+        let from = t0.add_timeslots(100);
+        shared.state_write().key_fallback = Some(KeyFallbackRun { sck: Some((from, SckKey { sckn: 31, vn: 7, key: CipherKey([0x5A; 10]) })), back_at: None });
+        let ext_at = |sched: &mut BsChannelScheduler, t: TdmaTime| {
+            sched.set_dl_time(t);
+            let _ = sched.finalize_ts_for_tick();
+            let ext = sched.precomps.mac_sysinfo1.ext_services.clone().unwrap();
+            let mut b = BitBuffer::new_autoexpand(32);
+            ext.to_bitbuf(&mut b);
+            (ext.class2_supported, ext.class3_supported, ext.sck_n)
+        };
+        assert_eq!(ext_at(&mut sched, t0), (false, true, None), "class 3 before the switch");
+        assert_eq!(ext_at(&mut sched, from), (true, false, Some(30)), "class 2, SCKN 31 (30 on air)");
+        shared.state_write().key_fallback.as_mut().unwrap().back_at = Some(from.add_timeslots(200));
+        assert_eq!(ext_at(&mut sched, from.add_timeslots(300)), (false, true, None), "class 3 again");
     }
 
     #[test]

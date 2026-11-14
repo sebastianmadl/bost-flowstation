@@ -20,7 +20,7 @@ use tetra_security::auth::AuthVector;
 
 use tetra_config::bluestation::{CipherKey, SckKey, StackConfig};
 
-use super::commands::{AuthVectorWire, CckRef, CckWire, ControlResponse, DckWire, IssiCount, SckRef, SckWire, SealedSckWire};
+use super::commands::{AuthVectorWire, CckRef, CckWire, ControlResponse, DckWire, FallbackEpisode, IssiCount, SckRef, SckWire, SealedSckWire};
 
 /// Station capability: understands `AuthSubscribers` / `AuthVectors`.
 pub const CAP_KEYS: &str = "keys-v1";
@@ -36,6 +36,13 @@ pub const CAP_CCK: &str = "cck-v1";
 /// Station capability: the station sends the DCKs of its class 3 radios and takes those of other stations
 /// (`DckKeys` / `DckReport`).
 pub const CAP_DCK: &str = "dck-v1";
+
+/// Station capability: understands `FallbackKeys` and reports `FallbackState` (phase 8d: fallback
+/// while the key server is unreachable, throttled re-authentication when it is back).
+pub const CAP_FALLBACK: &str = "fallback-v1";
+
+/// Fallback periods kept for the server.
+const EPISODES_KEPT: usize = 10;
 
 /// A radio without sets is asked for at most this often.
 const REQUEST_EVERY: Duration = Duration::from_secs(5);
@@ -82,6 +89,14 @@ pub struct AucStore {
     sealed: VecDeque<(u32, String, Vec<SealedSckWire>, Instant)>,
     /// Class 3 CCKs from the server.
     cck: CckFile,
+    /// Fallback settings and periods (`fallback-v1`).
+    fallback: FallbackFile,
+    /// The control channel to the key server is up (set by the control worker).
+    link_up: bool,
+    /// The server sent its radio list on this connection (`AuthSubscribers`): its data flows again.
+    synced: bool,
+    /// Current fallback phase, as MM last set it (`normal` / `fallback` / `returning`).
+    phase: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -92,6 +107,29 @@ struct File {
     sck: SckFile,
     #[serde(default)]
     cck: CckFile,
+    #[serde(default)]
+    fallback: FallbackFile,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct FallbackFile {
+    /// The network's fallback SCK (SCKN 31 or 32).
+    key: Option<SckWire>,
+    after_s: u32,
+    reauth_per_s: u8,
+    /// Fallback periods not yet confirmed by the server, newest last.
+    episodes: Vec<FallbackEpisode>,
+}
+
+impl Default for FallbackFile {
+    fn default() -> Self {
+        FallbackFile {
+            key: None,
+            after_s: super::commands::default_fallback_after_s(),
+            reauth_per_s: super::commands::default_reauth_per_s(),
+            episodes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
@@ -204,6 +242,7 @@ impl AucStore {
             tracing::info!("Key management: {} authentication data sets for {} radios loaded", self.total(), self.sets.len());
             self.sck = f.sck;
             self.cck = f.cck;
+            self.fallback = f.fallback;
         }
         self.path = Some(path);
     }
@@ -215,6 +254,7 @@ impl AucStore {
             sets: self.sets.iter().map(|(i, v)| (*i, v.iter().map(AuthVectorWire::from_vector).collect())).collect(),
             sck: self.sck.clone(),
             cck: self.cck.clone(),
+            fallback: self.fallback.clone(),
         };
         let Ok(bytes) = serde_json::to_vec(&f) else { return };
         if let Err(e) = write_private(path, &bytes) {
@@ -225,6 +265,7 @@ impl AucStore {
     /// The server's list of radios with K; sets of radios not listed or in `drop` (K changed) go.
     /// Returns the stock for the server.
     pub fn subscribers(&mut self, issis: &[u32], drop: &[u32]) -> ControlResponse {
+        self.synced = true;
         self.known = issis.iter().copied().collect();
         let known = &self.known;
         self.sets.retain(|i, _| known.contains(i) && !drop.contains(i));
@@ -323,7 +364,83 @@ impl AucStore {
         self.sets.clear();
         self.sck = SckFile::default();
         self.cck = CckFile::default();
+        self.fallback = FallbackFile::default();
         self.save();
+    }
+
+    // ───────────── fallback (`fallback-v1`, phase 8d) ─────────────
+
+    /// The control worker reports the link to the key server. Down: the server's data stops
+    /// until it sends its radio list again.
+    pub fn set_link(&mut self, up: bool) {
+        self.link_up = up;
+        if !up {
+            self.synced = false;
+        }
+    }
+
+    /// The key server is reachable and has sent its radio list on this connection.
+    pub fn server_ready(&self) -> bool {
+        self.link_up && self.synced
+    }
+
+    /// `FallbackKeys` from the server. Returns the state for the server.
+    pub fn set_fallback(&mut self, key: Option<SckWire>, after_s: u32, reauth_per_s: u8) -> ControlResponse {
+        let key = key.filter(|k| matches!(k.sckn, 31 | 32) && sck_key(k).is_some());
+        self.fallback.key = key;
+        self.fallback.after_s = after_s.clamp(60, 3600);
+        self.fallback.reauth_per_s = reauth_per_s.clamp(1, 20);
+        let state = self.fallback_state();
+        // The server has seen the periods now.
+        self.fallback.episodes.retain(|e| e.to_ms.is_none());
+        self.save();
+        state
+    }
+
+    /// The fallback SCK (SCKN 31 or 32) the server sent.
+    pub fn fallback_key(&self) -> Option<SckKey> {
+        self.fallback.key.as_ref().and_then(sck_key)
+    }
+
+    /// How long without the server before a cell may go to fallback.
+    pub fn fallback_after(&self) -> Duration {
+        Duration::from_secs(self.fallback.after_s as u64)
+    }
+
+    /// Radios authenticated per second once the server is back.
+    pub fn reauth_per_s(&self) -> u8 {
+        self.fallback.reauth_per_s
+    }
+
+    /// MM changed the fallback phase. `episode`: start (`Some(from)` without `to`) or end of a
+    /// period. The state goes to the server (dropped while it is away; it gets the periods with
+    /// the answer to its next `FallbackKeys`).
+    pub fn fallback_phase(&mut self, phase: &str, start: Option<(u64, bool)>, end: Option<(u64, u32)>) {
+        self.phase = phase.to_string();
+        if let Some((from_ms, class2)) = start {
+            self.fallback.episodes.push(FallbackEpisode { from_ms, to_ms: None, class2, temporary: 0 });
+            let n = self.fallback.episodes.len();
+            if n > EPISODES_KEPT {
+                self.fallback.episodes.drain(..n - EPISODES_KEPT);
+            }
+        }
+        if let Some((to_ms, temporary)) = end
+            && let Some(e) = self.fallback.episodes.iter_mut().rev().find(|e| e.to_ms.is_none())
+        {
+            e.to_ms = Some(to_ms);
+            e.temporary = temporary;
+        }
+        self.save();
+        let state = self.fallback_state();
+        self.outbox.push(state);
+    }
+
+    pub fn fallback_state(&self) -> ControlResponse {
+        ControlResponse::FallbackState {
+            phase: if self.phase.is_empty() { "normal".into() } else { self.phase.clone() },
+            key: self.fallback_key().as_ref().map(sck_ref),
+            episodes: self.fallback.episodes.clone(),
+        }
     }
 
     // ───────────── class 3 CCKs (`cck-v1`) ─────────────

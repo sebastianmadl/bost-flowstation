@@ -689,6 +689,7 @@ fn server_station(known: &[u32], sets: &[[u8; 10]]) -> (MmBs, Handle) {
     let auc: Handle = std::sync::Arc::new(std::sync::Mutex::new(AucStore::default()));
     {
         let mut s = auc.lock().unwrap();
+        s.set_link(true);
         s.subscribers(known, &[]);
         let wire: Vec<_> = sets.iter().map(|rs| AuthVectorWire::from_vector(&AuthVector::from_k(&AuthKey(K), *rs))).collect();
         if !wire.is_empty() {
@@ -1491,4 +1492,303 @@ fn dck_server_simulation_10_stations_25_radios() {
         assert!(!mm.config.state_read().dck_roam.contains_key(&issi));
         assert_eq!(auc.lock().unwrap().drain_outbox().len(), 1, "new DCK reported");
     }
+}
+
+// ───────────── phase 8d: key fallback while the key server is away (`fallback-v1`) ─────────────
+
+const FB_SCK: [u8; 10] = [0x5A; 10];
+
+/// A registration of `issi` on a cell running class 2 with TEA`tea` and SCK `sckn`.
+fn registration_sc2(issi: u32, tea: u8, sckn: u8) -> SapMsg {
+    let mut m = registration(issi, None);
+    if let SapMsgInner::LmmMleUnitdataInd(p) = &mut m.msg {
+        let mut pdu = ULocationUpdateDemand::from_bitbuf(&mut p.sdu).unwrap();
+        pdu.ciphering_parameters = Some(CipheringParameters::class2(tea, sckn).to_bits());
+        pdu.authentication_uplink = None;
+        p.sdu = BitBuffer::new_autoexpand(512);
+        pdu.to_bitbuf(&mut p.sdu).unwrap();
+        p.sdu.seek(0);
+    }
+    m
+}
+
+/// The location update accept type of the first D-LOCATION UPDATE ACCEPT in `q`.
+fn accept_type(q: &mut MessageQueue) -> Option<LocationUpdateType> {
+    while let Some(m) = q.pop_front() {
+        if let SapMsgInner::LmmMleUnitdataReq(mut req) = m.msg
+            && req.sdu.peek_bits(4) == Some(tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl::DLocationUpdateAccept.into_raw())
+        {
+            return Some(DLocationUpdateAccept::from_bitbuf(&mut req.sdu).unwrap().location_update_accept_type);
+        }
+    }
+    None
+}
+
+fn ck_changes(q: &mut MessageQueue) -> Vec<(u32, DCkChangeDemand)> {
+    sent_pdus(q)
+        .into_iter()
+        .filter_map(|(to, mut sdu)| DCkChangeDemand::from_bitbuf(&mut sdu).ok().map(|d| (to, d)))
+        .collect()
+}
+
+fn fallback_states(auc: &Handle) -> Vec<(String, Vec<crate::net_control::commands::FallbackEpisode>)> {
+    auc.lock()
+        .unwrap()
+        .drain_outbox()
+        .into_iter()
+        .filter_map(|r| match r {
+            ControlResponse::FallbackState { phase, episodes, .. } => Some((phase, episodes)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A class 3 station with server keys, `registered` radios on it (encrypted, with DCK), every
+/// radio in `known` known to the server, the fallback SCK 31 v7, and the server gone.
+fn sc3_fallback_station(registered: &[u32], known: &[u32]) -> (MmBs, Handle) {
+    let (mut mm, auc) = sc3_server_station_with(registered);
+    for &issi in registered {
+        mm.registration_encryption.insert(issi, true);
+    }
+    {
+        let mut s = auc.lock().unwrap();
+        s.subscribers(known, &[]);
+        s.set_fallback(Some(wire(31, 7, FB_SCK, false)), 300, 2);
+        s.drain_outbox();
+        s.set_link(false);
+    }
+    (mm, auc)
+}
+
+#[test]
+fn fallback_class3_cell_runs_class2_on_the_fallback_sck_and_returns() {
+    let r2 = MS + 1;
+    let (mut mm, auc) = sc3_fallback_station(&[MS], &[MS, r2]);
+    let mut q = MessageQueue::new();
+    let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
+    mm.process_key_fallback(&mut q, ts);
+    assert!(mm.key_fallback.server_lost());
+    // A radio without sets while the server is away: no 2 s wait, rejected (required, class 3).
+    mm.rx_u_location_update_demand(&mut q, registration(r2, None));
+    assert!(!mm.auth_waiting.contains_key(&r2), "no wait for sets from a server that is away");
+    assert!(reject_cause(&mut q).is_some());
+    mm.process_key_fallback(&mut q, ts);
+    assert!(mm.config.state_read().key_fallback.is_none(), "not before the time");
+    mm.key_fallback.skip(Duration::from_secs(300));
+    mm.process_key_fallback(&mut q, ts);
+
+    // EN 300 392-7 clause 4.5.6.2: D-CK CHANGE DEMAND "transition to security class 2" with the
+    // fallback SCK (SCKN 31, zero-based 30 on air) on the first slot of a multiframe.
+    let (at, key) = mm.config.state_read().key_fallback.clone().unwrap().sck.unwrap();
+    assert_eq!((key.sckn, key.vn, key.key.0), (31, 7, FB_SCK));
+    assert_eq!(at.to_int().rem_euclid(72), 0, "multiframe start");
+    let changes = ck_changes(&mut q);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].0, MS);
+    assert_eq!(changes[0].1.change_of_class, 0b10);
+    assert_eq!(changes[0].1.key, KeyChange::Sck(vec![(30, 7)]));
+    assert_eq!(changes[0].1.time, ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h });
+    let st = fallback_states(&auc);
+    assert!(matches!(&st[..], [(p, e)] if p == "fallback" && e.len() == 1 && e[0].class2 && e[0].to_ms.is_none()), "{st:?}");
+
+    // The cipher follows on that slot, the uplink two slots later (clause 4.5.5.4).
+    let cfg = mm.config.config();
+    let cipher = crate::aie::cipher::CellCipher::new(cfg.security.aie.as_ref().unwrap(), &[cfg.cell.main_carrier], cfg.cell.location_area, 1)
+        .with_config(mm.config.clone());
+    drop(cfg);
+    assert!(cipher.class3_at(at.add_timeslots(-1), false));
+    assert!(!cipher.class3_at(at, false));
+    assert_eq!((cipher.sckn_at(at), cipher.sck_vn_at(at)), (31, 7));
+    assert!(cipher.class3_at(at.add_timeslots(1), true));
+    assert!(!cipher.class3_at(at.add_timeslots(2), true));
+
+    // MM negotiates class 2 with the fallback SCK; the radio without sets gets a temporary
+    // registration (TS 100 392-2 clause 16.4.8, table 16.68 value 001).
+    mm.process_key_fallback(&mut q, at);
+    assert!(mm.sc2_fallback && !mm.is_class3());
+    let aie = mm.aie_now().unwrap();
+    assert!(aie.class3.is_none());
+    assert_eq!((aie.sckn, aie.sck_vn), (31, 7));
+    mm.rx_u_location_update_demand(&mut q, registration_sc2(r2, 2, 31));
+    assert_eq!(accept_type(&mut q), Some(LocationUpdateType::MigratingLocationUpdating), "001 = temporary registration");
+    assert!(mm.key_fallback.is_temporary(r2));
+
+    // Server back: data sets first, then back to class 3 with the CCK-id (clause 4.5.6.3).
+    {
+        let mut s = auc.lock().unwrap();
+        s.set_link(true);
+        s.subscribers(&[MS, r2], &[]);
+    }
+    mm.process_key_fallback(&mut q, at.add_timeslots(100));
+    assert!(matches!(&fallback_states(&auc)[..], [(p, _)] if p == "returning"));
+    assert!(mm.config.state_read().key_fallback.as_ref().unwrap().back_at.is_none());
+    mm.process_key_fallback(&mut q, at.add_timeslots(101));
+    let back = mm.config.state_read().key_fallback.as_ref().unwrap().back_at.expect("return planned");
+    let changes = ck_changes(&mut q);
+    let to_ms: Vec<_> = changes.iter().filter(|(i, _)| *i == MS).collect();
+    assert_eq!(to_ms.len(), 1);
+    assert_eq!(to_ms[0].1.change_of_class, 0b11);
+    assert_eq!(to_ms[0].1.key, KeyChange::Cck(mm.config.config().security.aie.as_ref().unwrap().class3.as_ref().unwrap().cck_id));
+    assert!(!cipher.class3_at(back.add_timeslots(-1), false));
+    assert!(cipher.class3_at(back, false));
+    assert!(cipher.dck_for_address(TetraAddress::issi(MS)).is_some(), "the DCK from before the fallback is still there");
+    let st = fallback_states(&auc);
+    assert!(matches!(&st[..], [(p, e)] if p == "normal" && e[0].to_ms.is_some() && e[0].temporary == 1), "{st:?}");
+    // A few slots later: normal mode ("system wide services" back).
+    mm.process_key_fallback(&mut q, back.add_timeslots(super::KEY_FALLBACK_CLEAR_SLOTS + 1));
+    assert!(mm.config.state_read().key_fallback.is_none());
+    assert!(mm.is_class3());
+}
+
+#[test]
+fn fallback_class3_without_fallback_sck_keeps_class3() {
+    let r2 = MS + 1;
+    let (mut mm, auc) = sc3_fallback_station(&[MS], &[MS, r2]);
+    auc.lock().unwrap().set_fallback(None, 300, 2);
+    let mut q = MessageQueue::new();
+    let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
+    mm.process_key_fallback(&mut q, ts);
+    mm.rx_u_location_update_demand(&mut q, registration(r2, None));
+    while q.pop_front().is_some() {}
+    mm.key_fallback.skip(Duration::from_secs(300));
+    mm.process_key_fallback(&mut q, ts);
+    let run = mm.config.state_read().key_fallback.clone().expect("fallback");
+    assert!(run.sck.is_none());
+    assert!(ck_changes(&mut q).is_empty(), "no class change without the fallback SCK");
+    mm.rx_u_location_update_demand(&mut q, registration(r2, None));
+    assert!(reject_cause(&mut q).is_some(), "class 3 cannot register a radio without authentication");
+    assert!(!mm.key_fallback.is_temporary(r2));
+}
+
+#[test]
+fn fallback_unauthenticated_radios_are_authenticated_again_throttled() {
+    let (mut mm, auc) = sc2_server_station();
+    auc.lock().unwrap().set_link(false);
+    let mut q = MessageQueue::new();
+    let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
+    mm.process_key_fallback(&mut q, ts);
+    mm.rx_u_location_update_demand(&mut q, registration_sc2(MS, 1, 1));
+    assert_eq!(accept_type(&mut q), Some(LocationUpdateType::ItsiAttach), "optional: registered unauthenticated, normal accept");
+    while q.pop_front().is_some() {}
+    // Server back within the 5 minutes: no fallback, but the radio is authenticated again.
+    {
+        let mut s = auc.lock().unwrap();
+        s.set_link(true);
+        s.subscribers(&[MS], &[]);
+    }
+    mm.process_key_fallback(&mut q, ts);
+    mm.process_key_fallback(&mut q, ts);
+    assert!(!mm.auth_pending.contains_key(&MS), "waits for data sets");
+    let wire: Vec<_> = [[0x41; 10]].iter().map(|rs| AuthVectorWire::from_vector(&AuthVector::from_k(&AuthKey(K), *rs))).collect();
+    auc.lock().unwrap().add(MS, &wire);
+    mm.process_key_fallback(&mut q, ts);
+    assert_eq!(mm.auth_pending.get(&MS).map(|p| p.challenge.rs), Some([0x41; 10]), "SwMI initiated authentication (clause 4.1.2)");
+    assert!(mm.config.state_read().key_fallback.is_none(), "no fallback, normal mode all along");
+}
+
+#[test]
+fn fallback_simulation_10_stations_25_radios() {
+    const STATIONS: usize = 10;
+    // Class 3: 20 radios registered (2 per station), 5 more come during the outage.
+    let registered: Vec<u32> = (0..20).map(|i| 2_360_000 + i).collect();
+    let late: Vec<u32> = (20..25).map(|i| 2_360_000 + i).collect();
+    let all: Vec<u32> = registered.iter().chain(&late).copied().collect();
+    let mut stations: Vec<(MmBs, Handle)> = (0..STATIONS).map(|s| sc3_fallback_station(&registered[s * 2..s * 2 + 2], &all)).collect();
+    let mut q = MessageQueue::new();
+    let ts = TdmaTime { t: 2, f: 9, m: 33, h: 1000 };
+    for (mm, _) in &mut stations {
+        mm.process_key_fallback(&mut q, ts);
+    }
+    // The late radios find no sets: each starves its station (5 of 10).
+    for (n, &issi) in late.iter().enumerate() {
+        stations[n].0.rx_u_location_update_demand(&mut q, registration(issi, None));
+    }
+    while q.pop_front().is_some() {}
+    for (mm, _) in &mut stations {
+        mm.key_fallback.skip(Duration::from_secs(300));
+        mm.process_key_fallback(&mut q, ts);
+    }
+    let in_fallback = stations.iter().filter(|(mm, _)| mm.config.state_read().key_fallback.is_some()).count();
+    assert_eq!(in_fallback, 5, "only stations where a radio could not be authenticated");
+    let changes = ck_changes(&mut q);
+    assert_eq!(changes.len(), 10, "the registered radios of those stations are told");
+    assert!(changes.iter().all(|(_, d)| d.change_of_class == 0b10 && d.key == KeyChange::Sck(vec![(30, 7)])));
+    // On the switch slot the late radios register again, now with a temporary registration.
+    let mut temporary = 0;
+    for (n, &issi) in late.iter().enumerate() {
+        let (mm, _) = &mut stations[n];
+        let at = mm.config.state_read().key_fallback.clone().unwrap().sck.unwrap().0;
+        mm.process_key_fallback(&mut q, at);
+        mm.rx_u_location_update_demand(&mut q, registration_sc2(issi, 2, 31));
+        temporary += (accept_type(&mut q) == Some(LocationUpdateType::MigratingLocationUpdating)) as usize;
+    }
+    assert_eq!(temporary, 5);
+    // Server back everywhere: every station returns, keeps its radios' DCKs.
+    for (mm, auc) in &mut stations {
+        {
+            let mut s = auc.lock().unwrap();
+            s.set_link(true);
+            s.subscribers(&all, &[]);
+        }
+        let t = ts.add_timeslots(10_000);
+        mm.process_key_fallback(&mut q, t);
+        mm.process_key_fallback(&mut q, t.add_timeslots(1));
+        let back = mm.config.state_read().key_fallback.as_ref().and_then(|r| r.back_at);
+        if let Some(back) = back {
+            mm.process_key_fallback(&mut q, back.add_timeslots(super::KEY_FALLBACK_CLEAR_SLOTS + 1));
+        }
+        mm.process_key_fallback(&mut q, t.add_timeslots(2000));
+        assert!(mm.config.state_read().key_fallback.is_none());
+        assert!(mm.is_class3());
+    }
+    let back = ck_changes(&mut q).into_iter().filter(|(i, d)| registered.contains(i) && d.change_of_class == 0b11).count();
+    assert_eq!(back, 10);
+    for (s, (mm, auc)) in stations.iter().enumerate() {
+        for issi in &registered[s * 2..s * 2 + 2] {
+            assert!(mm.config.state_read().sc3_dcks.contains_key(issi));
+        }
+        let eps: u32 = fallback_states(auc).iter().filter(|(p, _)| p == "normal").flat_map(|(_, e)| e.iter().map(|e| e.temporary)).sum();
+        assert_eq!(eps, (s < 5) as u32, "station {s}");
+    }
+
+    // Class 2, optional: 25 radios register unauthenticated during a short outage and are
+    // authenticated again at no more than 2 per second per station when the server is back.
+    let mut stations: Vec<(MmBs, Handle)> = (0..STATIONS).map(|_| sc2_server_station()).collect();
+    for (n, &issi) in all.iter().enumerate() {
+        let (mm, auc) = &mut stations[n % STATIONS];
+        {
+            let mut a = auc.lock().unwrap();
+            a.subscribers(&all, &[]);
+            a.set_link(false);
+        }
+        mm.process_key_fallback(&mut q, ts);
+        mm.rx_u_location_update_demand(&mut q, registration_sc2(issi, 1, 1));
+    }
+    while q.pop_front().is_some() {}
+    let mut demands = 0;
+    for (s, (mm, auc)) in stations.iter_mut().enumerate() {
+        let mine: Vec<u32> = all.iter().copied().skip(s).step_by(STATIONS).collect();
+        {
+            let mut a = auc.lock().unwrap();
+            a.set_link(true);
+            a.subscribers(&all, &[]);
+            for &issi in &mine {
+                let k: [u8; 16] = [issi as u8; 16];
+                let wire: Vec<_> = (0..3u8).map(|i| AuthVectorWire::from_vector(&AuthVector::from_k(&AuthKey(k), [i; 10]))).collect();
+                a.add(issi, &wire);
+            }
+        }
+        mm.process_key_fallback(&mut q, ts);
+        // Within the first instant only one demand goes out (2/s: the next after 500 ms).
+        for _ in 0..5 {
+            mm.process_key_fallback(&mut q, ts);
+        }
+        assert_eq!(mm.auth_pending.len(), 1, "station {s}: throttled");
+        for _ in 0..mine.len() {
+            mm.key_fallback.skip(Duration::from_millis(500));
+            mm.process_key_fallback(&mut q, ts);
+        }
+        demands += mine.iter().filter(|i| mm.auth_pending.contains_key(i)).count();
+    }
+    assert_eq!(demands, 25, "every radio authenticated again");
 }

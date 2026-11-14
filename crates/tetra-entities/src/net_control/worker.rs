@@ -58,6 +58,8 @@ pub struct ControlWorker<T: NetworkTransport> {
     metrics_source: fn(&mut metrics::CpuSampler) -> ControlResponse,
     /// Stock of authentication data sets (`keys-v1`, `key_source = "server"`).
     auc: auc::Handle,
+    /// The DCKs of this station went to the server on this connection (`dck-v1`).
+    dcks_resent: bool,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
@@ -81,6 +83,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
             next_metrics: None,
             metrics_source: metrics::collect,
             auc: auc::global(),
+            dcks_resent: false,
         }
     }
 
@@ -172,6 +175,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 | ControlCommand::CckKeys { .. }
                 | ControlCommand::CckActivate { .. }
                 | ControlCommand::DckKeys { .. }
+                | ControlCommand::FallbackKeys { .. }
         ) {
             self.auc_command(command);
             return;
@@ -261,7 +265,9 @@ impl<T: NetworkTransport> ControlWorker<T> {
 
     /// Record the control link for the dashboard (sidebar field, Server features list).
     fn set_fleet_link(&mut self, connected: bool) {
+        self.auc.lock().unwrap_or_else(|e| e.into_inner()).set_link(connected && self.fleet_offered);
         if !connected {
+            self.dcks_resent = false;
             self.hello_announced = None;
             self.last_progress = None;
             self.next_metrics = None;
@@ -368,7 +374,30 @@ impl<T: NetworkTransport> ControlWorker<T> {
                     }
                     Some(store.cck_state(cell_la, config_cck.as_ref()))
                 }
+                ControlCommand::FallbackKeys { key, after_s, reauth_per_s } => {
+                    tracing::info!(
+                        "Key management: fallback {} after {} s without the server, re-authentication {}/s",
+                        key.as_ref().map_or("without SCK".to_string(), |k| format!("SCK {} version {}", k.sckn, k.vn)),
+                        after_s,
+                        reauth_per_s
+                    );
+                    Some(store.set_fallback(key.clone(), *after_s, *reauth_per_s))
+                }
                 ControlCommand::DckKeys { keys, drop } => {
+                    // First DckKeys on this connection: DCKs made while the server was away never
+                    // reached it, so every DCK this station runs goes again (clause 6.6.1.1).
+                    if !self.dcks_resent
+                        && let Some(shared) = &self.shared
+                    {
+                        self.dcks_resent = true;
+                        let own: Vec<(u32, [u8; 10])> = shared.state_read().sc3_dcks.iter().map(|(i, k)| (*i, k.0)).collect();
+                        if !own.is_empty() {
+                            tracing::info!("Key management: sending the DCKs of {} radios active here again", own.len());
+                        }
+                        for (issi, dck) in own {
+                            store.dck_report(issi, &dck);
+                        }
+                    }
                     if let Some(shared) = &self.shared {
                         let mut state = shared.state_write();
                         for issi in drop {
@@ -656,7 +685,7 @@ mod tests {
                 other => panic!("expected a hello, got {other:?}"),
             })
             .collect();
-        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string(), "cck-v1".to_string(), "dck-v1".to_string()]), (false, vec![])]);
+        assert_eq!(hellos, vec![(false, vec![]), (true, vec!["fleet-v1".to_string(), "maintenance-v1".to_string(), "restart-v1".to_string(), "metrics-v1".to_string(), "keys-v1".to_string(), "sck-v1".to_string(), "cck-v1".to_string(), "dck-v1".to_string(), "fallback-v1".to_string()]), (false, vec![])]);
     }
 
     fn fake_metrics(_: &mut metrics::CpuSampler) -> ControlResponse {
@@ -763,6 +792,49 @@ mod tests {
             assert!(!st.dck_roam.contains_key(&101), "dropped");
             assert_eq!(st.cck_server.iter().map(|(la, k)| (*la, k.vn)).collect::<Vec<_>>(), if used { vec![(Some(7), 5)] } else { vec![] }, "current keys only");
         }
+    }
+
+    /// `dck-v1` after an outage: on the first `DckKeys` of a connection the station sends the
+    /// DCKs of every radio active with it again (DCKs made while the server was away never
+    /// reached it); `fallback-v1`: `FallbackKeys` is kept and answered, and the link state
+    /// reaches the store.
+    #[test]
+    fn dcks_are_sent_again_after_a_reconnect_and_fallback_keys_are_answered() {
+        let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        cfg.security.key_source = tetra_config::bluestation::KeySource::Server;
+        let shared = SharedConfig::from_parts(cfg, None);
+        shared.state_write().fleet_control.enabled = true;
+        shared.state_write().sc3_dcks.insert(100, tetra_config::bluestation::CipherKey([0x0A; 10]));
+        let auc: auc::Handle = std::sync::Arc::new(std::sync::Mutex::new(auc::AucStore::default()));
+        let mut mock = MockTransport::new().with_brew_extensions(&[fleet::EXT_FLEET_CONTROL]);
+        mock.push_inbound(br#"{"AuthSubscribers":{"issis":[100]}}"#.to_vec());
+        mock.push_inbound(br#"{"DckKeys":{}}"#.to_vec());
+        mock.push_inbound(br#"{"DckKeys":{"keys":[{"issi":101,"dck":"11111111111111111111"}]}}"#.to_vec());
+        mock.push_inbound(br#"{"FallbackKeys":{"key":{"sckn":31,"vn":7,"key":"5A5A5A5A5A5A5A5A5A5A"},"after_s":600,"reauth_per_s":4}}"#.to_vec());
+        let mut worker = ControlWorker::new(HashMap::new(), mock).with_shared(shared.clone()).with_auc(auc.clone());
+        worker.try_connect();
+        assert!(!auc.lock().unwrap().server_ready(), "not before the radio list");
+        worker.poll_commands();
+        worker.send_auc_outbox();
+        assert!(auc.lock().unwrap().server_ready());
+        let out = sent(&worker);
+        let dcks: Vec<_> = out.iter().filter_map(|r| match r { ControlResponse::DckReport { key } => Some(key.issi), _ => None }).collect();
+        assert_eq!(dcks, vec![100], "own DCK once per connection, not the forwarded one");
+        assert!(out.iter().any(|r| matches!(r, ControlResponse::FallbackState { phase, key: Some(k), .. } if phase == "normal" && k.sckn == 31 && k.vn == 7)));
+        {
+            let s = auc.lock().unwrap();
+            assert_eq!(s.fallback_key().map(|k| (k.sckn, k.vn)), Some((31, 7)));
+            assert_eq!((s.fallback_after().as_secs(), s.reauth_per_s()), (600, 4));
+        }
+        // Link lost: the store knows at once; after the reconnect the DCKs go again.
+        worker.set_fleet_link(false);
+        assert!(!auc.lock().unwrap().server_ready());
+        worker.transport.push_inbound(br#"{"DckKeys":{}}"#.to_vec());
+        worker.try_connect();
+        worker.poll_commands();
+        worker.send_auc_outbox();
+        let again = sent(&worker).into_iter().filter(|r| matches!(r, ControlResponse::DckReport { .. })).count();
+        assert_eq!(again, 2, "sent again after the reconnect");
     }
 
     #[test]

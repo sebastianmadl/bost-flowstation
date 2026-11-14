@@ -59,6 +59,8 @@ use tetra_pdus::mm::pdus::ck_change::{ChangeTime, DCkChangeDemand, KeyChange};
 use tetra_pdus::mm::pdus::otar_cck::{AuthenticationDownlink, CckInformation, CckLocations, DOtarCckProvide, UOtarCckDemand, UOtarCckResult};
 use tetra_security::taa1::{ta41, ta51};
 
+use super::key_fallback::Action as KfAction;
+
 /// Group identity detachment downlink "Temporary 1 detachment" (TS 100 392-2 table 16.52).
 const GROUP_DETACHMENT_TEMPORARY_1: u8 = 1;
 
@@ -142,6 +144,10 @@ pub(crate) fn sck_change_slot(ts: TdmaTime, at_ms: u64, now_ms: u64) -> TdmaTime
 
 /// How long to wait for U-OTAR SCK RESULT after an individually addressed provide.
 const T_OTAR_RESULT: Duration = Duration::from_secs(30);
+/// Key fallback: how far ahead a security class change is announced (then the next multiframe).
+const KEY_FALLBACK_LEAD_MS: u64 = 2_000;
+/// Key fallback: slots after the return to class 3 until normal mode (uplink lag covered).
+const KEY_FALLBACK_CLEAR_SLOTS: i32 = 8;
 /// Maximum time to retain a location-update ciphering transition without an LLC ACK.
 const CIPHERING_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -171,6 +177,10 @@ pub struct MmBs {
     auth_waiting: HashMap<u32, AuthWaiting>,
     /// Stock of authentication data sets from the server (`key_source = "server"`).
     auc: crate::net_control::auc::Handle,
+    /// Fleet Control key fallback (phase 8d) while the key server is unreachable.
+    key_fallback: super::key_fallback::KeyFallback,
+    /// This class 3 cell runs class 2 on the fallback SCK now.
+    sc2_fallback: bool,
     /// Radios that just passed, so the replayed registration is not challenged again.
     auth_passed: HashMap<u32, Instant>,
     /// Newly authenticated DCKs; published to MAC only at the acknowledgement boundary.
@@ -283,6 +293,8 @@ impl MmBs {
             auth_passed: HashMap::new(),
             auth_waiting: HashMap::new(),
             auc: crate::net_control::auc::global(),
+            key_fallback: Default::default(),
+            sc2_fallback: false,
             dck: HashMap::new(),
             auth_result_pending: HashMap::new(),
             auth_ack_pending: HashMap::new(),
@@ -1414,6 +1426,9 @@ impl MmBs {
         // D-LOCATION-UPDATE-COMMAND at T351 expiry (see tick_start).
         let accept_type = if migrating {
             LocationUpdateType::ServiceRestorationMigratingLocationUpdating
+        } else if self.key_fallback.is_temporary(issi) {
+            // Value 001: "temporary registration" in table 16.68 (key fallback, clause 16.4.8).
+            LocationUpdateType::MigratingLocationUpdating
         } else {
             pdu.location_update_type
         };
@@ -3538,6 +3553,7 @@ impl TetraEntityTrait for MmBs {
 
     fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
         self.expire_authentication();
+        self.process_key_fallback(queue, ts);
         self.process_auth_waiting(queue);
         self.expire_otar();
         self.process_sck_sealed(queue);
@@ -3881,7 +3897,13 @@ impl MmBs {
         self.auth_result_pending.remove(&issi);
         self.auth_ack_pending.remove(&issi);
         let Some(vector) = self.auth_vector(issi) else {
-            if may_wait {
+            // Key server away (phase 8d): no point waiting for sets; this radio counts towards the
+            // fallback.
+            let server_away = self.server_keys() && self.key_fallback.server_lost();
+            if server_away {
+                self.key_fallback.note_starved();
+            }
+            if may_wait && !server_away {
                 // Clause 4.1.1: the BS authenticates with KS / KS' from the authentication centre.
                 tracing::info!("MM: no authentication data set for ISSI {} — asking the server, registration held", issi);
                 self.auc_lock().request(issi, Instant::now());
@@ -3893,12 +3915,22 @@ impl MmBs {
                 });
                 return true;
             }
+            if self.key_fallback.active() && !self.is_class3() {
+                // TS 100 392-2 clause 16.4.8: the cell sends "system wide services temporarily not
+                // supported"; the radio registers again once the cell is back in normal mode.
+                tracing::info!("MM: no authentication data set for ISSI {} and the key server is away — temporary registration (key fallback)", issi);
+                self.key_fallback.note_temporary(issi);
+                return false;
+            }
             if mode == AuthenticationMode::Required {
                 tracing::warn!("MM: no authentication data set for ISSI {} from the server — rejecting registration (authentication = required)", issi);
                 Self::send_d_location_update_reject_cause(queue, issi, handle, location_update_type, address_extension, RejectCause::IllegalMs);
                 return true;
             }
             tracing::info!("MM: no authentication data set for ISSI {} from the server — registering unauthenticated (authentication = optional)", issi);
+            if server_away {
+                self.key_fallback.note_unauthenticated(issi);
+            }
             return false;
         };
         if let Some(rand2) = embedded_rand2 {
@@ -4293,8 +4325,9 @@ impl MmBs {
         }
     }
 
+    /// Class 3 now: configured for class 3 and not running class 2 on the fallback SCK.
     fn is_class3(&self) -> bool {
-        self.config.config().security.aie.as_ref().is_some_and(|a| a.class3.is_some())
+        !self.sc2_fallback && self.config.config().security.aie.as_ref().is_some_and(|a| a.class3.is_some())
     }
 
     /// Final RESULT's ACK is the DCK switch point, even inside an encrypted
@@ -4310,6 +4343,7 @@ impl MmBs {
 
     fn complete_authentication(&mut self, queue: &mut MessageQueue, issi: u32, dck: SecCipherKey, held: Option<SapMsg>) {
         self.dck.insert(issi, dck);
+        self.key_fallback.note_authenticated(issi);
         self.notify_authenticated(issi);
         if let Some(held) = held {
             // One internal replay only; standalone authentication must not give
@@ -4777,6 +4811,16 @@ impl MmBs {
     fn aie_now(&self) -> Option<tetra_config::bluestation::CfgAie> {
         let cfg = self.config.config();
         let mut aie = crate::aie::effective(&cfg)?.clone();
+        // A class 3 cell in key fallback negotiates class 2 with the fallback SCK.
+        if self.sc2_fallback
+            && let Some(k) = self.config.state_read().key_fallback.as_ref().and_then(|r| r.sck.as_ref().map(|s| s.1.clone()))
+        {
+            aie.class3 = None;
+            aie.sckn = k.sckn;
+            aie.sck_vn = k.vn;
+            aie.sck = k.key;
+            return Some(aie);
+        }
         if aie.class3.is_none()
             && let Some(k) = self.config.state_read().sck_run.as_ref().and_then(|r| r.active.clone())
         {
@@ -4904,6 +4948,156 @@ impl MmBs {
         }
     }
 
+    // ───────────── key fallback (`fallback-v1`, phase 8d) ─────────────
+
+    /// Follow the key server: fallback while it is away, throttled return when it is back
+    /// (see `key_fallback`).
+    fn process_key_fallback(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        if !self.server_keys() {
+            return;
+        }
+        let (sc2, back_done) = {
+            let st = self.config.state_read();
+            let run = st.key_fallback.as_ref();
+            (run.and_then(|r| r.sck_at(ts, false)).is_some(), run.and_then(|r| r.back_at).is_some_and(|b| ts.diff(b) > KEY_FALLBACK_CLEAR_SLOTS))
+        };
+        self.sc2_fallback = sc2;
+        if back_done {
+            self.config.state_write().key_fallback = None;
+            tracing::info!("MM: key fallback over — class 3 and normal mode again");
+        }
+        let (ready, after, rate) = {
+            let s = self.auc_lock();
+            (s.server_ready(), s.fallback_after(), s.reauth_per_s())
+        };
+        let sets_ready = ready && {
+            let s = self.auc_lock();
+            self.key_fallback.waiting().all(|i| !s.is_known(*i) || s.count(*i) > 0)
+        };
+        let temporary = self.key_fallback.temporary_count();
+        match self.key_fallback.step(Instant::now(), ready, sets_ready, after, rate) {
+            KfAction::None => {}
+            KfAction::Enter => self.enter_key_fallback(queue, ts),
+            KfAction::Returning => {
+                tracing::info!("MM: key server back — fetching data sets, then re-authenticating, then normal mode");
+                self.auc_lock().fallback_phase("returning", None, None);
+            }
+            KfAction::Lost => {
+                tracing::warn!("MM: key server lost again while returning — staying in key fallback");
+                self.auc_lock().fallback_phase("fallback", None, None);
+            }
+            KfAction::Reauth(issi) => self.reauthenticate(queue, issi),
+            KfAction::Back { fallback } => self.leave_key_fallback(queue, ts, fallback, temporary),
+        }
+    }
+
+    /// Fallback: "system wide services temporarily not supported" and, on a class 3 cell with
+    /// the server's fallback SCK, class 2 on it from the next multiframe (EN 300 392-7 clauses
+    /// 4.2.4.0, 4.5.6.2), announced with D-CK CHANGE DEMAND "transition to security class 2".
+    fn enter_key_fallback(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        let class3 = crate::aie::effective(&self.config.config()).is_some_and(|a| a.class3.is_some());
+        let key = if class3 { self.auc_lock().fallback_key() } else { None };
+        let now = now_ms();
+        let sck = key.map(|k| (sck_change_slot(ts, now + KEY_FALLBACK_LEAD_MS, now), k));
+        match (&sck, class3) {
+            (Some((at, k)), _) => tracing::warn!(
+                "MM: key server away and radios without data sets — KEY FALLBACK: class 2 on fallback SCK {} version {} from {}/{}/{}/{}, system wide services temporarily not supported",
+                k.sckn, k.vn, at.h, at.m, at.f, at.t
+            ),
+            (None, true) => tracing::warn!(
+                "MM: key server away and radios without data sets — KEY FALLBACK without fallback SCK: class 3 stays, radios without data sets cannot register"
+            ),
+            (None, false) => tracing::warn!(
+                "MM: key server away and radios without data sets — KEY FALLBACK: system wide services temporarily not supported, temporary registration"
+            ),
+        }
+        if let Some((at, k)) = &sck {
+            let pdu = DCkChangeDemand {
+                ack_required: false,
+                change_of_class: 0b10,
+                key: KeyChange::Sck(vec![(k.sckn.saturating_sub(1) & 0x1f, k.vn)]),
+                time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
+            };
+            self.announce_ck_change(queue, &pdu);
+        }
+        let class2 = sck.is_some();
+        self.config.state_write().key_fallback = Some(tetra_config::bluestation::KeyFallbackRun { sck, back_at: None });
+        self.auc_lock().fallback_phase("fallback", Some((now, class2)), None);
+    }
+
+    /// Back to normal mode. A class 3 cell on the fallback SCK returns to class 3 at the next
+    /// multiframe (clause 4.5.6.3, D-CK CHANGE DEMAND "transition to security class 3" with the
+    /// CCK-id); the DCKs of radios authenticated meanwhile take over on that slot.
+    fn leave_key_fallback(&mut self, queue: &mut MessageQueue, ts: TdmaTime, fallback: bool, temporary: u32) {
+        if !fallback {
+            tracing::info!("MM: radios registered without authentication while the key server was away are authenticated again");
+            self.auc_lock().fallback_phase("normal", None, None);
+            return;
+        }
+        let class2 = self.config.state_read().key_fallback.as_ref().is_some_and(|r| r.sck.is_some());
+        if class2 {
+            let at = sck_change_slot(ts, now_ms() + KEY_FALLBACK_LEAD_MS, now_ms());
+            // Radios authenticated during the fallback (clause 4.2.1: the DCK comes with every
+            // authentication) run class 3 with that DCK.
+            let mut radios: Vec<(u32, SecCipherKey)> = self
+                .registration_encryption
+                .iter()
+                .filter(|(i, e)| **e && self.client_mgr.client_is_known(**i))
+                .filter_map(|(i, _)| self.dck.get(i).map(|k| (*i, k.clone())))
+                .collect();
+            radios.sort_unstable_by_key(|(i, _)| *i);
+            for (issi, dck) in &radios {
+                self.set_sc3_dck(*issi, dck);
+            }
+            let cfg = self.config.config();
+            let cck_id = self
+                .config
+                .state_read()
+                .cck_run
+                .as_ref()
+                .and_then(|r| r.active.clone())
+                .or_else(|| crate::net_control::auc::config_cck(&cfg))
+                .map_or(0, |k| k.vn);
+            let pdu = DCkChangeDemand {
+                ack_required: false,
+                change_of_class: 0b11,
+                key: KeyChange::Cck(cck_id),
+                time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
+            };
+            self.announce_ck_change(queue, &pdu);
+            if let Some(run) = self.config.state_write().key_fallback.as_mut() {
+                run.back_at = Some(at);
+            }
+            tracing::info!("MM: key fallback ends — class 3 with CCK-id {} from {}/{}/{}/{}", cck_id, at.h, at.m, at.f, at.t);
+        } else {
+            self.config.state_write().key_fallback = None;
+            tracing::info!("MM: key fallback over — normal mode again; radios with a temporary registration register again");
+        }
+        self.auc_lock().fallback_phase("normal", None, Some((now_ms(), temporary)));
+    }
+
+    /// SwMI initiated authentication of a registered radio (EN 300 392-7 clause 4.1.2), one of
+    /// the throttled re-authentications after the key server came back.
+    fn reauthenticate(&mut self, queue: &mut MessageQueue, issi: u32) {
+        if !self.client_mgr.client_is_known(issi)
+            || self.auth_pending.contains_key(&issi)
+            || self.auth_result_pending.contains_key(&issi)
+            || self.auth_ack_pending.contains_key(&issi)
+            || self.auth_waiting.contains_key(&issi)
+        {
+            return;
+        }
+        let Some(vector) = self.auth_vector(issi) else {
+            tracing::info!("MM: no data set to re-authenticate ISSI {} after the key server came back", issi);
+            return;
+        };
+        let challenge = MsChallenge::from_vector(&vector, random_nonce());
+        let pdu = DAuthenticationDemand { rand1: challenge.rand1, rs: challenge.rs, proprietary: None };
+        tracing::info!("MM: re-authenticating ISSI {} after the key server came back (D-AUTHENTICATION DEMAND)", issi);
+        self.send_auth_pdu(queue, issi, 0, "DAuthenticationDemand", |b| pdu.to_bitbuf(b));
+        self.auth_pending.insert(issi, PendingAuth { challenge, vector, dck2: None, handle: 0, held: None, started: Instant::now() });
+    }
+
     /// D-CK CHANGE DEMAND to every radio registered encrypted on this cell (clause 4.5.5.0:
     /// "may also be transmitted addressed to a group"; sent individually, no acknowledgement).
     fn announce_sck_change(&self, queue: &mut MessageQueue, key: &tetra_config::bluestation::SckKey, at: TdmaTime) {
@@ -4913,6 +5107,10 @@ impl MmBs {
             key: KeyChange::Sck(vec![(key.sckn.saturating_sub(1) & 0x1f, key.vn)]),
             time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
         };
+        self.announce_ck_change(queue, &pdu);
+    }
+
+    fn announce_ck_change(&self, queue: &mut MessageQueue, pdu: &DCkChangeDemand) {
         let mut radios: Vec<u32> = self
             .registration_encryption
             .iter()

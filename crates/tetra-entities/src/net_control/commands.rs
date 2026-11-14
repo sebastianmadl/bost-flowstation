@@ -247,6 +247,44 @@ pub enum ControlCommand {
         #[serde(default)]
         drop: Vec<u32>,
     },
+
+    /// Fleet Control (`fallback-v1`, phase 8d): what the station does while its key server is
+    /// unreachable. `key`: the network's fallback SCK (SCKN 31 or 32, EN 300 392-7 clause 4.2.4.0
+    /// and Table A.96), which a class 3 cell runs as class 2 once `after_s` seconds have passed
+    /// without the server and a radio cannot be authenticated any more. `reauth_per_s`: radios
+    /// authenticated per second once the server is back. Kept by the station (file mode 600),
+    /// answered with [`ControlResponse::FallbackState`].
+    FallbackKeys {
+        #[serde(default)]
+        key: Option<SckWire>,
+        #[serde(default = "default_fallback_after_s")]
+        after_s: u32,
+        #[serde(default = "default_reauth_per_s")]
+        reauth_per_s: u8,
+    },
+}
+
+pub fn default_fallback_after_s() -> u32 {
+    300
+}
+
+pub fn default_reauth_per_s() -> u8 {
+    2
+}
+
+/// A fallback period of a station ([`ControlResponse::FallbackState`]), server time (Unix ms).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct FallbackEpisode {
+    pub from_ms: u64,
+    /// `None`: still running.
+    #[serde(default)]
+    pub to_ms: Option<u64>,
+    /// The cell ran class 2 on the fallback SCK.
+    #[serde(default)]
+    pub class2: bool,
+    /// Radios answered with "temporary registration".
+    #[serde(default)]
+    pub temporary: u32,
 }
 
 /// One DCK on the wire ([`ControlCommand::DckKeys`], [`ControlResponse::DckReport`]): radio and
@@ -386,7 +424,8 @@ impl ControlCommand {
             | Self::SckActivate { .. }
             | Self::CckKeys { .. }
             | Self::CckActivate { .. }
-            | Self::DckKeys { .. } => TetraEntity::Cmce,
+            | Self::DckKeys { .. }
+            | Self::FallbackKeys { .. } => TetraEntity::Cmce,
             Self::OtarSck { .. } | Self::OtarCck { .. } | Self::Dgna { .. } | Self::CommandA { .. } => TetraEntity::Mm,
         }
     }
@@ -594,6 +633,18 @@ pub enum ControlResponse {
     /// Fleet Control (`dck-v1`): a class 3 radio authenticated here; its new DCK, for the other
     /// stations of the location area and the neighbours (clause 6.6.1.1).
     DckReport { key: DckWire },
+
+    /// Fleet Control (`fallback-v1`): the fallback state after `FallbackKeys` and on every change.
+    /// `phase`: `normal`, `fallback`, or `returning` (the server is back, radios are
+    /// authenticated again before the cell returns to normal mode). `key`: the fallback SCK the
+    /// station holds. `episodes`: the last fallback periods, newest last.
+    FallbackState {
+        phase: String,
+        #[serde(default)]
+        key: Option<SckRef>,
+        #[serde(default)]
+        episodes: Vec<FallbackEpisode>,
+    },
 }
 
 /// One cell in [`ControlResponse::FleetMetrics`].

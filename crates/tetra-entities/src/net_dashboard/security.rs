@@ -181,7 +181,8 @@ pub fn runtime_json(shared: &Option<tetra_config::bluestation::SharedConfig>) ->
     drop(state);
     serde_json::json!({"class": cfg.security.aie.as_ref().map_or(1, |a| a.security_class()),
         "require_sc3": state_require_sc3(shared), "revision": tetra_core::SC3_REVISION,
-        "cck_id": sc3.map(|c| c.cck_id), "radios": radios, "server_sck": server_sck_json(&cfg)})
+        "cck_id": sc3.map(|c| c.cck_id), "radios": radios, "server_sck": server_sck_json(&cfg),
+        "key_fallback": key_fallback_json(&cfg, shared)})
 }
 
 fn state_require_sc3(shared: &tetra_config::bluestation::SharedConfig) -> bool {
@@ -207,6 +208,22 @@ fn server_sck_json(cfg: &tetra_config::bluestation::StackConfig) -> serde_json::
     let config_key = crate::net_control::auc::config_sck(cfg);
     let state = crate::net_control::auc::global().lock().unwrap_or_else(|e| e.into_inner()).sck_state(config_key.as_ref());
     serde_json::to_value(&state).ok().and_then(|v| v.get("SckState").cloned()).unwrap_or(serde_json::Value::Null)
+}
+
+/// Fleet Control key fallback (`fallback-v1`): phase, fallback SCK held (number, version, check
+/// value) and whether the cell runs class 2 on it now. `null` without server keys.
+fn key_fallback_json(cfg: &tetra_config::bluestation::StackConfig, shared: &tetra_config::bluestation::SharedConfig) -> serde_json::Value {
+    if cfg.security.key_source != tetra_config::bluestation::KeySource::Server {
+        return serde_json::Value::Null;
+    }
+    let state = crate::net_control::auc::global().lock().unwrap_or_else(|e| e.into_inner()).fallback_state();
+    let mut v = serde_json::to_value(&state).ok().and_then(|v| v.get("FallbackState").cloned()).unwrap_or(serde_json::Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        let run = shared.state_read().key_fallback.clone();
+        o.insert("active".into(), run.is_some().into());
+        o.insert("class2".into(), run.is_some_and(|r| r.sck.is_some() && r.back_at.is_none()).into());
+    }
+    v
 }
 
 pub fn validate_startup_guard(edit: &SecurityEdit, shared: &Option<tetra_config::bluestation::SharedConfig>) -> Result<(), &'static str> {

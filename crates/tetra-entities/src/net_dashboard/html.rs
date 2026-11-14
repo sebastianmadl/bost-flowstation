@@ -8318,7 +8318,7 @@ const LANGS={
     secp_restart_needed:'The saved settings differ from what is running. Restart the station to apply them.',secp_restart:'Restart station',
     secp_restarting:'Restarting… the page will reconnect in a few seconds.',
     secp_keys_server:'Authentication keys are held by the Brew server (key_source = server). The station gets one-time authentication data sets from it; manage the keys on the server\'s Keys page.',
-    secp_sck_in_use:'Cipher key (SCK) in use',secp_cck_in_use:'Common cipher key (CCK) in use',secp_sck_check:'check value',secp_sck_from_config:'from this station\'s config, the server has not switched it yet',secp_sck_from_server:'from the Brew server',secp_sck_next:'Next key, already sent to the radios',secp_sck_change_at:'Key change planned at',
+    secp_sck_in_use:'Cipher key (SCK) in use',secp_cck_in_use:'Common cipher key (CCK) in use',secp_sck_check:'check value',secp_sck_from_config:'from this station\'s config, the server has not switched it yet',secp_sck_from_server:'from the Brew server',secp_sck_next:'Next key, already sent to the radios',secp_sck_change_at:'Key change planned at',secp_fb_key:'Fallback cipher key (when the key server is away)',secp_fb_no_key:'none from the server',secp_fb_active_sc2:'KEY FALLBACK: key server unreachable, the cell runs class 2 on the fallback key, system wide services temporarily not supported',secp_fb_active:'KEY FALLBACK: key server unreachable, system wide services temporarily not supported, radios without data sets get a temporary registration',secp_fb_returning:'Key server back: radios are authenticated again, then normal mode',
 
     secp_export_help:'Export for the Brew server (encrypted):',secp_export_pw:'Password (min. 10)',secp_export:'Export keys',
     secp_export_short:'The export password needs at least 10 characters.',
@@ -9105,7 +9105,7 @@ const LANGS={
     secp_restart_needed:'La configuración guardada difiere de la que está en ejecución. Reinicia la estación para aplicarla.',secp_restart:'Reiniciar estación',
     secp_restarting:'Reiniciando… la página se reconectará en unos segundos.',
     secp_keys_server:'Las claves de autenticación las guarda el servidor Brew (key_source = server). La estación recibe de él juegos de datos de autenticación de un solo uso; gestiona las claves en la página Claves del servidor.',
-    secp_sck_in_use:'Clave de cifrado (SCK) en uso',secp_cck_in_use:'Clave de cifrado común (CCK) en uso',secp_sck_check:'valor de comprobación',secp_sck_from_config:'de la configuración de esta estación, el servidor aún no la ha cambiado',secp_sck_from_server:'del servidor Brew',secp_sck_next:'Clave siguiente, ya enviada a los equipos',secp_sck_change_at:'Cambio de clave previsto el',
+    secp_sck_in_use:'Clave de cifrado (SCK) en uso',secp_cck_in_use:'Clave de cifrado común (CCK) en uso',secp_sck_check:'valor de comprobación',secp_sck_from_config:'de la configuración de esta estación, el servidor aún no la ha cambiado',secp_sck_from_server:'del servidor Brew',secp_sck_next:'Clave siguiente, ya enviada a los equipos',secp_sck_change_at:'Cambio de clave previsto el',secp_fb_key:'Clave de cifrado de reserva (si el servidor de claves no está disponible)',secp_fb_no_key:'ninguna del servidor',secp_fb_active_sc2:'RESERVA DE CLAVES: servidor de claves inalcanzable, la celda funciona en clase 2 con la clave de reserva, servicios del sistema temporalmente no disponibles',secp_fb_active:'RESERVA DE CLAVES: servidor de claves inalcanzable, servicios del sistema temporalmente no disponibles, los equipos sin datos de autenticación reciben un registro temporal',secp_fb_returning:'Servidor de claves de vuelta: los equipos se autentican de nuevo, luego modo normal',
 
     secp_export_help:'Exportar para el servidor Brew (cifrado):',secp_export_pw:'Contraseña (mín. 10)',secp_export:'Exportar claves',
     secp_export_short:'La contraseña de exportación necesita al menos 10 caracteres.',
@@ -17503,6 +17503,14 @@ function secpSendCckAll(){
   if(!targets.length){secpMsg(t('secp_cck_none'),false,'secp-cck-msg');return;}
   targets.forEach((r,i)=>setTimeout(()=>secpSendCck(r.issi),i*1500));
 }
+function secpFallbackLine(f){
+  if(!f)return '';
+  const key=f.key?`SCK ${f.key.sckn} v${f.key.vn} (${t('secp_sck_check')} ${secpEsc(f.key.check)})`:t('secp_fb_no_key');
+  let h=`<br>${t('secp_fb_key')}: ${key}`;
+  if(f.active)h+=`<br><b style="color:var(--warn,#c80)">${t(f.class2?'secp_fb_active_sc2':'secp_fb_active')}</b>`;
+  else if(f.phase==='returning')h+=`<br>${t('secp_fb_returning')}`;
+  return h;
+}
 function secpRenderRuntime(){
   const rows=secpRuntime?.radios||[];
   document.getElementById('secp-revision').textContent=t('secp_revision')+': '+(secpRuntime?.revision||'—');
@@ -17623,8 +17631,9 @@ function secpFill(d){
     const nx=(ss.keys||[]).filter(x=>x.check!==ss.active.check);
     if(nx.length)h+=`<br>${t('secp_sck_next')}: ${nx.map(k).join(', ')}`;
     if(ss.switch_at_ms)h+=`<br>${t('secp_sck_change_at')} ${new Date(ss.switch_at_ms).toLocaleString()}`;
-    ssEl.innerHTML=h;ssEl.style.display='';
-  }else{ssEl.style.display='none';}
+    ssEl.innerHTML=h+secpFallbackLine((d.runtime||{}).key_fallback);ssEl.style.display='';
+  }else if((d.runtime||{}).key_fallback){ssEl.innerHTML=secpFallbackLine(d.runtime.key_fallback).replace(/^<br>/,'');ssEl.style.display='';}
+  else{ssEl.style.display='none';}
   document.getElementById('secp-add-row').style.display=srvKeys?'none':'flex';
   document.getElementById('secp-export-row').style.display=(!srvKeys&&secpSubs.length)?'flex':'none';
   const inv=document.getElementById('secp-invalid');

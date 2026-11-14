@@ -121,8 +121,25 @@ impl CellCipher {
         self
     }
 
+    /// The cell is configured for class 3 (it may run class 2 on the fallback SCK for a while,
+    /// see [`Self::class3_at`]).
     pub fn is_class3(&self) -> bool {
         self.class3
+    }
+
+    /// Fleet Control key fallback (phase 8d): the fallback SCK this class 3 cell runs at `t`.
+    fn fallback_at(&self, t: TdmaTime, uplink: bool) -> Option<SckKey> {
+        if !self.class3 {
+            return None;
+        }
+        let st = self.config.as_ref()?.state_read();
+        st.key_fallback.as_ref()?.sck_at(t, uplink).cloned()
+    }
+
+    /// Class 3 at `t`: DCK for individual addresses, CCK for groups. `false` on a class 3 cell
+    /// that runs class 2 on the fallback SCK (EN 300 392-7 clauses 4.2.4.0, 4.5.6.2).
+    pub fn class3_at(&self, t: TdmaTime, uplink: bool) -> bool {
+        self.class3 && self.fallback_at(t, uplink).is_none()
     }
 
     fn mat_for(&self, key: &SckKey) -> Arc<KeyMat> {
@@ -140,6 +157,9 @@ impl CellCipher {
 
     /// The SCK in use at `t` (class 3: the CCK).
     fn mat(&self, t: TdmaTime, uplink: bool) -> Arc<KeyMat> {
+        if let Some(key) = self.fallback_at(t, uplink) {
+            return self.mat_for(&key);
+        }
         let run = self.config.as_ref().and_then(|c| {
             let st = c.state_read();
             if self.class3 { st.cck_run.clone() } else { st.sck_run.clone() }
@@ -178,7 +198,7 @@ impl CellCipher {
     /// UL and individual DL use the terminal DCK; group DL uses the CCK.
     /// Missing individual key is a hard failure, never a fallback to CCK.
     pub fn kss_for(&self, carrier: u16, t: TdmaTime, uplink: bool, addr: TetraAddress) -> Option<Kss> {
-        if !self.class3 || (!uplink && addr.ssi_type == SsiType::Gssi) {
+        if !self.class3_at(t, uplink) || (!uplink && addr.ssi_type == SsiType::Gssi) {
             return Some(self.kss(carrier, t, uplink));
         }
         let dck = self.dck_for_address(addr)?;
@@ -210,7 +230,7 @@ impl CellCipher {
 
     /// Class 3, during the overlap after a CCK change: the SSI of `esi` under the old CCK.
     pub fn ssi_old_cck_at(&self, t: TdmaTime, esi: u32) -> Option<u32> {
-        if !self.class3 {
+        if !self.class3_at(t, true) {
             return None;
         }
         let (key, until) = self.config.as_ref()?.state_read().cck_overlap.clone()?;
