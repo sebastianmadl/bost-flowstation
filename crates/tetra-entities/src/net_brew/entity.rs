@@ -280,6 +280,13 @@ pub struct BrewEntity {
     /// Only used when feature_rssi_export is enabled in config.
     rssi_last_sent: HashMap<u32, Instant>,
 
+    /// Security class last reported per radio (`ms-security`), and when the map was last
+    /// compared with MM's.
+    ms_security_sent: HashMap<u32, super::ms_security::MsSecurity>,
+    ms_security_checked: Option<Instant>,
+    /// Last time every radio's class was sent again.
+    ms_security_full: Option<Instant>,
+
     /// Worker thread handle for graceful shutdown
     worker_handle: Option<thread::JoinHandle<()>>,
 }
@@ -339,6 +346,9 @@ impl BrewEntity {
             moved_away: HashMap::new(),
             announced_away: HashMap::new(),
             rssi_last_sent: HashMap::new(),
+            ms_security_sent: HashMap::new(),
+            ms_security_checked: None,
+            ms_security_full: None,
             worker_handle: Some(handle),
         }
     }
@@ -356,6 +366,36 @@ impl BrewEntity {
     /// Tell the server which cell `issi` registered on: in a multi-cell site the one the site
     /// directory has it on, otherwise this stack's own cell (the primary, or an additional cell
     /// that serves its own network). The worker only sends it where offered.
+    /// Report the security class of registered radios that changed since the last report, once
+    /// a second (the worker sends it only to a server that offered `ms-security`).
+    fn sync_ms_security(&mut self) {
+        if !self.connected || self.ms_security_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.ms_security_checked = Some(Instant::now());
+        // Every 30 min everything once more, in case the server lost it.
+        if self.ms_security_full.is_none_or(|t| t.elapsed() >= Duration::from_secs(30 * 60)) {
+            self.ms_security_full = Some(Instant::now());
+            self.ms_security_sent.clear();
+        }
+        self.ms_security_sent.retain(|issi, _| self.subscriber_groups.contains_key(issi));
+        let fallback = self.config.state_read().key_fallback.clone();
+        let issis: Vec<u32> = self.subscriber_groups.keys().copied().collect();
+        for issi in issis {
+            if !super::is_brew_issi_routable(&self.config, issi) {
+                continue;
+            }
+            let Some(sec) = super::ms_security::get(issi) else { continue };
+            // A cell-wide class change (fallback SCK) counts at once.
+            let sec = super::ms_security::effective(sec, fallback.as_ref());
+            if self.ms_security_sent.get(&issi) == Some(&sec) {
+                continue;
+            }
+            self.ms_security_sent.insert(issi, sec);
+            let _ = self.command_sender.send(BrewCommand::ReportMsSecurity { issi, class: sec.class, ksg: sec.ksg });
+        }
+    }
+
     fn report_ms_cell(&self, issi: u32) {
         let own = self.config.config().cell_id;
         let cell = ms_cell(self.site_directory.as_ref(), issi, own);
@@ -382,6 +422,8 @@ impl BrewEntity {
                     tracing::debug!("BrewEntity: connected to TetraPack server (Brew v{})", server_version);
                     self.connected = true;
                     self.brew_version_announced = false;
+                    // A new connection: the server knows no class yet.
+                    self.ms_security_sent.clear();
                     {
                         let mut state = self.config.state_write();
                         state.brew_link_up = true;
@@ -1890,6 +1932,7 @@ impl TetraEntityTrait for BrewEntity {
         // Release inbound calls the core stopped feeding without ever sending GROUP_IDLE
         self.reap_idle_calls(queue);
         self.drop_departed(queue);
+        self.sync_ms_security();
     }
 
     fn rx_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {

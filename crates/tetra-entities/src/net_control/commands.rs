@@ -252,8 +252,10 @@ pub enum ControlCommand {
     /// unreachable. `key`: the network's fallback SCK (SCKN 31 or 32, EN 300 392-7 clause 4.2.4.0
     /// and Table A.96), which a class 3 cell runs as class 2 once `after_s` seconds have passed
     /// without the server and a radio cannot be authenticated any more. `reauth_per_s`: radios
-    /// authenticated per second once the server is back. Kept by the station (file mode 600),
-    /// answered with [`ControlResponse::FallbackState`].
+    /// authenticated per second once the server is back. `forced`: the operator switched the
+    /// network to the fallback SCK by hand (clause 4.5.6.2, for example a compromised CCK), a
+    /// class 3 cell runs class 2 on it until `forced` is false again. Kept by the station (file
+    /// mode 600), answered with [`ControlResponse::FallbackState`].
     FallbackKeys {
         #[serde(default)]
         key: Option<SckWire>,
@@ -261,6 +263,8 @@ pub enum ControlCommand {
         after_s: u32,
         #[serde(default = "default_reauth_per_s")]
         reauth_per_s: u8,
+        #[serde(default)]
+        forced: bool,
     },
 }
 
@@ -285,6 +289,13 @@ pub struct FallbackEpisode {
     /// Radios answered with "temporary registration".
     #[serde(default)]
     pub temporary: u32,
+    /// Started by the operator on the server, not by the station losing the server.
+    #[serde(default)]
+    pub manual: bool,
+    /// Reason of an automatic fallback: the station lost the key server at this time (Unix ms)
+    /// and a radio known to the server had no data set left. Older stations leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost_ms: Option<u64>,
 }
 
 /// One DCK on the wire ([`ControlCommand::DckKeys`], [`ControlResponse::DckReport`]): radio and
@@ -343,11 +354,26 @@ pub struct SckRef {
 }
 
 /// One authentication data set on the wire: RS (80 bit), KS and KS' (128 bit each) as hex.
+/// `exp_ms` (Unix ms, 0 = no end) is when the station drops the set unused; `rev` is the
+/// revision of the radio's K it was made from (a newer revision drops the older sets). Both are
+/// left out by older servers.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct AuthVectorWire {
     pub rs: String,
     pub ks: String,
     pub ks_p: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub exp_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub rev: u32,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 /// Sets in stock for one radio ([`ControlResponse::AuthStock`]).
@@ -472,6 +498,11 @@ pub enum ControlResponse {
         /// server can show what an export would carry. Never the keys.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         local_keys: Option<u32>,
+        /// The ISSIs of those keys (never K), so the server can check it holds K for every one
+        /// before the station switches to server keys. With server keys: the radios of the own K
+        /// list the station still keeps until the first authentication with server data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_issis: Option<Vec<u32>>,
     },
 
     /// Fleet Control: the answer to every Fleet Control command, correlated by `handle`.
@@ -635,8 +666,9 @@ pub enum ControlResponse {
     DckReport { key: DckWire },
 
     /// Fleet Control (`fallback-v1`): the fallback state after `FallbackKeys` and on every change.
-    /// `phase`: `normal`, `fallback`, or `returning` (the server is back, radios are
-    /// authenticated again before the cell returns to normal mode). `key`: the fallback SCK the
+    /// `phase`: `normal`, `fallback`, `returning` (the server is back, radios are
+    /// authenticated again before the cell returns to normal mode) or `manual` (class 2 on the
+    /// fallback SCK because the operator asked for it). `key`: the fallback SCK the
     /// station holds. `episodes`: the last fallback periods, newest last.
     FallbackState {
         phase: String,

@@ -653,6 +653,9 @@ pub struct KeyFallbackRun {
     pub sck: Option<(tetra_core::TdmaTime, SckKey)>,
     /// The slot the cell goes back to class 3 (clause 4.5.6.3), once planned.
     pub back_at: Option<tetra_core::TdmaTime>,
+    /// Asked for by the operator while the key server is reachable: class 2 on the fallback SCK
+    /// only, the cell stays in normal mode (system wide services supported).
+    pub manual: bool,
 }
 
 impl KeyFallbackRun {

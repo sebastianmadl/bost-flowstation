@@ -1553,7 +1553,7 @@ fn sc3_fallback_station(registered: &[u32], known: &[u32]) -> (MmBs, Handle) {
     {
         let mut s = auc.lock().unwrap();
         s.subscribers(known, &[]);
-        s.set_fallback(Some(wire(31, 7, FB_SCK, false)), 300, 2);
+        s.set_fallback(Some(wire(31, 7, FB_SCK, false)), 300, 2, false);
         s.drain_outbox();
         s.set_link(false);
     }
@@ -1623,6 +1623,9 @@ fn fallback_class3_cell_runs_class2_on_the_fallback_sck_and_returns() {
     assert!(matches!(&fallback_states(&auc)[..], [(p, _)] if p == "returning"));
     assert!(mm.config.state_read().key_fallback.as_ref().unwrap().back_at.is_none());
     mm.process_key_fallback(&mut q, at.add_timeslots(101));
+    assert!(mm.config.state_read().key_fallback.as_ref().unwrap().back_at.is_none(), "a minute of stable server first");
+    mm.key_fallback.skip(super::super::key_fallback::STABLE_BEFORE_RETURN);
+    mm.process_key_fallback(&mut q, at.add_timeslots(102));
     let back = mm.config.state_read().key_fallback.as_ref().unwrap().back_at.expect("return planned");
     let changes = ck_changes(&mut q);
     let to_ms: Vec<_> = changes.iter().filter(|(i, _)| *i == MS).collect();
@@ -1644,7 +1647,7 @@ fn fallback_class3_cell_runs_class2_on_the_fallback_sck_and_returns() {
 fn fallback_class3_without_fallback_sck_keeps_class3() {
     let r2 = MS + 1;
     let (mut mm, auc) = sc3_fallback_station(&[MS], &[MS, r2]);
-    auc.lock().unwrap().set_fallback(None, 300, 2);
+    auc.lock().unwrap().set_fallback(None, 300, 2, false);
     let mut q = MessageQueue::new();
     let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
     mm.process_key_fallback(&mut q, ts);
@@ -1732,6 +1735,7 @@ fn fallback_simulation_10_stations_25_radios() {
         }
         let t = ts.add_timeslots(10_000);
         mm.process_key_fallback(&mut q, t);
+        mm.key_fallback.skip(super::super::key_fallback::STABLE_BEFORE_RETURN);
         mm.process_key_fallback(&mut q, t.add_timeslots(1));
         let back = mm.config.state_read().key_fallback.as_ref().and_then(|r| r.back_at);
         if let Some(back) = back {
@@ -1791,4 +1795,87 @@ fn fallback_simulation_10_stations_25_radios() {
         demands += mine.iter().filter(|i| mm.auth_pending.contains_key(i)).count();
     }
     assert_eq!(demands, 25, "every radio authenticated again");
+}
+
+/// The operator switches the network to the fallback SCK on the server while it is reachable:
+/// class 2 on SCK 31 from the next multiframe (EN 300 392-7 clauses 4.2.4.0, 4.5.6.2), normal mode
+/// stays (no "system wide services temporarily not supported"), back to class 3 when cleared
+/// (clause 4.5.6.3). Kept over a lost server: the automatic fallback only adds the restricted mode.
+#[test]
+fn fallback_by_the_operator_runs_class2_until_cleared() {
+    let (mut mm, auc) = sc3_fallback_station(&[MS], &[MS]);
+    auc.lock().unwrap().set_link(true);
+    auc.lock().unwrap().subscribers(&[MS], &[]);
+    let mut q = MessageQueue::new();
+    let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
+    mm.process_key_fallback(&mut q, ts);
+    assert!(mm.config.state_read().key_fallback.is_none());
+    auc.lock().unwrap().set_fallback(Some(wire(31, 7, FB_SCK, false)), 300, 2, true);
+    auc.lock().unwrap().drain_outbox();
+    mm.process_key_fallback(&mut q, ts);
+    let run = mm.config.state_read().key_fallback.clone().expect("fallback by the operator");
+    assert!(run.manual);
+    let (at, key) = run.sck.unwrap();
+    assert_eq!((key.sckn, key.vn), (31, 7));
+    let changes = ck_changes(&mut q);
+    assert!(matches!(&changes[..], [(i, c)] if *i == MS && c.change_of_class == 0b10 && c.key == KeyChange::Sck(vec![(30, 7)])));
+    let st = fallback_states(&auc);
+    assert!(matches!(&st[..], [(p, e)] if p == "manual" && e[0].manual && e[0].class2), "{st:?}");
+    // Normal mode: system wide services stay supported (only the automatic fallback drops them).
+    assert!(!mm.config.state_read().key_fallback.as_ref().is_some_and(|r| !r.manual));
+    // Not sent again on the next tick.
+    mm.process_key_fallback(&mut q, at);
+    assert!(mm.sc2_fallback && ck_changes(&mut q).is_empty());
+
+    // The server goes away: the automatic fallback starts on top without another class change.
+    auc.lock().unwrap().set_link(false);
+    mm.process_key_fallback(&mut q, at.add_timeslots(4));
+    mm.key_fallback.note_starved();
+    mm.key_fallback.skip(Duration::from_secs(300));
+    mm.process_key_fallback(&mut q, at.add_timeslots(5));
+    assert!(mm.key_fallback.active());
+    assert!(!mm.config.state_read().key_fallback.as_ref().unwrap().manual, "restricted mode now");
+    assert!(ck_changes(&mut q).is_empty(), "already class 2");
+    // Back while the operator still wants the fallback: class 2 stays, normal mode comes back.
+    {
+        let mut s = auc.lock().unwrap();
+        s.set_link(true);
+        s.subscribers(&[MS], &[]);
+    }
+    for i in 0..20 {
+        mm.key_fallback.skip(Duration::from_secs(6));
+        mm.process_key_fallback(&mut q, at.add_timeslots(10 + i));
+    }
+    assert!(!mm.key_fallback.active());
+    let run = mm.config.state_read().key_fallback.clone().unwrap();
+    assert!(run.manual && run.back_at.is_none(), "class 2 stays");
+    assert!(ck_changes(&mut q).iter().all(|(_, c)| c.change_of_class != 0b11));
+
+    // The operator ends it: class 3 again with the CCK-id.
+    auc.lock().unwrap().set_fallback(Some(wire(31, 7, FB_SCK, false)), 300, 2, false);
+    auc.lock().unwrap().drain_outbox();
+    mm.process_key_fallback(&mut q, at.add_timeslots(40));
+    let changes = ck_changes(&mut q);
+    assert!(matches!(&changes[..], [(_, c)] if c.change_of_class == 0b11), "{changes:?}");
+    let back = mm.config.state_read().key_fallback.as_ref().unwrap().back_at.expect("return planned");
+    mm.process_key_fallback(&mut q, back.add_timeslots(super::KEY_FALLBACK_CLEAR_SLOTS + 1));
+    assert!(mm.config.state_read().key_fallback.is_none());
+    let st = fallback_states(&auc);
+    assert!(st.iter().any(|(p, e)| p == "normal" && e.last().is_some_and(|e| e.to_ms.is_some())), "{st:?}");
+}
+
+/// A class 1/2 cell or a station without fallback SCK ignores the operator's fallback (logged once).
+#[test]
+fn fallback_by_the_operator_needs_a_fallback_sck() {
+    let (mut mm, auc) = sc3_fallback_station(&[MS], &[MS]);
+    auc.lock().unwrap().set_link(true);
+    auc.lock().unwrap().subscribers(&[MS], &[]);
+    auc.lock().unwrap().set_fallback(None, 300, 2, true);
+    let mut q = MessageQueue::new();
+    let ts = TdmaTime { t: 1, f: 3, m: 10, h: 7 };
+    mm.process_key_fallback(&mut q, ts);
+    mm.process_key_fallback(&mut q, ts.add_timeslots(1));
+    assert!(mm.config.state_read().key_fallback.is_none());
+    assert!(ck_changes(&mut q).is_empty());
+    assert!(mm.manual_refused);
 }

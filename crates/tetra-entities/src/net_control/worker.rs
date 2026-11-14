@@ -374,14 +374,15 @@ impl<T: NetworkTransport> ControlWorker<T> {
                     }
                     Some(store.cck_state(cell_la, config_cck.as_ref()))
                 }
-                ControlCommand::FallbackKeys { key, after_s, reauth_per_s } => {
+                ControlCommand::FallbackKeys { key, after_s, reauth_per_s, forced } => {
                     tracing::info!(
-                        "Key management: fallback {} after {} s without the server, re-authentication {}/s",
+                        "Key management: fallback {} after {} s without the server, re-authentication {}/s{}",
                         key.as_ref().map_or("without SCK".to_string(), |k| format!("SCK {} version {}", k.sckn, k.vn)),
                         after_s,
-                        reauth_per_s
+                        reauth_per_s,
+                        if *forced { ", switched to the fallback SCK by the operator" } else { "" }
                     );
-                    Some(store.set_fallback(key.clone(), *after_s, *reauth_per_s))
+                    Some(store.set_fallback(key.clone(), *after_s, *reauth_per_s, *forced))
                 }
                 ControlCommand::DckKeys { keys, drop } => {
                     // First DckKeys on this connection: DCKs made while the server was away never

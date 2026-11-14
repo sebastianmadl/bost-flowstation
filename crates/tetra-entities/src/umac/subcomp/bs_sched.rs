@@ -2472,7 +2472,7 @@ mod tests {
         sched.set_cipher(Some(std::sync::Arc::new(crate::aie::cipher::CellCipher::new(&aie, &[sched.carrier_num()], 1, 1).with_config(shared.clone()))));
         let t0 = TdmaTime { t: 1, f: 1, m: 4, h: 5 };
         let from = t0.add_timeslots(100);
-        shared.state_write().key_fallback = Some(KeyFallbackRun { sck: Some((from, SckKey { sckn: 31, vn: 7, key: CipherKey([0x5A; 10]) })), back_at: None });
+        shared.state_write().key_fallback = Some(KeyFallbackRun { sck: Some((from, SckKey { sckn: 31, vn: 7, key: CipherKey([0x5A; 10]) })), back_at: None, manual: false });
         let ext_at = |sched: &mut BsChannelScheduler, t: TdmaTime| {
             sched.set_dl_time(t);
             let _ = sched.finalize_ts_for_tick();

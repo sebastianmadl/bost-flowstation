@@ -349,7 +349,7 @@ impl UmacBs {
         let cfg = config.config();
         // Fleet Control key fallback (phase 8d): the key server is away, "system wide services
         // temporarily not supported" (TS 100 392-2 clauses 16.4.8, 18.5.2).
-        if config.state_read().key_fallback.is_some() {
+        if config.state_read().key_fallback.as_ref().is_some_and(|r| !r.manual) {
             return false;
         }
         if cfg.brew.is_some() {

@@ -181,6 +181,9 @@ pub struct MmBs {
     key_fallback: super::key_fallback::KeyFallback,
     /// This class 3 cell runs class 2 on the fallback SCK now.
     sc2_fallback: bool,
+    /// The operator's fallback could not be followed (no fallback SCK or no class 3 cell);
+    /// logged once.
+    manual_refused: bool,
     /// Radios that just passed, so the replayed registration is not challenged again.
     auth_passed: HashMap<u32, Instant>,
     /// Newly authenticated DCKs; published to MAC only at the acknowledgement boundary.
@@ -295,6 +298,7 @@ impl MmBs {
             auc: crate::net_control::auc::global(),
             key_fallback: Default::default(),
             sc2_fallback: false,
+            manual_refused: false,
             dck: HashMap::new(),
             auth_result_pending: HashMap::new(),
             auth_ack_pending: HashMap::new(),
@@ -401,6 +405,17 @@ impl MmBs {
             .state_write()
             .subscribers
             .set_encrypted(issi, ciphering.is_some());
+        crate::net_brew::ms_security::set(
+            issi,
+            crate::net_brew::ms_security::MsSecurity {
+                class: match ciphering {
+                    None => 1,
+                    Some(c) if c.class3 => 3,
+                    Some(_) => 2,
+                },
+                ksg: ciphering.map(|c| c.ksg_number),
+            },
+        );
 
         match ciphering {
             Some(params) => tracing::info!(
@@ -1239,6 +1254,8 @@ impl MmBs {
             match self.client_mgr.try_register_client(issi, true) {
                 Ok(_) => {
                     self.config.state_write().subscribers.register(issi);
+            crate::net_brew::ms_security::clear(issi);
+                    crate::net_brew::ms_security::clear(issi);
                 }
                 Err(e) => {
                     tracing::warn!("Failed registering roaming MS {}: {:?}", issi, e);
@@ -4895,6 +4912,7 @@ impl MmBs {
             }
         }
         self.auc_lock().drop_stale_sealed(SEALED_UNCLAIMED);
+        self.auc_lock().expire(Instant::now());
     }
 
     /// Follow the server's SCK on this cell: the key in use, and a planned change, which gets
@@ -4966,6 +4984,7 @@ impl MmBs {
             self.config.state_write().key_fallback = None;
             tracing::info!("MM: key fallback over — class 3 and normal mode again");
         }
+        self.process_manual_fallback(queue, ts);
         let (ready, after, rate) = {
             let s = self.auc_lock();
             (s.server_ready(), s.fallback_after(), s.reauth_per_s())
@@ -4995,6 +5014,14 @@ impl MmBs {
     /// the server's fallback SCK, class 2 on it from the next multiframe (EN 300 392-7 clauses
     /// 4.2.4.0, 4.5.6.2), announced with D-CK CHANGE DEMAND "transition to security class 2".
     fn enter_key_fallback(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        // Already on the fallback SCK because the operator asked for it: only the normal mode ends.
+        if let Some(run) = self.config.state_write().key_fallback.as_mut().filter(|r| r.manual && r.back_at.is_none()) {
+            run.manual = false;
+            tracing::warn!("MM: key server away and radios without data sets — KEY FALLBACK on the operator's fallback SCK: system wide services temporarily not supported, temporary registration");
+            let lost = self.key_lost_ms();
+            self.auc_lock().fallback_phase_lost("fallback", None, lost, None);
+            return;
+        }
         let class3 = crate::aie::effective(&self.config.config()).is_some_and(|a| a.class3.is_some());
         let key = if class3 { self.auc_lock().fallback_key() } else { None };
         let now = now_ms();
@@ -5012,17 +5039,72 @@ impl MmBs {
             ),
         }
         if let Some((at, k)) = &sck {
-            let pdu = DCkChangeDemand {
-                ack_required: false,
-                change_of_class: 0b10,
-                key: KeyChange::Sck(vec![(k.sckn.saturating_sub(1) & 0x1f, k.vn)]),
-                time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
-            };
-            self.announce_ck_change(queue, &pdu);
+            self.announce_class2(queue, *at, k);
         }
         let class2 = sck.is_some();
-        self.config.state_write().key_fallback = Some(tetra_config::bluestation::KeyFallbackRun { sck, back_at: None });
-        self.auc_lock().fallback_phase("fallback", Some((now, class2)), None);
+        self.config.state_write().key_fallback = Some(tetra_config::bluestation::KeyFallbackRun { sck, back_at: None, manual: false });
+        let lost = self.key_lost_ms();
+        self.auc_lock().fallback_phase_lost("fallback", Some((now, class2, false)), lost, None);
+    }
+
+    /// When the key server was lost (Unix ms), the reason of an automatic fallback.
+    fn key_lost_ms(&self) -> Option<u64> {
+        self.key_fallback.lost_for(Instant::now()).map(|d| now_ms().saturating_sub(d.as_millis() as u64))
+    }
+
+    /// D-CK CHANGE DEMAND "transition to security class 2" with the fallback SCK (clause 4.5.6.2).
+    fn announce_class2(&self, queue: &mut MessageQueue, at: TdmaTime, k: &tetra_config::bluestation::SckKey) {
+        let pdu = DCkChangeDemand {
+            ack_required: false,
+            change_of_class: 0b10,
+            key: KeyChange::Sck(vec![(k.sckn.saturating_sub(1) & 0x1f, k.vn)]),
+            time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
+        };
+        self.announce_ck_change(queue, &pdu);
+    }
+
+    /// The operator switched the network to the fallback SCK on the server (`forced`), or back.
+    /// A class 3 cell runs class 2 on it from the next multiframe and stays in normal mode: the
+    /// key server is reachable, radios authenticate as usual (EN 300 392-7 clauses 4.2.4.0,
+    /// 4.5.6.2). Back: class 3 again with the CCK-id (clause 4.5.6.3).
+    fn process_manual_fallback(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        let forced = self.auc_lock().fallback_forced();
+        let (has_run, manual_open) = {
+            let st = self.config.state_read();
+            let run = st.key_fallback.as_ref();
+            (run.is_some(), run.is_some_and(|r| r.manual && r.back_at.is_none()))
+        };
+        if !forced {
+            self.manual_refused = false;
+            if manual_open {
+                self.class3_again(queue, ts);
+                tracing::info!("MM: the operator ended the fallback — class 3 again");
+                self.auc_lock().fallback_phase("normal", None, Some((now_ms(), 0)));
+            }
+            return;
+        }
+        if has_run || self.key_fallback.active() || self.manual_refused {
+            return;
+        }
+        let class3 = crate::aie::effective(&self.config.config()).is_some_and(|a| a.class3.is_some());
+        let key = self.auc_lock().fallback_key();
+        let Some(k) = key.filter(|_| class3) else {
+            self.manual_refused = true;
+            tracing::warn!(
+                "MM: the operator asked for the fallback SCK, but {} — nothing changes",
+                if class3 { "this station holds no fallback SCK" } else { "this cell does not run class 3" }
+            );
+            return;
+        };
+        let now = now_ms();
+        let at = sck_change_slot(ts, now + KEY_FALLBACK_LEAD_MS, now);
+        tracing::warn!(
+            "MM: FALLBACK BY THE OPERATOR: class 2 on fallback SCK {} version {} from {}/{}/{}/{}",
+            k.sckn, k.vn, at.h, at.m, at.f, at.t
+        );
+        self.announce_class2(queue, at, &k);
+        self.config.state_write().key_fallback = Some(tetra_config::bluestation::KeyFallbackRun { sck: Some((at, k)), back_at: None, manual: true });
+        self.auc_lock().fallback_phase("manual", Some((now, true, true)), None);
     }
 
     /// Back to normal mode. A class 3 cell on the fallback SCK returns to class 3 at the next
@@ -5035,45 +5117,61 @@ impl MmBs {
             return;
         }
         let class2 = self.config.state_read().key_fallback.as_ref().is_some_and(|r| r.sck.is_some());
-        if class2 {
-            let at = sck_change_slot(ts, now_ms() + KEY_FALLBACK_LEAD_MS, now_ms());
-            // Radios authenticated during the fallback (clause 4.2.1: the DCK comes with every
-            // authentication) run class 3 with that DCK.
-            let mut radios: Vec<(u32, SecCipherKey)> = self
-                .registration_encryption
-                .iter()
-                .filter(|(i, e)| **e && self.client_mgr.client_is_known(**i))
-                .filter_map(|(i, _)| self.dck.get(i).map(|k| (*i, k.clone())))
-                .collect();
-            radios.sort_unstable_by_key(|(i, _)| *i);
-            for (issi, dck) in &radios {
-                self.set_sc3_dck(*issi, dck);
-            }
-            let cfg = self.config.config();
-            let cck_id = self
-                .config
-                .state_read()
-                .cck_run
-                .as_ref()
-                .and_then(|r| r.active.clone())
-                .or_else(|| crate::net_control::auc::config_cck(&cfg))
-                .map_or(0, |k| k.vn);
-            let pdu = DCkChangeDemand {
-                ack_required: false,
-                change_of_class: 0b11,
-                key: KeyChange::Cck(cck_id),
-                time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
-            };
-            self.announce_ck_change(queue, &pdu);
+        if class2 && self.auc_lock().fallback_forced() {
+            // The operator still wants the fallback SCK: only the normal mode comes back.
             if let Some(run) = self.config.state_write().key_fallback.as_mut() {
-                run.back_at = Some(at);
+                run.manual = true;
             }
-            tracing::info!("MM: key fallback ends — class 3 with CCK-id {} from {}/{}/{}/{}", cck_id, at.h, at.m, at.f, at.t);
+            tracing::info!("MM: key server back — normal mode again, class 2 on the fallback SCK stays (asked for by the operator)");
+            self.auc_lock().fallback_phase("manual", None, None);
+            return;
+        }
+        if class2 {
+            self.class3_again(queue, ts);
         } else {
             self.config.state_write().key_fallback = None;
             tracing::info!("MM: key fallback over — normal mode again; radios with a temporary registration register again");
         }
         self.auc_lock().fallback_phase("normal", None, Some((now_ms(), temporary)));
+    }
+
+    /// Class 3 again after class 2 on the fallback SCK, at the next multiframe (clause 4.5.6.3,
+    /// D-CK CHANGE DEMAND "transition to security class 3" with the CCK-id); the DCKs of radios
+    /// authenticated meanwhile take over on that slot.
+    fn class3_again(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        let at = sck_change_slot(ts, now_ms() + KEY_FALLBACK_LEAD_MS, now_ms());
+        // Radios authenticated during the fallback (clause 4.2.1: the DCK comes with every
+        // authentication) run class 3 with that DCK.
+        let mut radios: Vec<(u32, SecCipherKey)> = self
+            .registration_encryption
+            .iter()
+            .filter(|(i, e)| **e && self.client_mgr.client_is_known(**i))
+            .filter_map(|(i, _)| self.dck.get(i).map(|k| (*i, k.clone())))
+            .collect();
+        radios.sort_unstable_by_key(|(i, _)| *i);
+        for (issi, dck) in &radios {
+            self.set_sc3_dck(*issi, dck);
+        }
+        let cfg = self.config.config();
+        let cck_id = self
+            .config
+            .state_read()
+            .cck_run
+            .as_ref()
+            .and_then(|r| r.active.clone())
+            .or_else(|| crate::net_control::auc::config_cck(&cfg))
+            .map_or(0, |k| k.vn);
+        let pdu = DCkChangeDemand {
+            ack_required: false,
+            change_of_class: 0b11,
+            key: KeyChange::Cck(cck_id),
+            time: ChangeTime::AbsoluteIv { t: at.t, f: at.f, m: at.m, h: at.h },
+        };
+        self.announce_ck_change(queue, &pdu);
+        if let Some(run) = self.config.state_write().key_fallback.as_mut() {
+            run.back_at = Some(at);
+        }
+        tracing::info!("MM: key fallback ends — class 3 with CCK-id {} from {}/{}/{}/{}", cck_id, at.h, at.m, at.f, at.t);
     }
 
     /// SwMI initiated authentication of a registered radio (EN 300 392-7 clause 4.1.2), one of

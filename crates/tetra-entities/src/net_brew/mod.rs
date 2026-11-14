@@ -6,6 +6,7 @@
 
 pub mod components;
 pub mod entity;
+pub mod ms_security;
 pub mod protocol;
 pub mod worker;
 

@@ -1057,6 +1057,34 @@ pub fn build_service_ms_cell(issi: u32, carrier: u16, carrier_ext: u16) -> Vec<u
     buf
 }
 
+/// Service type reporting the security class a radio is registered with (brew-server, 8f)
+pub const BREW_SERVICE_MS_SECURITY: u8 = 0x25;
+
+/// Brew extension a server offers (`X-Brew-Extensions`) when it accepts
+/// [`BREW_SERVICE_MS_SECURITY`]
+pub const BREW_EXT_MS_SECURITY: &str = "ms-security";
+
+/// Build a Service (0xf4) MS security message, NULL-terminated JSON:
+/// `{"issi":2320001,"class":3,"ksg":1}`. `class`: 1 clear, 2 SCK, 3 DCK / CCK (EN 300 392-7
+/// clause 6.2); `ksg`: KSG number of the ciphering parameters (Table A.3, 0 = TEA1), left out
+/// for class 1. Sent when the ciphering of a registration takes effect and again when it changes.
+///
+/// Not part of Brew as TetraPack / BrandMeister speak it: only send it to a server that offered
+/// [`BREW_EXT_MS_SECURITY`].
+pub fn build_service_ms_security(issi: u32, class: u8, ksg: Option<u8>) -> Vec<u8> {
+    let mut v = serde_json::json!({ "issi": issi, "class": class });
+    if let Some(k) = ksg {
+        v["ksg"] = k.into();
+    }
+    let json = v.to_string();
+    let mut buf = Vec::with_capacity(3 + json.len());
+    buf.push(BREW_CLASS_SERVICE);
+    buf.push(BREW_SERVICE_MS_SECURITY);
+    buf.extend_from_slice(json.as_bytes());
+    buf.push(0); // NULL terminator
+    buf
+}
+
 /// Service type the server sends to the station a radio was registered on when it registered on
 /// another station without a handover prepared through the server: `{"issi":2320001}`
 /// (brew-server)

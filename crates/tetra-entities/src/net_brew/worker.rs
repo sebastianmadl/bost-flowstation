@@ -155,6 +155,8 @@ pub enum BrewCommand {
     /// Tell the server which cell of this station a just registered subscriber is on (only to a
     /// server that offered `ms-cell`)
     ReportMsCell { issi: u32, cell: CellId },
+    /// The security class `issi` is registered with (`ms-security`).
+    ReportMsSecurity { issi: u32, class: u8, ksg: Option<u8> },
 
     /// Tell the server how a radio left this station (only to a server that offered
     /// `ms-reselection`)
@@ -1095,6 +1097,17 @@ impl<T: NetworkTransport> BrewWorker<T> {
                             tracing::error!("BrewWorker: failed to send MS cell for ISSI {}: {}", issi, e);
                         } else {
                             tracing::debug!("BrewWorker: sent MS cell issi={} cell={}", issi, cell.0);
+                        }
+                    }
+                    BrewCommand::ReportMsSecurity { issi, class, ksg } => {
+                        if !self.transport.server_brew_extensions().iter().any(|e| e == BREW_EXT_MS_SECURITY) {
+                            continue;
+                        }
+                        let Some(issi) = self.mni_outbound_ssi(issi) else { continue };
+                        if let Err(e) = self.transport.send_reliable(&build_service_ms_security(issi, class, ksg)) {
+                            tracing::error!("BrewWorker: failed to send MS security for ISSI {}: {}", issi, e);
+                        } else {
+                            tracing::debug!("BrewWorker: sent MS security issi={} class={}", issi, class);
                         }
                     }
                     BrewCommand::ReportReselection { issi, reselection } => {

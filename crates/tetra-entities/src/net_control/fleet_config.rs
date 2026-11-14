@@ -66,6 +66,40 @@ fn backup_path(config: &str) -> String {
     format!("{config}.fleet-backup")
 }
 
+/// The station's own K list while it switches to server keys (two-step switch, see
+/// [`park_local_keys`]).
+pub fn parked_keys_path(config: &str) -> String {
+    format!("{config}.local-keys")
+}
+
+/// The `[[security.subscribers]]` list kept in `<config>.local-keys`, if any.
+pub fn read_parked_keys(config: &str) -> Option<TomlValue> {
+    let text = std::fs::read_to_string(parked_keys_path(config)).ok()?;
+    let t: Table = toml::from_str(&text).ok()?;
+    t.get("subscribers").filter(|v| v.as_array().is_some_and(|a| !a.is_empty())).cloned()
+}
+
+/// Two-step switch to server keys: the K list leaves the config, but the station keeps it in a
+/// private file (mode 600) until the first authentication with the server's data succeeds
+/// ([`super::auc::AucStore::report`] removes it). Back to local keys before that, the list
+/// returns into the config. Nothing to keep: the file goes.
+fn park_local_keys(config: &str, original: &str, changes: &JsonValue) -> Result<(), String> {
+    let to_server = changes.get("keys").and_then(|k| k.get("source")).and_then(|v| v.as_str()) == Some("server");
+    if !to_server {
+        return Ok(());
+    }
+    let table: Table = toml::from_str(original).map_err(|e| format!("config does not parse: {e}"))?;
+    let list = table.get("security").and_then(|s| s.get("subscribers")).filter(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+    let Some(list) = list else { return Ok(()) };
+    let mut out = Table::new();
+    out.insert("subscribers".into(), list.clone());
+    let text = toml::to_string(&out).map_err(|e| e.to_string())?;
+    super::auc::write_private_file(std::path::Path::new(&parked_keys_path(config)), text.as_bytes())
+        .map_err(|e| format!("cannot keep the station's keys until the switch is done: {e}"))?;
+    tracing::info!("Key management: {} keys of the station kept until the first authentication with the server's data", list.as_array().map_or(0, |a| a.len()));
+    Ok(())
+}
+
 fn pending_path(config: &str) -> String {
     format!("{config}.fleet-pending.json")
 }
@@ -457,7 +491,8 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
             let store = auc.lock().unwrap_or_else(|e| e.into_inner());
             (store.sck_active(), store.cck_active())
         };
-        apply_key_source(&mut table, k, server_sck.as_ref(), server_cck.as_ref())?;
+        let parked = config_path().and_then(|c| read_parked_keys(&c));
+        apply_key_source(&mut table, k, server_sck.as_ref(), server_cck.as_ref(), parked)?;
         text = toml::to_string(&table).map_err(|e| e.to_string())?;
     }
 
@@ -473,12 +508,15 @@ pub fn apply_changes(original: &str, changes: &JsonValue) -> Result<String, Stri
 
 /// `keys: {source, drop_local_keys?}` (see [`apply_changes`]).
 /// `server_sck`: the server's SCK the station runs with. Back to local keys it is written to
-/// `[security.aie]`, so a class 2 cell keeps the key the radios hold.
+/// `[security.aie]`, so a class 2 cell keeps the key the radios hold. `parked`: the station's own
+/// K list kept from a switch to server keys not yet completed; back to local keys it returns
+/// into the config (when the config has none).
 fn apply_key_source(
     table: &mut Table,
     k: &JsonValue,
     server_sck: Option<&tetra_config::bluestation::SckKey>,
     server_cck: Option<&tetra_config::bluestation::SckKey>,
+    parked: Option<TomlValue>,
 ) -> Result<(), String> {
     let source = k.get("source").and_then(|v| v.as_str()).ok_or("keys.source is required")?;
     let source = tetra_config::bluestation::KeySource::parse(source).ok_or(format!("keys.source: local or server, not {source:?}"))?;
@@ -494,6 +532,10 @@ fn apply_key_source(
         sec.insert("key_source".into(), TomlValue::String("server".into()));
     } else {
         sec.remove("key_source");
+        let has_list = sec.get("subscribers").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty());
+        if let (false, Some(list)) = (has_list, parked) {
+            sec.insert("subscribers".into(), list);
+        }
         if let (Some(key), Some(TomlValue::Table(aie))) = (server_sck, sec.get_mut("aie"))
             && aie.get("class").and_then(|v| v.as_integer()) != Some(3)
         {
@@ -707,6 +749,9 @@ pub fn config_command(command: &ControlCommand, now: StationNow, shared: Option<
                 Ok(new) => {
                     let secs = if *confirm_secs == 0 { DEFAULT_CONFIRM_SECS } else { (*confirm_secs).clamp(MIN_CONFIRM_SECS, MAX_CONFIRM_SECS) };
                     let pending = PendingFile { old_hash: hash_text(&original), new_hash: hash_text(&new), confirm_secs: secs, by: by.clone(), written_unix: now_unix() };
+                    if let Err(e) = park_local_keys(&config, &original, &changes.value()) {
+                        return Some(result(handle, false, super::fleet::code::UNAVAILABLE, &e));
+                    }
                     match write_with_backup(&config, &original, &new, &pending) {
                         Err(e) => result(handle, false, super::fleet::code::UNAVAILABLE, &e),
                         Ok(()) => {
@@ -979,11 +1024,46 @@ fleet_control = true
     }
 
     #[test]
+    fn switch_to_server_keys_keeps_the_local_k_until_it_is_done() {
+        let dir = std::env::temp_dir().join(format!("park-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml").to_string_lossy().to_string();
+        let base = format!("{BASE}\n[security]\nauthentication = \"optional\"\n\n[[security.subscribers]]\nissi = 100\nk = \"00112233445566778899aabbccddeeff\"\n");
+        let to_server = json!({"keys": {"source": "server", "drop_local_keys": true}});
+        park_local_keys(&cfg, &base, &to_server).unwrap();
+        let parked = read_parked_keys(&cfg).expect("kept");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(parked_keys_path(&cfg)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Back to local keys before the first server authentication: the list returns.
+        let server = apply_changes(&base, &to_server).unwrap();
+        let mut table: Table = toml::from_str(&server).unwrap();
+        apply_key_source(&mut table, &json!({"source": "local"}), None, None, Some(parked.clone())).unwrap();
+        let list = table["security"]["subscribers"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["issi"].as_integer(), Some(100));
+        // A config with its own list keeps it.
+        let mut own: Table = toml::from_str(&base).unwrap();
+        own["security"].as_table_mut().unwrap().insert("key_source".into(), TomlValue::String("server".into()));
+        let two = json!([{"issi": 200, "k": "00112233445566778899aabbccddeeff"}]);
+        let two: TomlValue = toml::Value::try_from(two).unwrap();
+        apply_key_source(&mut own, &json!({"source": "local"}), None, None, Some(two)).unwrap();
+        assert_eq!(own["security"]["subscribers"][0]["issi"].as_integer(), Some(100));
+        // Nothing to keep: no file.
+        std::fs::remove_file(parked_keys_path(&cfg)).unwrap();
+        park_local_keys(&cfg, BASE, &to_server).unwrap();
+        assert!(read_parked_keys(&cfg).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn back_to_local_keys_writes_the_servers_sck_and_cck_into_the_config() {
         let base = format!("{BASE}\n[security]\nkey_source = \"server\"\n\n[security.aie]\nclass = 2\nksg = 1\nsck = \"00000000000000000000\"\n");
         let key = tetra_config::bluestation::SckKey { sckn: 2, vn: 9, key: tetra_config::bluestation::CipherKey([0xAB; 10]) };
         let mut table: Table = toml::from_str(&base).unwrap();
-        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key), None).unwrap();
+        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key), None, None).unwrap();
         let aie = table["security"]["aie"].as_table().unwrap();
         assert_eq!(aie["sck"].as_str(), Some("ABABABABABABABABABAB"), "the radios keep the key they hold");
         assert_eq!((aie["sckn"].as_integer(), aie["sck_vn"].as_integer()), (Some(2), Some(9)));
@@ -992,7 +1072,7 @@ fleet_control = true
         let sc3 = format!("{BASE}\n[security]\nkey_source = \"server\"\n\n[security.aie]\nclass = 3\n");
         let mut table: Table = toml::from_str(&sc3).unwrap();
         let cck = tetra_config::bluestation::SckKey { sckn: 0, vn: 43, key: tetra_config::bluestation::CipherKey([0xCD; 10]) };
-        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key), Some(&cck)).unwrap();
+        apply_key_source(&mut table, &json!({"source": "local"}), Some(&key), Some(&cck), None).unwrap();
         let aie = table["security"]["aie"].as_table().unwrap();
         assert!(!aie.contains_key("sck"));
         assert_eq!(aie["cck"].as_str(), Some("CDCDCDCDCDCDCDCDCDCD"), "class 3 keeps the server's CCK");

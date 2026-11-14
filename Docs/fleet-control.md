@@ -473,6 +473,47 @@ when it matters:
   server sends sets for radios of neighbour stations too); an announced reselection is not
   prepared through the server and falls back to type 2 unprepared.
 
+### Review fixes (phase 8f)
+
+Changes after Patrick's (OE1LHP) review of phase 8.
+
+- **Fallback by the operator.** `FallbackKeys` carries `"forced": true` while the operator has
+  switched the network to its fallback SCK on the server. A class 3 cell holding the fallback
+  SCK then runs class 2 on it (D-CK CHANGE DEMAND "transition to security class 2", EN 300
+  392-7 clause 4.5.6.2) but keeps normal mode (no "system wide services temporarily not
+  supported", no temporary registration). Phase `manual` in `FallbackState`, the period has
+  `"manual": true`. `"forced": false` returns to class 3 (clause 4.5.6.3). If the server goes
+  away during it, the station goes on to the automatic fallback on the same key.
+- **Reason of a fallback.** An automatic period carries `lost_ms`, when the station lost the
+  server (Unix ms); the Security page and the server show it.
+- **Return only on a stable server.** A cell in fallback returns to its class only after the
+  server has been reachable for 60 s without a break, so a flapping link does not switch the
+  radios' keys back and forth.
+- **Data sets expire.** `AuthVectors` sets carry `exp_ms` (the station drops a set unused
+  after it, default 7 days, 1 to 90 on the server) and `rev` (the K revision; sets of an
+  older revision are dropped as soon as one of a newer revision arrives, also late ones).
+  Expired sets are dropped once a minute and the station then sends `AuthStock`. Older servers
+  leave both out: such sets never expire.
+- **Stock file on disk.** `<config>.auth-sets` is written to a temporary file, synced, renamed
+  and the directory synced, so a power cut leaves the old or the new stock, never an empty one.
+- **Two-step switch to server keys.** The hello now also lists `local_issis` (the ISSIs of
+  the own K, never K): the server refuses the switch while it holds no K for one of them. On
+  the switch the station moves its `[[security.subscribers]]` into `<config>.local-keys`
+  (mode 600) instead of deleting them, and deletes that file after the first successful
+  authentication with the server's data. Back to local keys before that, the list returns
+  into the config. With local keys the file is deleted at start. While the file exists the
+  hello reports its radios as `local_keys` / `local_issis` (the server shows "keeps n own keys
+  until the first server authentication").
+- **Security class per radio for the server** (Brew extension `ms-security`, service 0x25,
+  only to a server that offers it): `{"issi":2320001,"class":3,"ksg":1}` when the ciphering of
+  a registration takes effect and when it changes (class 1 clear, 2 SCK, 3 DCK / CCK, EN 300
+  392-7 clause 6.2; `ksg` = KSG number of the ciphering parameters, left out for class 1).
+  While a class 3 cell runs class 2 on the fallback SCK (clause 4.5.6.2, automatic or by the
+  operator) its class 3 radios are reported as class 2, and as class 3 again once the cell is
+  back (clause 4.5.6.3): the radios stay registered, so the station reports the change itself.
+  Every 30 min all classes are sent again.
+  Listed under "Server features" (Security).
+
 ## HTTP API (dashboard)
 
 | Route | Body | Answer |

@@ -59,17 +59,30 @@ pub fn global() -> Handle {
 /// Called once at boot. `server`: `key_source = "server"`, load the stock file next to the config
 /// (`<config>.auth-sets`); else a stock left from earlier is deleted (the station no longer uses
 /// the server's data and must not keep it).
+///
+/// The station's own K list kept from a switch to server keys (`<config>.local-keys`, see
+/// `fleet_config::park_local_keys`) goes with local keys (the config holds the list again); with
+/// server keys it stays until the first authentication with the server's data succeeds.
 pub fn boot(config_path: &str, server: bool) {
     let path = PathBuf::from(format!("{config_path}.auth-sets"));
+    let parked = PathBuf::from(super::fleet_config::parked_keys_path(config_path));
     if !server {
         if std::fs::remove_file(&path).is_ok() {
             tracing::info!("Key management: key source is local, stock of authentication data sets removed");
         }
+        let _ = std::fs::remove_file(&parked);
         return;
     }
     let handle = global();
     let mut s = handle.lock().unwrap_or_else(|e| e.into_inner());
     s.load(path);
+    if let Some(list) = super::fleet_config::read_parked_keys(config_path) {
+        tracing::warn!(
+            "Key management: the station's own {} keys are kept until the first authentication with the server's data",
+            list.as_array().map_or(0, |a| a.len())
+        );
+        s.parked = Some(parked);
+    }
 }
 
 #[derive(Default)]
@@ -77,7 +90,7 @@ pub struct AucStore {
     path: Option<PathBuf>,
     /// Radios the server has a K for (its last `AuthSubscribers`).
     known: BTreeSet<u32>,
-    sets: BTreeMap<u32, VecDeque<AuthVector>>,
+    sets: BTreeMap<u32, VecDeque<StoredSet>>,
     /// Messages for the server, sent by the control worker.
     outbox: Vec<ControlResponse>,
     requested: HashMap<u32, Instant>,
@@ -95,8 +108,39 @@ pub struct AucStore {
     link_up: bool,
     /// The server sent its radio list on this connection (`AuthSubscribers`): its data flows again.
     synced: bool,
+    /// The station's own K list kept from a switch to server keys, removed after the first
+    /// successful authentication with the server's data.
+    parked: Option<PathBuf>,
+    /// When expired sets were last looked for ([`AucStore::expire`]).
+    expiry_checked: Option<Instant>,
     /// Current fallback phase, as MM last set it (`normal` / `fallback` / `returning`).
     phase: String,
+}
+
+/// One set in stock with its end of validity and the K revision it was made from.
+#[derive(Clone, Debug)]
+struct StoredSet {
+    v: AuthVector,
+    exp_ms: u64,
+    rev: u32,
+}
+
+impl StoredSet {
+    fn from_wire(w: &AuthVectorWire) -> Option<Self> {
+        Some(StoredSet { v: w.to_vector()?, exp_ms: w.exp_ms, rev: w.rev })
+    }
+
+    fn wire(&self) -> AuthVectorWire {
+        AuthVectorWire { exp_ms: self.exp_ms, rev: self.rev, ..AuthVectorWire::from_vector(&self.v) }
+    }
+
+    fn valid(&self, now_ms: u64) -> bool {
+        self.exp_ms == 0 || self.exp_ms > now_ms
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -119,6 +163,9 @@ struct FallbackFile {
     reauth_per_s: u8,
     /// Fallback periods not yet confirmed by the server, newest last.
     episodes: Vec<FallbackEpisode>,
+    /// The operator switched the network to the fallback SCK (kept over a restart).
+    #[serde(default)]
+    forced: bool,
 }
 
 impl Default for FallbackFile {
@@ -128,6 +175,7 @@ impl Default for FallbackFile {
             after_s: super::commands::default_fallback_after_s(),
             reauth_per_s: super::commands::default_reauth_per_s(),
             episodes: Vec::new(),
+            forced: false,
         }
     }
 }
@@ -237,8 +285,9 @@ impl AucStore {
             self.sets = f
                 .sets
                 .into_iter()
-                .map(|(issi, v)| (issi, v.iter().filter_map(AuthVectorWire::to_vector).collect()))
+                .map(|(issi, v)| (issi, v.iter().filter_map(StoredSet::from_wire).collect()))
                 .collect();
+            self.drop_expired(now_ms());
             tracing::info!("Key management: {} authentication data sets for {} radios loaded", self.total(), self.sets.len());
             self.sck = f.sck;
             self.cck = f.cck;
@@ -251,7 +300,7 @@ impl AucStore {
         let Some(path) = &self.path else { return };
         let f = File {
             known: self.known.iter().copied().collect(),
-            sets: self.sets.iter().map(|(i, v)| (*i, v.iter().map(AuthVectorWire::from_vector).collect())).collect(),
+            sets: self.sets.iter().map(|(i, v)| (*i, v.iter().map(StoredSet::wire).collect())).collect(),
             sck: self.sck.clone(),
             cck: self.cck.clone(),
             fallback: self.fallback.clone(),
@@ -285,10 +334,51 @@ impl AucStore {
             return;
         }
         self.known.insert(issi);
+        let now = now_ms();
+        let new: Vec<StoredSet> = vectors.iter().filter_map(StoredSet::from_wire).filter(|s| s.valid(now)).collect();
         let q = self.sets.entry(issi).or_default();
-        q.extend(vectors.iter().filter_map(AuthVectorWire::to_vector));
+        // Sets made from an older K revision are no longer good (the radio's K changed).
+        // Sets of an older revision arriving late are not taken either.
+        if let Some(rev) = new.iter().chain(q.iter()).map(|s| s.rev).max() {
+            if q.iter().any(|s| s.rev < rev) {
+                tracing::info!("Key management: K of {} changed (revision {}), older sets dropped", issi, rev);
+                q.retain(|s| s.rev >= rev);
+            }
+            q.extend(new.into_iter().filter(|s| s.rev >= rev));
+        }
+        if q.is_empty() {
+            self.sets.remove(&issi);
+        }
         self.arrived.insert(issi);
         self.save();
+    }
+
+    /// Drop sets whose validity has ended. Returns how many went.
+    fn drop_expired(&mut self, now_ms: u64) -> u32 {
+        let mut n = 0;
+        self.sets.retain(|_, q| {
+            let before = q.len();
+            q.retain(|s| s.valid(now_ms));
+            n += (before - q.len()) as u32;
+            !q.is_empty()
+        });
+        if n > 0 {
+            tracing::info!("Key management: {} authentication data sets expired unused", n);
+            // The server's count of this station's stock is lower now: it tops up.
+            let stock = self.stock();
+            self.outbox.push(stock);
+            self.save();
+        }
+        n
+    }
+
+    /// Drop expired sets, at most once a minute (called from MM's periodic work).
+    pub fn expire(&mut self, now: Instant) {
+        if self.expiry_checked.is_some_and(|t| now.duration_since(t) < Duration::from_secs(60)) {
+            return;
+        }
+        self.expiry_checked = Some(now);
+        self.drop_expired(now_ms());
     }
 
     /// The server has a K for this radio.
@@ -296,12 +386,15 @@ impl AucStore {
         self.known.contains(&issi)
     }
 
+    /// Sets still valid for `issi`.
     pub fn count(&self, issi: u32) -> u32 {
-        self.sets.get(&issi).map_or(0, |q| q.len() as u32)
+        let now = now_ms();
+        self.sets.get(&issi).map_or(0, |q| q.iter().filter(|s| s.valid(now)).count() as u32)
     }
 
     pub fn total(&self) -> u32 {
-        self.sets.values().map(|q| q.len() as u32).sum()
+        let now = now_ms();
+        self.sets.values().map(|q| q.iter().filter(|s| s.valid(now)).count() as u32).sum()
     }
 
     pub fn known_count(&self) -> u32 {
@@ -309,13 +402,15 @@ impl AucStore {
     }
 
     /// One set for an authentication of `issi` (removed from the stock).
+    /// Expired sets are skipped and dropped.
     pub fn take(&mut self, issi: u32) -> Option<AuthVector> {
+        self.drop_expired(now_ms());
         let v = self.sets.get_mut(&issi)?.pop_front()?;
         if self.sets.get(&issi).is_some_and(|q| q.is_empty()) {
             self.sets.remove(&issi);
         }
         self.save();
-        Some(v)
+        Some(v.v)
     }
 
     /// Ask the server for sets of `issi` (at most every 5 s). Returns true when a request went out.
@@ -329,14 +424,37 @@ impl AucStore {
     }
 
     /// Tell the server that one set of `issi` was used.
+    /// The first success completes a switch to server keys: the station's own K list goes.
     pub fn report(&mut self, issi: u32, rs: &[u8; 10], ok: bool, mutual: bool) {
         let left = Some(self.count(issi));
         self.outbox.push(ControlResponse::AuthReport { issi, rs: hex(rs), ok, mutual, left });
+        if ok && let Some(path) = self.parked.take() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => tracing::warn!("Key management: first authentication with the server's data succeeded (ISSI {}), the station's own keys removed", issi),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!("Key management: cannot remove {}: {}", path.display(), e);
+                    self.parked = Some(path);
+                }
+            }
+        }
+    }
+
+    /// The station still keeps its own K list from a switch to server keys.
+    pub fn keeps_local_keys(&self) -> bool {
+        self.parked.is_some()
     }
 
     /// The stock per radio, for the server.
     pub fn stock(&self) -> ControlResponse {
-        ControlResponse::AuthStock { counts: self.sets.iter().map(|(i, q)| IssiCount { issi: *i, count: q.len() as u32 }).collect() }
+        let now = now_ms();
+        let counts = self
+            .sets
+            .iter()
+            .map(|(i, q)| IssiCount { issi: *i, count: q.iter().filter(|s| s.valid(now)).count() as u32 })
+            .filter(|c| c.count > 0)
+            .collect();
+        ControlResponse::AuthStock { counts }
     }
 
     /// A class 3 radio authenticated here: its DCK goes to the server (`dck-v1`).
@@ -385,9 +503,10 @@ impl AucStore {
     }
 
     /// `FallbackKeys` from the server. Returns the state for the server.
-    pub fn set_fallback(&mut self, key: Option<SckWire>, after_s: u32, reauth_per_s: u8) -> ControlResponse {
+    pub fn set_fallback(&mut self, key: Option<SckWire>, after_s: u32, reauth_per_s: u8, forced: bool) -> ControlResponse {
         let key = key.filter(|k| matches!(k.sckn, 31 | 32) && sck_key(k).is_some());
         self.fallback.key = key;
+        self.fallback.forced = forced;
         self.fallback.after_s = after_s.clamp(60, 3600);
         self.fallback.reauth_per_s = reauth_per_s.clamp(1, 20);
         let state = self.fallback_state();
@@ -400,6 +519,11 @@ impl AucStore {
     /// The fallback SCK (SCKN 31 or 32) the server sent.
     pub fn fallback_key(&self) -> Option<SckKey> {
         self.fallback.key.as_ref().and_then(sck_key)
+    }
+
+    /// The operator asked for class 2 on the fallback SCK.
+    pub fn fallback_forced(&self) -> bool {
+        self.fallback.forced
     }
 
     /// How long without the server before a cell may go to fallback.
@@ -415,10 +539,21 @@ impl AucStore {
     /// MM changed the fallback phase. `episode`: start (`Some(from)` without `to`) or end of a
     /// period. The state goes to the server (dropped while it is away; it gets the periods with
     /// the answer to its next `FallbackKeys`).
-    pub fn fallback_phase(&mut self, phase: &str, start: Option<(u64, bool)>, end: Option<(u64, u32)>) {
+    pub fn fallback_phase(&mut self, phase: &str, start: Option<(u64, bool, bool)>, end: Option<(u64, u32)>) {
+        self.fallback_phase_lost(phase, start, None, end);
+    }
+
+    /// Like [`Self::fallback_phase`], with the reason of an automatic fallback: when the key
+    /// server was lost (Unix ms). A running operator fallback that becomes automatic gets it too.
+    pub fn fallback_phase_lost(&mut self, phase: &str, start: Option<(u64, bool, bool)>, lost_ms: Option<u64>, end: Option<(u64, u32)>) {
         self.phase = phase.to_string();
-        if let Some((from_ms, class2)) = start {
-            self.fallback.episodes.push(FallbackEpisode { from_ms, to_ms: None, class2, temporary: 0 });
+        if let (None, Some(lost)) = (start, lost_ms)
+            && let Some(e) = self.fallback.episodes.iter_mut().rev().find(|e| e.to_ms.is_none())
+        {
+            e.lost_ms = Some(lost);
+        }
+        if let Some((from_ms, class2, manual)) = start {
+            self.fallback.episodes.push(FallbackEpisode { from_ms, to_ms: None, class2, temporary: 0, manual, lost_ms });
             let n = self.fallback.episodes.len();
             if n > EPISODES_KEPT {
                 self.fallback.episodes.drain(..n - EPISODES_KEPT);
@@ -668,13 +803,20 @@ impl AuthVectorWire {
     }
 
     pub fn from_vector(v: &AuthVector) -> Self {
-        AuthVectorWire { rs: hex(&v.rs), ks: hex(&v.ks), ks_p: hex(&v.ks_p) }
+        AuthVectorWire { rs: hex(&v.rs), ks: hex(&v.ks), ks_p: hex(&v.ks_p), exp_ms: 0, rev: 0 }
     }
 }
 
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_private_file(path, bytes)
+}
+
+/// Write a file readable by the owner only (mode 600), atomically and on disk.
+pub(crate) fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("auth-sets.tmp");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -684,8 +826,16 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     let mut f = opts.open(&tmp)?;
     f.write_all(bytes)?;
+    // On disk before the rename, and the rename itself on disk (a power cut on a Pi must not
+    // leave an empty or old stock behind).
+    f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -730,6 +880,67 @@ mod tests {
         // No K at the server: an empty answer.
         s.add(2, &[]);
         assert!(!s.is_known(2));
+    }
+
+    #[test]
+    fn expired_sets_are_not_used() {
+        let k: AuthKey = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let mut s = AucStore::default();
+        s.subscribers(&[1], &[]);
+        let now = now_ms();
+        let old = AuthVectorWire { exp_ms: now - 1, ..wire(&k, 1) };
+        let good = AuthVectorWire { exp_ms: now + 60_000, ..wire(&k, 2) };
+        s.add(1, &[old.clone(), good]);
+        assert_eq!(s.count(1), 1, "an expired set never enters the stock");
+        // A set that expires while in stock is skipped.
+        s.sets.get_mut(&1).unwrap().push_front(StoredSet::from_wire(&old).unwrap());
+        assert_eq!(s.count(1), 1);
+        assert!(matches!(s.stock(), ControlResponse::AuthStock { counts } if counts == vec![IssiCount { issi: 1, count: 1 }]));
+        assert_eq!(s.take(1).unwrap().rs, [2; 10]);
+        assert!(s.take(1).is_none());
+    }
+
+    #[test]
+    fn a_newer_k_revision_drops_the_older_sets() {
+        let k: AuthKey = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let mut s = AucStore::default();
+        s.subscribers(&[1], &[]);
+        s.add(1, &[AuthVectorWire { rev: 1, ..wire(&k, 1) }, AuthVectorWire { rev: 1, ..wire(&k, 2) }]);
+        s.add(1, &[AuthVectorWire { rev: 2, ..wire(&k, 3) }]);
+        assert_eq!(s.count(1), 1);
+        assert_eq!(s.take(1).unwrap().rs, [3; 10]);
+        // A late set of the old revision is not taken.
+        s.add(1, &[AuthVectorWire { rev: 2, ..wire(&k, 4) }]);
+        s.add(1, &[AuthVectorWire { rev: 1, ..wire(&k, 5) }]);
+        assert_eq!(s.count(1), 1);
+        assert_eq!(s.take(1).unwrap().rs, [4; 10]);
+    }
+
+    #[test]
+    fn the_first_server_authentication_removes_the_kept_local_keys() {
+        let dir = std::env::temp_dir().join(format!("auc-park-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parked = dir.join("config.toml.local-keys");
+        std::fs::write(&parked, "x").unwrap();
+        let mut s = AucStore { parked: Some(parked.clone()), ..Default::default() };
+        s.report(1, &[0; 10], false, false);
+        assert!(parked.exists() && s.keeps_local_keys(), "a failed authentication keeps them");
+        s.report(1, &[0; 10], true, false);
+        assert!(!parked.exists() && !s.keeps_local_keys());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_fallback_episode_carries_its_reason() {
+        let mut s = AucStore::default();
+        s.fallback_phase("manual", Some((1000, true, true)), None);
+        assert_eq!(s.fallback.episodes[0].lost_ms, None, "operator: no lost server");
+        // The server goes away during the operator's fallback: the episode gets the reason.
+        s.fallback_phase_lost("fallback", None, Some(900), None);
+        s.fallback_phase("normal", None, Some((2000, 0)));
+        s.fallback_phase_lost("fallback", Some((3000, false, false)), Some(2500), None);
+        let e: Vec<_> = s.fallback.episodes.iter().map(|e| (e.manual, e.lost_ms)).collect();
+        assert_eq!(e, vec![(true, Some(900)), (false, Some(2500))]);
     }
 
     #[test]

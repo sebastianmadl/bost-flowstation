@@ -25,6 +25,9 @@ pub const SETS_WAIT: Duration = Duration::from_secs(30);
 pub const REAUTH_SETTLE: Duration = Duration::from_secs(5);
 /// Longest return phase; then the cell goes back to normal mode in any case.
 pub const RETURN_MAX: Duration = Duration::from_secs(120);
+/// 8f: a cell in fallback returns to its class only after the server has been reachable this
+/// long without a break (a flapping link must not switch the radios' keys back and forth).
+pub const STABLE_BEFORE_RETURN: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Phase {
@@ -102,6 +105,11 @@ impl KeyFallback {
             Phase::Fallback => "fallback",
             Phase::Returning { .. } => "returning",
         }
+    }
+
+    /// How long the server has been unreachable (as last seen by [`Self::step`]).
+    pub fn lost_for(&self, now: Instant) -> Option<Duration> {
+        self.lost_since.map(|t| now.duration_since(t))
     }
 
     /// The server is unreachable now (as last seen by [`Self::step`]).
@@ -205,6 +213,9 @@ impl KeyFallback {
                 if last_sent.is_some_and(|t| now.duration_since(t) < REAUTH_SETTLE) {
                     return Action::None;
                 }
+                if fallback && now.duration_since(since) < STABLE_BEFORE_RETURN {
+                    return Action::None;
+                }
                 self.finish(fallback)
             }
         }
@@ -303,7 +314,11 @@ mod tests {
         assert_eq!(f.step(t + Duration::from_millis(500), true, true, AFTER, 2), Action::Reauth(200));
         // Temporary radios register again by themselves (16.4.8): not in the queue.
         assert_eq!(f.step(t + Duration::from_millis(1000), true, true, AFTER, 2), Action::None);
-        assert_eq!(f.step(t + Duration::from_millis(500) + REAUTH_SETTLE, true, true, AFTER, 2), Action::Back { fallback: true });
+        // Re-authentication done, but the server is back for less than a minute: the cell stays.
+        assert_eq!(f.step(t + Duration::from_millis(500) + REAUTH_SETTLE, true, true, AFTER, 2), Action::None);
+        assert!(f.active());
+        assert_eq!(f.step(back + STABLE_BEFORE_RETURN - Duration::from_millis(1), true, true, AFTER, 2), Action::None);
+        assert_eq!(f.step(back + STABLE_BEFORE_RETURN, true, true, AFTER, 2), Action::Back { fallback: true });
         assert!(!f.active());
         assert_eq!(f.temporary_count(), 0);
     }
@@ -316,7 +331,27 @@ mod tests {
         f.note_starved();
         f.step(t0 + AFTER, false, false, AFTER, 2);
         f.step(t0 + AFTER, true, false, AFTER, 2);
-        assert_eq!(f.step(t0 + AFTER + SETS_WAIT, true, false, AFTER, 2), Action::Back { fallback: true });
+        assert_eq!(f.step(t0 + AFTER + SETS_WAIT, true, false, AFTER, 2), Action::None, "a minute of stable server first");
+        assert_eq!(f.step(t0 + AFTER + STABLE_BEFORE_RETURN, true, false, AFTER, 2), Action::Back { fallback: true });
+    }
+
+    #[test]
+    fn a_flapping_server_keeps_the_cell_in_fallback() {
+        let mut f = KeyFallback::default();
+        let t0 = Instant::now();
+        f.step(t0, false, false, AFTER, 2);
+        f.note_starved();
+        assert_eq!(f.step(t0 + AFTER, false, false, AFTER, 2), Action::Enter);
+        let mut t = t0 + AFTER;
+        // Up 50 s, down, up 50 s, down: never back.
+        for _ in 0..3 {
+            assert_eq!(f.step(t, true, true, AFTER, 2), Action::Returning);
+            assert_eq!(f.step(t + Duration::from_secs(50), true, true, AFTER, 2), Action::None);
+            assert_eq!(f.step(t + Duration::from_secs(51), false, false, AFTER, 2), Action::Lost);
+            t += Duration::from_secs(52);
+        }
+        assert!(f.active());
+        assert!(f.lost_for(t).is_some());
     }
 
     #[test]

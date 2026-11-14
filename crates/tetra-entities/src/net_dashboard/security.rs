@@ -221,7 +221,8 @@ fn key_fallback_json(cfg: &tetra_config::bluestation::StackConfig, shared: &tetr
     if let Some(o) = v.as_object_mut() {
         let run = shared.state_read().key_fallback.clone();
         o.insert("active".into(), run.is_some().into());
-        o.insert("class2".into(), run.is_some_and(|r| r.sck.is_some() && r.back_at.is_none()).into());
+        o.insert("class2".into(), run.as_ref().is_some_and(|r| r.sck.is_some() && r.back_at.is_none()).into());
+        o.insert("manual".into(), run.is_some_and(|r| r.manual).into());
     }
     v
 }

@@ -84,6 +84,15 @@ pub fn offered(server_extensions: &[String]) -> bool {
 pub fn station_hello(shared: &SharedConfig) -> ControlResponse {
     let cfg = shared.config();
     let enabled = shared.state_read().fleet_control.enabled;
+    let local: Vec<u32> = if cfg.security.key_source == tetra_config::bluestation::KeySource::Server {
+        // Kept from a switch to server keys not yet completed.
+        super::fleet_config::config_path()
+            .and_then(|c| super::fleet_config::read_parked_keys(&c))
+            .and_then(|l| l.as_array().map(|a| a.iter().filter_map(|e| e.get("issi").and_then(|i| i.as_integer())).map(|i| i as u32).collect()))
+            .unwrap_or_default()
+    } else {
+        cfg.security.subscribers.iter().map(|s| s.issi).collect()
+    };
     ControlResponse::StationHello {
         protocol: FLEET_PROTOCOL,
         version: tetra_core::STACK_VERSION.to_string(),
@@ -95,7 +104,8 @@ pub fn station_hello(shared: &SharedConfig) -> ControlResponse {
         config_hash: if enabled { super::fleet_config::current_hash() } else { None },
         config_pending: if enabled { super::fleet_config::pending_secs() } else { None },
         key_source: Some(cfg.security.key_source.as_str().to_string()),
-        local_keys: Some(cfg.security.subscribers.len() as u32),
+        local_keys: Some(local.len() as u32),
+        local_issis: Some(local),
     }
 }
 
@@ -500,6 +510,7 @@ mod tests {
             config_pending: None,
             key_source: None,
             local_keys: None,
+            local_issis: None,
         };
         let json: serde_json::Value = serde_json::from_slice(&codec.encode_response(&hello)).unwrap();
         assert_eq!(
