@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 /// Security class of one registration: 1 = clear, 2 = SCK, 3 = DCK / CCK (EN 300 392-7
-/// clause 6.2), and the KSG number of the ciphering parameters for classes 2 and 3 (Table A.3:
-/// 0 = TEA1 … 6 = TEA7, 8 to 11 proprietary).
+/// clause 6.2), and the KSG number of the ciphering parameters for classes 2 and 3
+/// (EN 300 392-7 table 6.2: 0 to 3 = TEA1 to TEA4, 4 to 7 reserved, 8 to 15 proprietary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MsSecurity {
     pub class: u8,
