@@ -4,8 +4,6 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
-> **Nota sobre el cifrado.** El cifrado de la interfaz aire de este proyecto (TEA, clase de seguridad 3, E2EE) proviene de colaboradores y de FlowStation upstream. El parche SC3 (PR #47) fue un parche aportado que el mantenedor de este fork solo envió. La gestión o distribución de claves a través de un servidor no forma parte de este proyecto y no se añadirá. Por favor, no amplíes el cifrado ni construyas una gestión de claves en el servidor sobre este código: puede poner en peligro a todas las personas que participan en su desarrollo.
-
 ## Sin publicar — Fleet Control (fases 1 a 7)
 
 - **Corrección: invitado de Multi Network que vuelve a su propia red.** Al pasar el MTP de la celda de otra red (como invitado, con (V)ASSI) a la celda de su propia red en la misma estación, la celda de invitado no se daba cuenta: el servidor Brew avisa «la radio se registró en otra parte» con la ISSI propia, y allí la radio solo existía con su (V)ASSI. El registro viejo quedaba unos 30 a 50 s hasta la comprobación de presencia. Ahora la celda reconoce la (V)ASSI del aviso, quita el registro enseguida y libera la (V)ASSI, que tras la migración ya no es válida (TS 100 392-2 cláusula 16.4.7.1). Además, una (V)ASSI que la comprobación de presencia ya había dado de baja ya no se da de baja una segunda vez al migrar de nuevo (esa segunda baja llegaba al servidor con la (V)ASSI sin traducir), y la reselección y el RSSI de un invitado van al servidor con su ISSI propia.

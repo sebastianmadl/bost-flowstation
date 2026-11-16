@@ -21,10 +21,6 @@
 //! Note for amateur use: authentication is an access-control handshake and is
 //! fine on amateur allocations; air-interface *encryption* is not permitted
 //! under amateur licences and must only be enabled on licensed private networks.
-//!
-//! Note: this fork does not extend the encryption code and does not add key management or key
-//! distribution through a server; please do not build that on top of it, it can put everyone
-//! involved in its development at risk. See the note at the top of `CHANGELOG_en.md`.
 
 #![forbid(unsafe_code)]
 

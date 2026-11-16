@@ -9,10 +9,6 @@
 //! `mutual_authentication` keys inside `[security]`, and regenerates the `[security.aie]`
 //! table and the `[[security.subscribers]]` array, preserving everything else the operator
 //! wrote by hand. A `.security.bak` backup is made first.
-//!
-//! Note: this fork does not extend the encryption code and does not add key management or key
-//! distribution through a server; please do not build that on top of it, it can put everyone
-//! involved in its development at risk. See the note at the top of `CHANGELOG_en.md`.
 
 use tetra_config::bluestation::sec_security::{AuthenticationMode, CfgSecurity, parse_hex};
 
