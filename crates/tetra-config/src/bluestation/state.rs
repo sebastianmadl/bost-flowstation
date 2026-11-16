@@ -270,6 +270,23 @@ pub struct WxRuntimeOverride {
     pub periodic_interval_secs: u64,
 }
 
+/// Runtime override for the APRS weather service (`[aprs_wx]`), edited from the dashboard.
+///
+/// Mirrors `[aprs_wx]`. When `Some`, it takes precedence over the config so edits apply
+/// immediately without a restart; the dashboard also writes the values back to the TOML.
+/// The aprs.fi API key is kept as a plain `String` here (in-memory only).
+#[derive(Debug, Clone, Default)]
+pub struct AprsWxRuntimeOverride {
+    pub apikey: String,
+    pub default_call: String,
+    pub max_age_secs: u64,
+    pub periodic_enabled: bool,
+    pub periodic_call: String,
+    pub periodic_dest: u32,
+    pub periodic_is_group: bool,
+    pub periodic_interval_secs: u64,
+}
+
 /// Runtime override for Telegram alerts, edited from the dashboard.
 ///
 /// Mirrors the editable `[telegram_alerts]` config. When `Some`, it takes precedence over the
@@ -607,6 +624,17 @@ impl Default for Sc3Status {
     fn default() -> Self { Self { phase: "not_authenticated", cck: "not_sent" } }
 }
 
+/// Fleet Control state shared by the control worker and the dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FleetControlState {
+    /// The local switch (`[command] fleet_control`); the dashboard changes it at run time.
+    pub enabled: bool,
+    /// The control server offered `fleet-control` (`X-Brew-Extensions`) on its last connect.
+    pub offered: bool,
+    /// The control channel is connected now.
+    pub connected: bool,
+}
+
 /// Mutable, stack-editable state (mutex-protected).
 #[derive(Debug, Clone)]
 pub struct StackState {
@@ -618,6 +646,8 @@ pub struct StackState {
     /// Brew extensions (`X-Brew-Extensions`) the server offered on the last connect, for the
     /// dashboard's Roaming page.
     pub brew_server_extensions: Vec<String>,
+    /// Fleet Control: the local switch and what the control channel reports.
+    pub fleet_control: FleetControlState,
     /// The Brew server's cell directory as last received (`None` until one arrives on this
     /// connection, or when the server does not offer `cell-directory`).
     pub brew_cell_directory: Option<Vec<BrewDirectoryCell>>,
@@ -656,6 +686,8 @@ pub struct StackState {
     pub issi_whitelist_override: Option<Vec<u32>>,
     /// Runtime override for the WX/METAR service (dashboard toggle). See WxRuntimeOverride.
     pub wx_override: Option<WxRuntimeOverride>,
+    /// Runtime override for the APRS weather service. See AprsWxRuntimeOverride.
+    pub aprs_wx_override: Option<AprsWxRuntimeOverride>,
     /// Runtime override for Telegram alerts (dashboard editing). See TelegramRuntimeOverride.
     pub telegram_override: Option<TelegramRuntimeOverride>,
     /// Runtime override for DAPNET settings (dashboard editing). See DapnetRuntimeOverride.
@@ -881,6 +913,7 @@ impl Default for StackState {
             network_connected: false,
             brew_link_up: false,
             brew_server_extensions: Vec::new(),
+            fleet_control: FleetControlState::default(),
             brew_cell_directory: None,
             brew_group_access: BTreeMap::new(),
             brew_managed_groups: None,
@@ -894,6 +927,7 @@ impl Default for StackState {
             next_live_sds_id: 1,
             issi_whitelist_override: None,
             wx_override: None,
+            aprs_wx_override: None,
             telegram_override: None,
             dapnet_override: None,
             geoalarm_override: None,

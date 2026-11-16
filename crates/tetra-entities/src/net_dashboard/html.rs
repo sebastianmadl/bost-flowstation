@@ -1418,6 +1418,11 @@ td code{
 .roam-feat i{width:7px;height:7px;border-radius:50%;flex:none;}
 .roam-feat i.on{background:var(--accent);}
 .roam-feat i.off{background:var(--danger);}
+.roam-fleet{display:flex;align-items:center;gap:12px;margin:10px 0 4px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;}
+.roam-fleet .rf-text{flex:1;min-width:0;line-height:1.35;}
+.roam-fleet .rf-sub{display:block;font-size:11.5px;color:var(--muted);}
+.hw-row--fleet{cursor:pointer;}
+.hw-row--fleet .hw-glyph{color:var(--accent2);background:color-mix(in srgb,var(--accent2) 12%,transparent);}
 .badge-red{background:rgba(255,77,109,0.1);color:var(--danger);border-color:rgba(255,77,109,0.3);}
 /* Emergency call (ETSI call priority 15): solid danger fill + pulsing halo for high visibility. */
 .badge-emergency{background:var(--danger);color:#fff;border-color:var(--danger);font-weight:700;letter-spacing:0.06em;animation:badge-emergency-pulse 1s ease-in-out infinite;}
@@ -1439,6 +1444,7 @@ tr.row-emergency td:first-child{box-shadow:inset 3px 0 0 var(--danger);}
 .btn-primary:hover{background:rgba(0,212,168,0.18);border-color:var(--accent);}
 .btn-danger{color:var(--text2);}
 .btn-danger:hover{border-color:var(--danger);color:var(--danger);background:rgba(255,77,109,0.06);}
+.btn-danger-solid,.btn-danger-solid:hover{background:var(--danger);border-color:var(--danger);color:#fff;}
 .btn-warn:hover{border-color:var(--warn);color:var(--warn);}
 .btn-sm{padding:3px 8px;font-size:10px;}
 
@@ -1693,6 +1699,9 @@ tr.row-emergency td:first-child{box-shadow:inset 3px 0 0 var(--danger);}
 }
 .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;}
 .form-row{margin-bottom:12px;}
+.wx-src{font-size:12px;color:var(--muted);}
+.wx-src a{color:var(--accent);text-decoration:underline;text-underline-offset:2px;}
+@media (max-width:700px){.wx-subcard>.card-head{flex-direction:column;align-items:flex-start;gap:2px;}.wx-subcard>.card-head .card-actions{margin-left:0;}}
 .form-label{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text3);display:block;margin-bottom:5px;}
 .form-input{
   width:100%;background:var(--bg3);border:1px solid var(--border2);
@@ -2770,6 +2779,17 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
   animation:fs-breathe 2.5s ease-in-out infinite;
 }
 @keyframes fs-breathe{0%,100%{opacity:1;}50%{opacity:.45;}}
+/* Fleet Control maintenance / live update: loud, solid red, on every page under the topbar. */
+.maint-banner{
+  display:flex;align-items:center;gap:14px;flex-shrink:0;
+  padding:14px 20px;background:#c62828;color:#fff;
+  border-bottom:3px solid #8e0000;
+  background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.07) 0 14px,transparent 14px 28px);
+}
+.maint-banner .maint-ico{width:26px;height:26px;flex-shrink:0;color:#fff;}
+.maint-banner .maint-title{font-size:16px;font-weight:800;letter-spacing:.02em;text-transform:uppercase;}
+.maint-banner .maint-sub{font-size:13px;font-weight:500;opacity:.95;margin-top:3px;}
+@media (max-width:640px){.maint-banner{padding:10px 12px;gap:10px;}.maint-banner .maint-title{font-size:14px;}.maint-banner .maint-sub{font-size:12px;}}
 
 /* ── Empty state (one component for the duplicated stubs) ──
    v3 flex layout; keeps the legacy .empty-icon/.empty-text children working
@@ -3060,6 +3080,12 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
   }
   #page-config .card:has(#wx-enabled) .group-list .field .field-control:has(.sw){
     max-width:none;flex-wrap:wrap;justify-content:flex-end;
+  }
+  #page-config .card:has(#wx-enabled) .group-list .field .field-control:has(#aprswx-apikey){
+    max-width:none;flex:1 1 100%;flex-wrap:nowrap;justify-content:flex-end;gap:8px;
+  }
+  #page-config .card:has(#wx-enabled) .group-list .field .field-control #aprswx-apikey{
+    flex:1 1 auto;min-width:0;
   }
   /* Remote toolbars: stack on phone */
   #page-config .remote-add-row,
@@ -4062,6 +4088,19 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           <span class="hw-val" id="health-badge-label">—</span>
         </span>
       </div>
+      <div id="fleet-badge" class="hw-row hw-row--fleet" style="display:none" title="Fleet Control" onclick="showPage('roaming',document.getElementById('nav-roaming'))">
+        <span class="hw-glyph" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>
+          </svg>
+        </span>
+        <span class="hw-meta">
+          <span class="hw-key" data-i18n="fleet_key">FLEET CONTROL</span>
+          <span class="hw-val" id="fleet-badge-label">—</span>
+        </span>
+      </div>
       <div id="pwr-badge" class="hw-row hw-row--pwr" style="display:none" title="Host system power draw" data-i18n-title="ui_host_system_power_draw">
         <span class="hw-glyph" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -4362,6 +4401,16 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
       </div>
       <!-- Login: shown only in anonymous public-overview mode (FH-FEAT-033). -->
       <button class="logout-btn" id="login-btn" onclick="window.location='/login'" title="Log in" aria-label="Log in" style="display:none"><span class="ico18" data-icon="login"></span></button>
+    </div>
+  </div>
+
+  <!-- Fleet Control: maintenance by the server / live update with RF on (Docs/fleet-control.md).
+       Shown on every page while the server's flag is on or a live update runs. -->
+  <div id="maint-banner" class="maint-banner" role="alert" style="display:none">
+    <span class="maint-ico" data-icon="alert"></span>
+    <div class="banner-body">
+      <div class="maint-title" id="maint-title"></div>
+      <div class="maint-sub" id="maint-sub"></div>
     </div>
   </div>
 
@@ -4779,7 +4828,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 <th data-i18n="th_type">Type</th>
                 <th data-i18n="th_caller">Caller</th>
                 <th data-i18n="th_dest">Destination</th>
-                <th class="col-mobile-hide" data-i18n="th_speaker">Speaker</th>
+                <th data-i18n="th_speaker">Speaker</th>
                 <th data-i18n="th_duration">Duration</th>
               </tr></thead>
               <tbody id="calls-tbody"></tbody>
@@ -6073,29 +6122,35 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
       </div>
 
-      <!-- ── WX / METAR SERVICE ──
-           Built-in weather responder. On-demand: a radio SDSes "METAR <ICAO>" to the
-           service ISSI and gets a decoded reply. Periodic: auto-sends a station's METAR
-           to a chosen ISSI/GSSI at an interval. Toggles + targets editable here; applies
-           instantly and persists to config.toml. -->
-      <div class="section-label" data-i18n="cfg_sec_wx">WX / METAR</div>
+      <!-- ── WX SERVICE (METAR / APRS) ──
+           Built-in weather responder, one card with three blocks:
+           General  – on/off and service ISSI ([wx_service]), shared by both sources.
+           METAR    – periodic METAR send ([wx_service]).
+           APRS     – aprs.fi weather station: API key, default station, periodic send ([aprs_wx]).
+           One Save button stores both sections; changes apply instantly and persist to
+           config.toml. The aprs.fi API key is never sent back to the browser. -->
+      <div class="section-label" data-i18n="cfg_sec_wx">WX / METAR / APRS</div>
       <div class="card">
         <div class="card-head">
-          <div class="card-title" data-i18n="wx_title">WX / METAR Service</div>
+          <div class="card-title" data-i18n="wx_title">WX Service (METAR / APRS)</div>
           <div class="card-actions">
             <button class="btn btn-primary" onclick="saveWx()"><span class="btn-icon" data-icon="save"></span><span data-i18n="save">Save</span></button>
           </div>
         </div>
         <div class="card-body">
           <div style="color:var(--muted);font-size:13px;margin-bottom:14px" data-i18n="wx_help">
-            Built-in weather service. Radios send an SDS like "METAR LROP" to the service
-            ISSI to get a decoded report. Optionally auto-send a fixed station's METAR to an
-            ISSI or talkgroup at a set interval. Data from aviationweather.gov.
+            Built-in weather service. Radios send an SDS to the service ISSI: "METAR &lt;ICAO&gt;" or "APRSWX &lt;CALL&gt;".
           </div>
 
-          <div class="group-list" style="margin-bottom:18px">
+          <div class="card wx-subcard" style="margin-bottom:12px">
+            <div class="card-head">
+              <div class="card-title" data-i18n="wx_sec_general">General</div>
+              <div class="card-actions"><span class="wx-src"><span data-i18n="wx_sec_general_note">applies to METAR and APRS</span></span></div>
+            </div>
+            <div class="card-body">
+          <div class="group-list">
             <label class="field" style="cursor:pointer">
-              <span class="field-label" data-i18n="wx_enabled">Enable on-demand METAR responder</span>
+              <span class="field-label" data-i18n="wx_enabled">Enable on-demand weather responder (METAR, APRS)</span>
               <span class="field-control"><span class="sw"><input type="checkbox" id="wx-enabled"><i></i></span></span>
             </label>
             <div class="field">
@@ -6104,7 +6159,14 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                      placeholder="9998" style="width:160px"></span>
             </div>
           </div>
-
+            </div>
+          </div>
+          <div class="card wx-subcard" style="margin-bottom:12px">
+            <div class="card-head">
+              <div class="card-title" data-i18n="wx_sec_metar">METAR</div>
+              <div class="card-actions"><span class="wx-src"><span data-i18n="wx_sec_metar_note">airport weather from aviationweather.gov</span></span></div>
+            </div>
+            <div class="card-body">
           <div class="group-list">
             <label class="field" style="cursor:pointer">
               <span class="field-label" data-i18n="wx_periodic_enabled">Enable periodic auto-broadcast</span>
@@ -6128,7 +6190,59 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
             <div class="field">
               <span class="field-label" data-i18n="wx_periodic_interval">Interval (seconds)</span>
               <span class="field-control"><input type="number" id="wx-periodic-interval" class="form-input" min="300" placeholder="1800" style="width:160px"></span>
-              <span class="field-hint" data-i18n="wx_interval_hint">Minimum 300 s (5 min) to avoid hammering the weather API.</span>
+            </div>
+          </div>
+            </div>
+          </div>
+          <div class="card wx-subcard" style="margin-bottom:12px">
+            <div class="card-head">
+              <div class="card-title" data-i18n="wx_sec_aprs">APRS</div>
+              <div class="card-actions"><span class="wx-src"><span data-i18n="wx_sec_aprs_note">APRS/CWOP stations from</span> <a href="https://aprs.fi" target="_blank" rel="noopener">aprs.fi</a></span></div>
+            </div>
+            <div class="card-body">
+          <div id="aprswx-nokey" style="display:none;color:var(--warn);font-size:12px;font-weight:600;margin:0 0 10px" data-i18n="aprswx_nokey">No API key saved – "APRSWX" requests are not answered.</div>
+          <div class="group-list" style="margin-bottom:12px">
+            <div class="field">
+              <span class="field-label" data-i18n="aprswx_apikey">aprs.fi API key</span>
+              <span class="field-control">
+                <input type="password" id="aprswx-apikey" class="form-input" autocomplete="new-password" spellcheck="false" style="width:260px">
+                <button type="button" class="btn btn-sm" id="aprswx-apikey-clear" onclick="clearAprsWxKey()" style="display:none" data-i18n="aprswx_apikey_clear">Remove</button>
+              </span>
+            </div>
+            <div class="field">
+              <span class="field-label" data-i18n="aprswx_default_call">Default station</span>
+              <span class="field-control"><input type="text" id="aprswx-default-call" class="form-input" maxlength="12" placeholder="CALL-13" spellcheck="false" style="text-transform:uppercase;width:160px"></span>
+            </div>
+            <div class="field">
+              <span class="field-label" data-i18n="aprswx_max_age">Mark reports older than (seconds)</span>
+              <span class="field-control"><input type="number" id="aprswx-max-age" class="form-input" min="0" placeholder="3600" style="width:160px"></span>
+            </div>
+          </div>
+          <div class="group-list">
+            <label class="field" style="cursor:pointer">
+              <span class="field-label" data-i18n="wx_periodic_enabled">Enable periodic auto-broadcast</span>
+              <span class="field-control"><span class="sw"><input type="checkbox" id="aprswx-periodic-enabled"><i></i></span></span>
+            </label>
+            <div class="field">
+              <span class="field-label" data-i18n="aprswx_periodic_call">Station for periodic send</span>
+              <span class="field-control"><input type="text" id="aprswx-periodic-call" class="form-input" maxlength="12" spellcheck="false" style="text-transform:uppercase;width:160px"></span>
+            </div>
+            <div class="field">
+              <span class="field-label" data-i18n="wx_periodic_dest">Destination</span>
+              <span class="field-control"><input type="number" id="aprswx-periodic-dest" class="form-input" min="1" max="16777215" placeholder="ISSI or GSSI" style="width:160px" data-i18n-placeholder="ui_issi_or_gssi"></span>
+            </div>
+            <label class="field" style="cursor:pointer">
+              <span class="field-label" data-i18n="wx_periodic_isgroup">Destination is group</span>
+              <span class="field-control">
+                <span style="color:var(--muted);font-size:12px" data-i18n="wx_periodic_isgroup_hint">(GSSI instead of individual ISSI)</span>
+                <span class="sw"><input type="checkbox" id="aprswx-periodic-isgroup"><i></i></span>
+              </span>
+            </label>
+            <div class="field">
+              <span class="field-label" data-i18n="wx_periodic_interval">Interval (seconds)</span>
+              <span class="field-control"><input type="number" id="aprswx-periodic-interval" class="form-input" min="300" placeholder="1800" style="width:160px"></span>
+            </div>
+          </div>
             </div>
           </div>
           <div class="config-msg" id="wx-msg"></div>
@@ -6337,6 +6451,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 <th>ID</th>
                 <th data-i18n="cells_carrier">Carrier</th>
                 <th>LA</th>
+                <th>MCC/MNC</th>
                 <th data-i18n="roam_th_server">On the server</th>
                 <th data-i18n="roam_th_types">Reselection</th>
                 <th data-i18n="roam_th_services">Services</th>
@@ -6358,7 +6473,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
               <label class="field" style="cursor:pointer"><input type="checkbox" id="rm-n-sync"> <span><span data-i18n="roam_n_sync">Synchronised with this cell</span></span></label>
               <label class="field"><span data-i18n="roam_n_load">Cell load</span><select id="rm-n-load" class="form-input"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
               <label class="field"><span data-i18n="roam_n_la">Location area (optional)</span><input type="number" id="rm-n-la" class="form-input" min="0" max="16383"></label>
-              <label class="field"><span>MCC / MNC</span><span style="display:flex;gap:6px"><input type="number" id="rm-n-mcc" class="form-input" min="0" max="1023" style="width:90px"><input type="number" id="rm-n-mnc" class="form-input" min="0" max="16383" style="width:90px"></span></label>
+              <label class="field"><span>MCC / MNC</span><span style="display:flex;flex-direction:column;gap:4px"><span style="display:flex;gap:6px"><input type="number" id="rm-n-mcc" class="form-input" min="0" max="1023" style="width:90px"><input type="number" id="rm-n-mnc" class="form-input" min="0" max="16383" style="width:90px"></span><span class="help-text" id="rm-n-mm-hint"></span></span></label>
               <label class="field"><span data-i18n="roam_n_rxlev">Min. RX access level (optional)</span><select id="rm-n-rxlev" class="form-input"></select></label>
               <label class="field"><span data-i18n="roam_n_txpwr">Max. MS TX power (optional)</span><select id="rm-n-txpwr" class="form-input"></select></label>
             </div>
@@ -6384,6 +6499,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
                 <th data-i18n="roam_th_state">State</th>
                 <th data-i18n="cells_carrier">Carrier</th>
                 <th>LA</th>
+                <th>MCC/MNC</th>
                 <th data-i18n="roam_th_levels">Access / MS power</th>
                 <th data-i18n="roam_th_listed_here">Neighbour of</th>
                 <th data-i18n="roam_th_lists_us">Lists this station</th>
@@ -6429,7 +6545,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           <div class="help-text" style="margin-bottom:8px" data-i18n="roam_command_help"></div>
           <label class="sw-row">
             <span class="sw-text" data-i18n="roam_link_on">Connect</span>
-            <span class="sw"><input type="checkbox" id="rm-cmd-on" onchange="roamLinkState('cmd')"><i></i></span>
+            <span class="sw"><input type="checkbox" id="rm-cmd-on" onchange="roamCmdToggle(this)"><i></i></span>
           </label>
           <div class="group-list">
             <label class="field"><span data-i18n="roam_link_host">Server (host)</span><input type="text" id="rm-cmd-host" class="form-input" autocomplete="off" spellcheck="false"></label>
@@ -6890,6 +7006,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
           <div class="info-row"><div class="info-key" data-i18n="sys_source">Installed from</div><div class="info-val" id="sysSource" style="overflow-wrap:anywhere">—</div></div>
           <div class="info-row"><div class="info-key" data-i18n="sys_os">OS</div><div class="info-val" id="sysOs">—</div></div>
           <div class="info-row"><div class="info-key" data-i18n="sys_config">Active Config</div><div class="info-val" id="sysConfigPath">—</div></div>
+          <div class="info-row"><div class="info-key" data-i18n="sys_lang">Default language</div><div class="info-val"><select id="sys-lang" class="form-input" style="width:auto;min-width:170px" onchange="sysLangChange(this)"></select></div></div>
           <div class="info-row"><div class="info-key" data-i18n="sys_cpu">CPU</div><div class="info-val" id="sysCpu">—</div></div>
           <div class="info-row">
             <div class="info-key" data-i18n="sys_cpu_load">CPU Load</div>
@@ -7120,6 +7237,25 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
 </div>
 
 <!-- ── SDS Modal ── -->
+<div class="modal-overlay" id="fleet-cmd-modal">
+  <div class="modal" style="width:min(460px,95vw)">
+    <div class="modal-title" data-i18n="fleet_cmd_title">Fleet Control: control channel</div>
+    <div class="help-text" style="margin-bottom:10px" data-i18n="fleet_cmd_help">Fleet Control runs over the control channel to the Brew server, which is not configured yet.</div>
+    <div class="group-list">
+      <label class="field"><span data-i18n="fleet_cmd_server">Server (IP address or DNS name)</span><input type="text" id="fc-host" class="form-input" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span data-i18n="roam_net_port">Port</span><input type="number" id="fc-port" class="form-input" min="1" max="65535" value="443"></label>
+      <label class="field" style="cursor:pointer;justify-content:space-between"><span data-i18n="roam_link_tls">TLS (wss://)</span><span class="sw"><input type="checkbox" id="fc-tls" checked><i></i></span></label>
+      <label class="field"><span data-i18n="roam_link_user">Username</span><input type="text" id="fc-user" class="form-input" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span data-i18n="roam_net_pass">Password</span><input type="password" id="fc-pass" class="form-input" autocomplete="new-password" placeholder="empty = Brew password" data-i18n-placeholder="fleet_cmd_pass_ph"></label>
+    </div>
+    <div class="help-text" id="fc-msg" style="margin-top:8px;color:var(--danger)"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="fleetCmdClose()" data-i18n="cancel">Cancel</button>
+      <button class="btn btn-primary" id="fc-save" onclick="fleetCmdSave()" data-i18n="fleet_cmd_save">Save and restart</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="sds-modal">
   <div class="modal">
     <div class="modal-title" data-i18n="sds_title">⬡ Send SDS Message</div>
@@ -7612,6 +7748,8 @@ function paintIcons(root){
 // ── i18n ─────────────────────────────────────────────────────────────────
 const LANGS={
   en:{
+    sys_lang:'Default language',sys_lang_browser:'Browser language (not set)',sys_lang_confirm:'Set {lang} as the station default language? The FlowStation service restarts (about 20 s off the air).',
+    fleet_off_title:'Switch off Fleet Control?',fleet_off_body1:'Fleet Control will be switched off. The remote management of this base station from the Brew server (updates, restart, maintenance, config changes) is disabled until Fleet Control is switched on again here.',fleet_off_body2:'Are you really sure? The system admin and the fleet managers are notified (entry in the change log of the Brew server).',fleet_off_understood:'I understand',fleet_off_yes:'Yes, switch off',cmd_off_title:'Switch off remote command / control?',cmd_off_body1:'The control channel to the server is switched off when you save. Remote commands (kick, DGNA, SDS, restart) and Fleet Control, the remote management of this base station, stop working until it is switched on again here.',cmd_off_body2:'Are you really sure? The system admin and the fleet managers are notified: Fleet Control is switched off first, which the Brew server logs in its change log.',roam_n_mm_hint:"Empty = this cell's network ({mm})",
     secp_class_locked:"This service requires SC3. To select SC1/SC2, remove --require-sc3 from its start command and restart first.",
     secp_aie_title_v109:"Air-interface encryption",
     secp_class_label:"Security class",
@@ -8083,7 +8221,12 @@ const LANGS={
     roam_types_0:'no forward registration',roam_types_1:'no forward registration, expedited recommended',roam_types_2:'forward registration',roam_types_3:'forward registration, expedited recommended',
     roam_svc_registration:'registration',roam_svc_deregistration:'deregistration',roam_svc_system_wide_services:'system wide services',roam_svc_voice_service:'voice',roam_svc_circuit_mode_data_service:'circuit data',roam_svc_sndcp_service:'packet data',roam_svc_aie_service:'air encryption',roam_svc_advanced_link:'advanced link',roam_svc_priority_cell:'priority cell',roam_svc_no_minimum_mode:'no minimum mode',roam_svc_migration:'migration',
     roam_services_none:'none (radios may not use it)',roam_th_server:'On the server',roam_pick:'Fill in from the server\'s cell list',roam_dir_title:'Cells on the Brew server',roam_dir_help:'The cells of the other stations on the Brew server, with what they broadcast (brew-server extension cell-directory). A neighbour entry is matched by network, downlink frequency and location area. A radio uses its serving cell\'s list to choose which cells to scan (clause 18.3.4.1), so both cells should list each other.',roam_th_state:'State',roam_th_levels:'Access / MS power',roam_th_listed_here:'Neighbour of',roam_th_lists_us:'Lists this station',roam_dir_add:'Add as neighbour',roam_dir_none:'none',roam_dir_empty:'No other cells on the server.',roam_dir_count:'{n} cells of other stations on the server.',roam_dir_off:'The Brew server does not send its cell list (needs a brew-server with the cell-directory extension).',roam_dir_wait:'The server offers its cell list, it has not arrived yet (it comes right after connecting).',roam_dir_unknown:'not known to the server',roam_online:'online',roam_offline:'offline',roam_not_mutual:'{id} does not list this cell: radios there are not told to scan for it',roam_diff_rxlev:'min. access level: listed {list} dBm, the cell broadcasts {cell} dBm',roam_diff_txpwr:'max. MS power: listed {list} dBm, the cell broadcasts {cell} dBm',roam_diff_services:'services differ: {list}',roam_auto_sibling:'Cell of this station (automatic)',roam_nb_none:'No neighbours.',roam_nb_count:'{n} of 7 neighbour entries',roam_need_id_carrier:'Cell identifier and carrier are required.',roam_need_la:'The primary cell needs a location area.',roam_unsaved:'Changed, not saved yet.',roam_confirm_save:'Save the roaming settings and restart the station?',
-    roam_brew_off:'Brew is not configured: roaming between stations is off, cells of this station still work.',roam_link_up:'connected',roam_link_down:'not connected',roam_ext:'Server features',roam_feat_roam:'Roaming',roam_feat_calls:'Calls',roam_feat_cells:'Cells',roam_feat_groups:'Groups',roam_feat_net:'Multi Network',roam_feat_other:'Other',
+    roam_brew_off:'Brew is not configured: roaming between stations is off, cells of this station still work.',roam_link_up:'connected',roam_link_down:'not connected',roam_ext:'Server features',roam_feat_roam:'Roaming',roam_feat_calls:'Calls',roam_feat_cells:'Cells',roam_feat_groups:'Groups',roam_feat_net:'Multi Network',roam_feat_other:'Other',roam_feat_fleet:'Fleet Control',
+    maint_title:'Maintenance: work on this base station in progress',maint_sub:'Set by {by} from the Brew server · ends in {min} min',maint_sub_noby:'Set from the Brew server · ends in {min} min',maint_live_title:'Live system update: RF on!',maint_live_sub:'The station is building a new version and stays on the air; the service restarts when it is done. Do not change settings now.',
+    fleet_desc:'Station management by SwMI (BrewServer)',fleet_key:'Fleet Control',fleet_on:'on',fleet_off:'off',fleet_not_connected:'control channel not connected',
+    fleet_cmd_title:'Fleet Control: control channel',fleet_cmd_help:'Fleet Control runs over the control channel to the Brew server, which is not configured yet. Enter the server; the user is your Brew login, an empty password takes the Brew password. Saving restarts the service.',
+    fleet_cmd_server:'Server (IP address or DNS name)',fleet_cmd_pass_ph:'empty = Brew password',fleet_cmd_save:'Save and restart',fleet_need_host:'Please enter the server.',
+    fleet_restarting:'Control channel saved: the station restarts and connects with Fleet Control on.',
     roam_dbm_hint:'At the radio (MS power term 0): no access below {fail} dBm, relinquishable below {fast} dBm, improvable below {slow} dBm (clause 18.3.4.5; Docs/cell-reselection.md).',
     roam_help_fast_th:'FAST_RESELECT_THRESHOLD (clause 18.5.4): below it (C1 in dB above the access level) the serving cell is "relinquishable" and the radio moves to a neighbour better by the fast hysteresis, also during a call. 0-30 dB in 2 dB steps; default 10.',
     roam_help_slow_th:'SLOW_RESELECT_THRESHOLD_ABOVE_FAST (clause 18.5.4): added to the fast threshold. Below the sum the serving cell is "improvable" and an idle radio moves to a neighbour better by the slow hysteresis. Default 20 (= 30 dB with fast 10). Large values make the radio look around almost always.',
@@ -8102,7 +8245,7 @@ const LANGS={
     roam_help_n_rxlev:'Minimum RX access level of the neighbour (clause 18.5.12). Empty: radios assume the same as this cell (table 18.64, note 2).',
     roam_help_n_txpwr:'Maximum MS transmit power in the neighbour (table 18.57), used by the radio for C2. Empty: same as this cell.',
     cells_title:'Cells',cells_help:"Each extra SDR runs one more cell. Pick a free carrier; its frequencies follow from the primary cell's band plan. The station restarts to apply changes.",
-    cells_carrier:'Carrier',cells_cc:'Colour code',cells_la_help:'Location area of the new cell. Empty = same as the primary cell. With its own location area a radio registers on every change of cell (TS 100 392-2 clause 18.3.4.7.1a).',cells_add:'Add cell',cells_remove:'Remove',cells_cell:'Cell {n}',cells_radios:'{n} radio(s)',
+    cells_carrier:'Carrier',cells_cc:'Colour code',cells_la_help:'Location area of the new cell. Empty = same as the primary cell. With its own location area a radio registers on every change of cell (TS 100 392-2 clause 18.3.4.7.1a).',cells_add:'Add cell',cells_remove:'Remove',cells_cell:'Cell {n}',ms_visitor:'Guest · {net}',ms_vassi:'(V)ASSI here',ms_visitor_title:'Radio of network {net} (migration, TS 100 392-2 clause 16.4.1.1 b)). It has a (V)ASSI on this cell; calls and SDS to its own ISSI reach it here.',cells_radios:'{n} radio(s)',
     cells_net_local:'local',cells_net_up:'core up',cells_net_down:'core down',
     cells_single:'Single cell',rf_cells_note:'Pick a cell to show its SDR on this page.',cells_linked:'Cells linked',cells_independent:'Independent cells',
     cells_need_fields:'Device and carrier are required.',cells_confirm_add:'Add this cell? The station restarts.',cells_confirm_remove:'Remove cell {n}? The station restarts.',
@@ -8122,7 +8265,7 @@ const LANGS={
     no_terminals:'No radios registered',no_calls:'No active calls',
     live_log:'Live Log',autoscroll:'Auto-scroll',filter_all:'All',
     clear:'Clear',export:'Export',restart:'Restart',shutdown:'Shutdown',delete:'Delete',save:'Save',
-    cfg_sec_configuration:'Configuration',cfg_sec_access:'Access Control',cfg_sec_remote:'Remote control',cfg_sec_wx:'WX / METAR',    whitelist_title:'ISSI Whitelist',whitelist_add:'Add ISSI',whitelist_empty:'List empty — open network (any radio may register).',
+    cfg_sec_configuration:'Configuration',cfg_sec_access:'Access Control',cfg_sec_remote:'Remote control',cfg_sec_wx:'WX / METAR / APRS',    whitelist_title:'ISSI Whitelist',whitelist_add:'Add ISSI',whitelist_empty:'List empty — open network (any radio may register).',
     whitelist_help:'Part of the Cell profile. Empty = open network. In a profile sheet, Save stores it on that profile; in Live settings, Apply & Restart writes the active config only.',
     whitelist_cell_banner:'Access control for Cell “{cell}”. Travels with that profile (not with Brew).',
     whitelist_live_banner:'Access control for the live config.toml. Apply & Restart writes it to the running station.',
@@ -8134,10 +8277,11 @@ const LANGS={
     remote_issis_empty:'None yet',remote_cmds_empty:'No commands yet',
     remote_cmds_title:'Commands (code → action)',remote_cmd_add:'Add command',remote_status_code:'Status code',remote_action:'Action',remote_cmd_del:'Remove',
     remote_empty_issi:'Add at least one authorized ISSI when enabled.',remote_invalid_code:'Enter a status code (0–65535).',
-    wx_title:'WX / METAR Service',wx_help:'Built-in weather service. Radios send an SDS like "METAR LROP" to the service ISSI to get a decoded report. Optionally auto-send a fixed station\'s METAR to an ISSI or talkgroup at a set interval. Data from aviationweather.gov. "APRSWX <CALL>" returns an APRS weather station from aprs.fi (needs [aprs_wx] in config.toml).',
-    wx_enabled:'Enable on-demand METAR responder',wx_service_issi:'Service ISSI',wx_periodic_enabled:'Enable periodic auto-broadcast',
+    wx_title:'WX Service (METAR / APRS)',wx_help:'Built-in weather service. Radios send an SDS to the service ISSI: "METAR <ICAO>" for a decoded airport report or "APRSWX <CALL>" for the latest report of an APRS weather station. Example: "METAR EDDK". Both sources can also send their data periodically to an ISSI or talkgroup.',
+    wx_enabled:'Enable on-demand weather responder (METAR, APRS)',wx_service_issi:'Service ISSI',wx_periodic_enabled:'Enable periodic auto-broadcast',
     wx_periodic_icao:'Station ICAO',wx_periodic_dest:'Destination',wx_periodic_isgroup:'Destination is group',wx_periodic_isgroup_hint:'(GSSI instead of individual ISSI)',
     wx_periodic_interval:'Interval (seconds)',wx_interval_hint:'Minimum 300 s (5 min) to avoid hammering the weather API.',wx_periodic_incomplete:'Set both station ICAO and destination for periodic mode.',
+    aprswx_apikey:'aprs.fi API key',aprswx_apikey_ph_set:'saved – empty keeps it',aprswx_apikey_ph_unset:'e.g. 123456.abcdefgh',aprswx_apikey_clear:'Remove',aprswx_apikey_hint:'Free with an aprs.fi account: My account → API keys. Without a key the APRS service is off.',aprswx_default_call:'Default station',aprswx_default_call_hint:'Used for a bare "APRSWX" and for the periodic send.',aprswx_max_age:'Mark reports older than (seconds)',aprswx_max_age_hint:'Older reports get an "OLD" mark. 0 = never.',aprswx_periodic_call:'Station for periodic send',aprswx_periodic_call_hint:'Empty = default station.',aprswx_periodic_incomplete:'Periodic APRS send needs an API key, a station and a destination.',aprswx_key_removed:'The API key will be removed on save.',aprswx_nokey:'No API key saved – "APRSWX" requests are not answered.',wx_sec_general:'General',wx_sec_general_note:'applies to METAR and APRS',wx_sec_metar:'METAR',wx_sec_metar_note:'airport weather from aviationweather.gov',wx_sec_aprs:'APRS',wx_sec_aprs_note:'APRS/CWOP stations from',wx_saved:'✓ Saved – active now.',wx_save_partial:'General and METAR saved, APRS not: ',aprswx_apikey_ph_set_short:'saved',
     sds_title:'⬡ Send SDS Message',sds_dest:'Destination ISSI',
     sds_as_issi:'Sent as ISSI {issi}',
     sds_callout_enable:'TPG2200 Call-Out / Send alarm',
@@ -8471,13 +8615,15 @@ const LANGS={
     no_terminals:'Niciun radio înregistrat',no_calls:'Niciun apel activ',
     live_log:'Log Live',autoscroll:'Auto-scroll',filter_all:'Toate',
     clear:'Șterge',export:'Export',restart:'Repornire',shutdown:'Oprire',save:'Salvează',
-    cfg_sec_configuration:'Configurație',cfg_sec_access:'Control acces',cfg_sec_wx:'WX / METAR',whitelist_title:'Listă albă ISSI',whitelist_add:'Adaugă ISSI',whitelist_empty:'Listă goală — rețea deschisă (orice radio se poate înregistra).',
+    cfg_sec_configuration:'Configurație',cfg_sec_access:'Control acces',cfg_sec_wx:'WX / METAR / APRS',whitelist_title:'Listă albă ISSI',whitelist_add:'Adaugă ISSI',whitelist_empty:'Listă goală — rețea deschisă (orice radio se poate înregistra).',
     whitelist_help:'Când lista e goală, orice radio se poate înregistra (rețea deschisă). Când are intrări, doar ISSI-urile listate sunt acceptate; restul sunt respinse. Modificările se aplică instant și persistă după repornire.',
     whitelist_enforced:'ACTIVĂ',whitelist_open:'DESCHISĂ',whitelist_invalid:'Introdu un ISSI valid (1–16777215).',
-    wx_title:'Serviciu WX / METAR',wx_help:'Serviciu meteo integrat. Radiourile trimit un SDS de forma "METAR LROP" către ISSI-ul serviciului și primesc raportul decodat. Opțional, trimite automat METAR-ul unei stații fixe către un ISSI sau grup la interval. Date de la aviationweather.gov.',
-    wx_enabled:'Activează răspunsul METAR la cerere',wx_service_issi:'ISSI serviciu',wx_periodic_enabled:'Activează trimiterea periodică',
+    wx_title:'Serviciu WX (METAR / APRS)',wx_help:'Serviciu meteo integrat. Radiourile trimit un SDS către ISSI-ul serviciului: "METAR <ICAO>" pentru un raport de aeroport decodat sau "APRSWX <INDICATIV>" pentru ultimul raport al unei stații meteo APRS. Exemplu: "METAR EDDK". Ambele surse pot trimite datele și periodic către un ISSI sau grup.',
+    wx_enabled:'Activează răspunsul meteo la cerere (METAR, APRS)',wx_service_issi:'ISSI serviciu',wx_periodic_enabled:'Activează trimiterea periodică',
     wx_periodic_icao:'Cod ICAO stație',wx_periodic_dest:'Destinație',wx_periodic_isgroup:'Destinația e grup',wx_periodic_isgroup_hint:'(GSSI în loc de ISSI individual)',
     wx_periodic_interval:'Interval (secunde)',wx_interval_hint:'Minim 300 s (5 min) ca să nu suprasolicităm API-ul meteo.',wx_periodic_incomplete:'Setează și ICAO stație și destinație pentru modul periodic.',
+    aprswx_apikey:'Cheie API aprs.fi',aprswx_apikey_ph_set:'salvată – gol = o păstrează',aprswx_apikey_ph_unset:'ex. 123456.abcdefgh',aprswx_apikey_clear:'Șterge',aprswx_apikey_hint:'Gratuită cu un cont aprs.fi: My account → API keys. Fără cheie, serviciul APRS este oprit.',aprswx_default_call:'Stație implicită',aprswx_default_call_hint:'Folosită pentru "APRSWX" simplu și pentru trimiterea periodică.',aprswx_max_age:'Marchează rapoartele mai vechi de (secunde)',aprswx_max_age_hint:'Rapoartele mai vechi primesc marcajul "OLD". 0 = niciodată.',aprswx_periodic_call:'Stație pentru trimiterea periodică',aprswx_periodic_call_hint:'Gol = stația implicită.',aprswx_periodic_incomplete:'Trimiterea periodică APRS necesită cheie API, stație și destinație.',aprswx_key_removed:'Cheia API va fi ștearsă la salvare.',aprswx_nokey:'Nicio cheie API salvată – cererile "APRSWX" nu primesc răspuns.',wx_sec_general:'General',wx_sec_general_note:'pentru METAR și APRS',wx_sec_metar:'METAR',wx_sec_metar_note:'vremea aeroporturilor de la aviationweather.gov',wx_sec_aprs:'APRS',wx_sec_aprs_note:'stații APRS/CWOP de la',wx_saved:'✓ Salvat – activ imediat.',wx_save_partial:'General și METAR salvate, APRS nu: ',aprswx_apikey_ph_set_short:'salvată',
+    ui_issi_or_gssi:'ISSI sau GSSI',
     live_sds_desc:'Transmite un mesaj text către toate radiourile din celulă, repetând la intervalul Home Mode Display.',
     live_sds_text:'Text mesaj (max 251 caractere)',live_sds_repeat:'Repetări (0=∞)',live_sds_send:'Broadcast',
     live_sds_clear_all:'Șterge Tot',live_sds_empty:'Niciun broadcast activ.',
@@ -8564,6 +8710,9 @@ const LANGS={
     tg_cat_backhaul:'Backhaul Brew up/down',tg_cat_logs:'Log critic (avertismente/erori)',
   },
   de:{
+    sys_lang:'Standardsprache',sys_lang_browser:'Browser-Sprache (nicht gesetzt)',sys_lang_confirm:'{lang} als Standardsprache der Station setzen? Der FlowStation-Dienst startet neu (ca. 20 s nicht auf Sendung).',
+    fleet_off_title:'Flottenkontrolle ausschalten?',fleet_off_body1:'Die Flottenkontrolle wird deaktiviert. Das Remote-Management dieser Basisstation vom Brew-Server aus (Updates, Neustart, Wartung, Konfigurationsänderungen) ist abgeschaltet, bis die Flottenkontrolle hier wieder eingeschaltet wird.',fleet_off_body2:'Bist du wirklich sicher? Der Systemadmin und die Flottenmanager werden verständigt (Eintrag im Change-Log des Brew-Servers).',fleet_off_understood:'Ich habe verstanden',fleet_off_yes:'Ja, ausschalten',cmd_off_title:'Remote Command / Control ausschalten?',cmd_off_body1:'Beim Speichern wird der Steuerkanal zum Server abgeschaltet. Remote-Befehle (Kick, DGNA, SDS, Neustart) und die Flottenkontrolle, also das Remote-Management dieser Basisstation, funktionieren dann nicht mehr, bis er hier wieder eingeschaltet wird.',cmd_off_body2:'Bist du wirklich sicher? Der Systemadmin und die Flottenmanager werden verständigt: Zuerst wird die Flottenkontrolle ausgeschaltet, das trägt der Brew-Server in sein Change-Log ein.',roam_n_mm_hint:'Leer = Netz dieser Zelle ({mm})',
+    maint_title:'Wartung: Es wird an der Basisstation gearbeitet',maint_sub:'Gesetzt von {by} am Brew-Server · endet in {min} min',maint_sub_noby:'Gesetzt am Brew-Server · endet in {min} min',maint_live_title:'Live-Systemupdate: RF an!',maint_live_sub:'Die Station baut eine neue Version und bleibt auf Sendung; danach startet der Dienst neu. Jetzt keine Einstellungen ändern.',
     secp_class_locked:"Dieser Dienst verlangt SC3. Für SC1/SC2 zuerst --require-sc3 aus der Startzeile entfernen und neu starten.",
     secp_aie_title_v109:"Luftschnittstellen-Verschlüsselung",
     secp_class_label:"Sicherheitsklasse",
@@ -8638,17 +8787,19 @@ const LANGS={
     dapnet_title:'DAPNET',dapnet_log:'DAPNET-Log',dapnet_routing:'Routing',dapnet_send:'DAPNET-Nachricht senden',dapnet_saved:'✓ Gespeichert',
     terminals:'Radios',registered:'registriert',
     active_calls:'Aktive Anrufe',circuits:'Schaltkreise aktiv',
-    registered_terminals:'Registrierte Radios',
+    registered_terminals:'Registrierte Radios',ms_visitor:'Gast · {net}',ms_vassi:'(V)ASSI hier',ms_visitor_title:'Funkgerät aus Netz {net} (Migration, TS 100 392-2 Abschnitt 16.4.1.1 b)). Es hat auf dieser Zelle eine (V)ASSI; Rufe und SDS an seine eigene ISSI erreichen es hier.',
     no_terminals:'Keine Radios registriert',no_calls:'Keine aktiven Anrufe',
     live_log:'Live-Log',autoscroll:'Auto-Scroll',filter_all:'Alle',
     clear:'Löschen',export:'Exportieren',restart:'Neustart',shutdown:'Herunterfahren',save:'Speichern',
-    cfg_sec_configuration:'Konfiguration',cfg_sec_access:'Zugriffskontrolle',cfg_sec_wx:'WX / METAR',whitelist_title:'ISSI-Whitelist',whitelist_add:'ISSI hinzufügen',whitelist_empty:'Liste leer — offenes Netz (jedes Funkgerät darf sich anmelden).',
+    cfg_sec_configuration:'Konfiguration',cfg_sec_access:'Zugriffskontrolle',cfg_sec_wx:'WX / METAR / APRS',whitelist_title:'ISSI-Whitelist',whitelist_add:'ISSI hinzufügen',whitelist_empty:'Liste leer — offenes Netz (jedes Funkgerät darf sich anmelden).',
     whitelist_help:'Ist die Liste leer, darf sich jedes Funkgerät anmelden (offenes Netz). Bei Einträgen werden nur die gelisteten ISSIs akzeptiert; alle anderen werden abgewiesen. Änderungen wirken sofort und bleiben nach Neustart erhalten.',
     whitelist_enforced:'AKTIV',whitelist_open:'OFFEN',whitelist_invalid:'Gültige ISSI eingeben (1–16777215).',
-    wx_title:'WX / METAR-Dienst',wx_help:'Integrierter Wetterdienst. Funkgeräte senden eine SDS wie "METAR LROP" an die Dienst-ISSI und erhalten einen dekodierten Bericht. Optional automatisches Senden des METAR einer festen Station an eine ISSI oder Gruppe in Intervallen. Daten von aviationweather.gov. "APRSWX <CALL>" liefert eine APRS-Wetterstation von aprs.fi (benötigt [aprs_wx] in config.toml).',
-    wx_enabled:'METAR-Antwort auf Anfrage aktivieren',wx_service_issi:'Dienst-ISSI',wx_periodic_enabled:'Periodisches Senden aktivieren',
+    wx_title:'WX-Dienst (METAR / APRS)',wx_help:'Integrierter Wetterdienst. Funkgeräte senden eine SDS an die Dienst-ISSI: "METAR <ICAO>" für einen dekodierten Flughafen-Bericht oder "APRSWX <RUFZEICHEN>" für den aktuellen Bericht einer APRS-Wetterstation. Beispiel: "METAR EDDK". Beide Quellen können ihre Daten auch periodisch an eine ISSI oder Gruppe senden.',
+    wx_enabled:'Wetter-Abfragen beantworten (METAR, APRS)',wx_service_issi:'Dienst-ISSI',wx_periodic_enabled:'Periodisches Senden aktivieren',
     wx_periodic_icao:'Stations-ICAO',wx_periodic_dest:'Ziel',wx_periodic_isgroup:'Ziel ist Gruppe',wx_periodic_isgroup_hint:'(GSSI statt einzelner ISSI)',
     wx_periodic_interval:'Intervall (Sekunden)',wx_interval_hint:'Mindestens 300 s (5 Min), um die Wetter-API nicht zu überlasten.',wx_periodic_incomplete:'Stations-ICAO und Ziel für den periodischen Modus setzen.',
+    aprswx_apikey:'aprs.fi-API-Schlüssel',aprswx_apikey_ph_set:'gespeichert – leer = behalten',aprswx_apikey_ph_unset:'z. B. 123456.abcdefgh',aprswx_apikey_clear:'Entfernen',aprswx_apikey_hint:'Kostenlos mit einem aprs.fi-Konto: My account → API keys. Ohne Schlüssel ist der APRS-Dienst aus.',aprswx_default_call:'Standard-Station',aprswx_default_call_hint:'Für ein einfaches "APRSWX" und für das periodische Senden.',aprswx_max_age:'Berichte markieren, älter als (Sekunden)',aprswx_max_age_hint:'Ältere Berichte erhalten den Vermerk "OLD". 0 = nie.',aprswx_periodic_call:'Station für periodisches Senden',aprswx_periodic_call_hint:'Leer = Standard-Station.',aprswx_periodic_incomplete:'Für periodisches APRS-Senden werden API-Schlüssel, Station und Ziel benötigt.',aprswx_key_removed:'Der API-Schlüssel wird beim Speichern entfernt.',aprswx_nokey:'Kein API-Schlüssel gespeichert – "APRSWX"-Abfragen werden nicht beantwortet.',wx_sec_general:'Allgemein',wx_sec_general_note:'gilt für METAR und APRS',wx_sec_metar:'METAR',wx_sec_metar_note:'Flughafen-Wetter von aviationweather.gov',wx_sec_aprs:'APRS',wx_sec_aprs_note:'APRS/CWOP-Stationen von',wx_saved:'✓ Gespeichert – sofort aktiv.',wx_save_partial:'Allgemein und METAR gespeichert, APRS nicht: ',aprswx_apikey_ph_set_short:'gespeichert',
+    ui_issi_or_gssi:'ISSI oder GSSI',
     live_sds_desc:'Sendet eine Textnachricht an alle Funkgeräte der Zelle, wiederholt im Home-Mode-Display-Intervall.',
     live_sds_text:'Nachrichtentext (max. 251 Zeichen)',live_sds_repeat:'Wiederh. (0=∞)',live_sds_send:'Senden',
     live_sds_clear_all:'Alle löschen',live_sds_empty:'Keine aktiven Broadcasts.',
@@ -8726,6 +8877,8 @@ const LANGS={
     sys_bts:'BTS-Verbindung',
   },
   es:{
+    sys_lang:'Idioma predeterminado',sys_lang_browser:'Idioma del navegador (sin fijar)',sys_lang_confirm:'¿Fijar {lang} como idioma predeterminado de la estación? El servicio FlowStation se reinicia (unos 20 s fuera del aire).',
+    fleet_off_title:'¿Desactivar el control de flota?',fleet_off_body1:'Se desactiva el control de flota. La gestión remota de esta estación base desde el servidor Brew (actualizaciones, reinicio, mantenimiento, cambios de configuración) queda desactivada hasta que se vuelva a activar aquí.',fleet_off_body2:'¿Seguro? Se avisa al administrador del sistema y a los gestores de flota (entrada en el registro de cambios del servidor Brew).',fleet_off_understood:'Lo he entendido',fleet_off_yes:'Sí, desactivar',cmd_off_title:'¿Desactivar el comando / control remoto?',cmd_off_body1:'Al guardar se desactiva el canal de control hacia el servidor. Los comandos remotos (kick, DGNA, SDS, reinicio) y el control de flota, la gestión remota de esta estación base, dejan de funcionar hasta que se vuelva a activar aquí.',cmd_off_body2:'¿Seguro? Se avisa al administrador del sistema y a los gestores de flota: primero se desactiva el control de flota, y el servidor Brew lo anota en su registro de cambios.',roam_n_mm_hint:'Vacío = la red de esta celda ({mm})',
     "ui_language":"Idioma",
     roaming:'Infraestructura',roam_title:'Celdas, redes, vecinas y roaming',roam_reload:'Recargar',roam_help:'Todo lo que decide cuándo y cómo pasan las radios de una celda a otra: las celdas de esta estación y sus áreas de localización, las celdas vecinas que anuncia cada celda, los valores de reselección y la comprobación de presencia. Al guardar se comprueba toda la configuración y la estación se reinicia.',
     roam_cells_title:'Áreas de localización',roam_cells_help:'Misma área de localización en todas las celdas: las radios cambian de celda sin registrarse, así que las llamadas de grupo y los establecimientos de llamada individual se emiten en todas las celdas del área. Área propia por celda: las radios se registran en cada cambio y la estación y el servidor siempre conocen la celda exacta (TS 100 392-2 cláusula 18.3.4.7.1a). Vacío = el área de la primaria. Las celdas nuevas se añaden en la tarjeta Celdas de arriba.',
@@ -8736,7 +8889,12 @@ const LANGS={
     roam_types_0:'sin registro anticipado',roam_types_1:'sin registro anticipado, reselección acelerada recomendada',roam_types_2:'registro anticipado',roam_types_3:'registro anticipado, reselección acelerada recomendada',
     roam_svc_registration:'registro',roam_svc_deregistration:'baja',roam_svc_system_wide_services:'servicios de todo el sistema',roam_svc_voice_service:'voz',roam_svc_circuit_mode_data_service:'datos en circuito',roam_svc_sndcp_service:'datos en paquetes',roam_svc_aie_service:'cifrado de aire',roam_svc_advanced_link:'enlace avanzado',roam_svc_priority_cell:'celda prioritaria',roam_svc_no_minimum_mode:'sin modo mínimo',roam_svc_migration:'migración',
     roam_services_none:'ninguno (las radios no pueden usarla)',roam_th_server:'En el servidor',roam_pick:'Rellenar desde la lista de celdas del servidor',roam_dir_title:'Celdas en el servidor Brew',roam_dir_help:'Las celdas de las otras estaciones del servidor Brew, con lo que anuncian (extensión cell-directory de brew-server). Una vecina se identifica por red, frecuencia de bajada y área de localización. Una radio usa la lista de su celda servidora para elegir qué celdas explorar (cláusula 18.3.4.1), así que ambas celdas deberían anunciarse mutuamente.',roam_th_state:'Estado',roam_th_levels:'Acceso / potencia MS',roam_th_listed_here:'Vecina de',roam_th_lists_us:'Anuncia esta estación',roam_dir_add:'Añadir como vecina',roam_dir_none:'ninguna',roam_dir_empty:'No hay otras celdas en el servidor.',roam_dir_count:'{n} celdas de otras estaciones en el servidor.',roam_dir_off:'El servidor Brew no envía su lista de celdas (requiere un brew-server con la extensión cell-directory).',roam_dir_wait:'El servidor ofrece su lista de celdas, aún no ha llegado (llega justo después de conectar).',roam_dir_unknown:'desconocida en el servidor',roam_online:'en línea',roam_offline:'fuera de línea',roam_not_mutual:'{id} no anuncia esta celda: a las radios allí no se les indica que la busquen',roam_diff_rxlev:'nivel mín. de acceso: anunciado {list} dBm, la celda emite {cell} dBm',roam_diff_txpwr:'potencia máx. MS: anunciada {list} dBm, la celda emite {cell} dBm',roam_diff_services:'servicios distintos: {list}',roam_auto_sibling:'Celda de esta estación (automática)',roam_nb_none:'Sin vecinas.',roam_nb_count:'{n} de 7 entradas de vecina',roam_need_id_carrier:'Faltan el identificador de celda y la portadora.',roam_need_la:'La celda primaria necesita un área de localización.',roam_unsaved:'Cambiado, aún sin guardar.',roam_confirm_save:'¿Guardar los ajustes de roaming y reiniciar la estación?',
-    roam_brew_off:'Brew no está configurado: el roaming entre estaciones está apagado, las celdas de esta estación siguen funcionando.',roam_link_up:'conectado',roam_link_down:'sin conexión',roam_ext:'Funciones del servidor',roam_feat_roam:'Roaming',roam_feat_calls:'Llamadas',roam_feat_cells:'Celdas',roam_feat_groups:'Grupos',roam_feat_net:'Multi Network',roam_feat_other:'Otras',
+    roam_brew_off:'Brew no está configurado: el roaming entre estaciones está apagado, las celdas de esta estación siguen funcionando.',roam_link_up:'conectado',roam_link_down:'sin conexión',roam_ext:'Funciones del servidor',roam_feat_roam:'Roaming',roam_feat_calls:'Llamadas',roam_feat_cells:'Celdas',roam_feat_groups:'Grupos',roam_feat_net:'Multi Network',roam_feat_other:'Otras',roam_feat_fleet:'Fleet Control',
+    maint_title:'Mantenimiento: se está trabajando en esta estación base',maint_sub:'Activado por {by} desde el servidor Brew · termina en {min} min',maint_sub_noby:'Activado desde el servidor Brew · termina en {min} min',maint_live_title:'Actualización en vivo: ¡RF activa!',maint_live_sub:'La estación compila una nueva versión y sigue en el aire; el servicio se reinicia al terminar. No cambie la configuración ahora.',
+    fleet_desc:'Gestión de la estación por la SwMI (BrewServer)',fleet_key:'Fleet Control',fleet_on:'activado',fleet_off:'desactivado',fleet_not_connected:'canal de control sin conexión',
+    fleet_cmd_title:'Fleet Control: canal de control',fleet_cmd_help:'Fleet Control funciona por el canal de control al servidor Brew, que aún no está configurado. Introduce el servidor; el usuario es tu login de Brew, una contraseña vacía usa la contraseña de Brew. Al guardar se reinicia el servicio.',
+    fleet_cmd_server:'Servidor (dirección IP o nombre DNS)',fleet_cmd_pass_ph:'vacía = contraseña de Brew',fleet_cmd_save:'Guardar y reiniciar',fleet_need_host:'Introduce el servidor.',
+    fleet_restarting:'Canal de control guardado: la estación se reinicia y se conecta con Fleet Control activado.',
     roam_dbm_hint:'En la radio (término de potencia 0): sin acceso por debajo de {fail} dBm, celda abandonable por debajo de {fast} dBm, mejorable por debajo de {slow} dBm (cláusula 18.3.4.5; Docs/cell-reselection.md).',
     roam_help_fast_th:'FAST_RESELECT_THRESHOLD (cláusula 18.5.4): por debajo (C1 en dB sobre el nivel de acceso) la celda servidora es «abandonable» y la radio pasa a una vecina mejor en la histéresis rápida, también durante una llamada. 0-30 dB en pasos de 2; por defecto 10.',
     roam_help_slow_th:'SLOW_RESELECT_THRESHOLD_ABOVE_FAST (cláusula 18.5.4): se suma al umbral rápido. Por debajo de la suma la celda servidora es «mejorable» y una radio en reposo pasa a una vecina mejor en la histéresis lenta. Por defecto 20 (= 30 dB con rápido 10). Valores altos hacen que la radio busque casi siempre.',
@@ -8755,7 +8913,7 @@ const LANGS={
     roam_help_n_rxlev:'Nivel mínimo de acceso RX de la vecina (cláusula 18.5.12). Vacío: las radios suponen el mismo que esta celda (tabla 18.64, nota 2).',
     roam_help_n_txpwr:'Potencia de transmisión máxima de la radio en la vecina (tabla 18.57), la usa la radio para C2. Vacío: igual que esta celda.',
     cells_title:'Celdas',cells_help:'Cada SDR adicional ejecuta una celda más. Elige una portadora libre; sus frecuencias salen del plan de banda de la celda principal. La estación se reinicia para aplicar los cambios.',
-    cells_carrier:'Portadora',cells_cc:'Código de color',cells_la_help:'Área de localización de la nueva celda. Vacío = la misma que la celda principal. Con un área propia la radio se registra en cada cambio de celda (TS 100 392-2 cláusula 18.3.4.7.1a).',cells_add:'Añadir celda',cells_remove:'Quitar',cells_cell:'Celda {n}',cells_radios:'{n} radio(s)',
+    cells_carrier:'Portadora',cells_cc:'Código de color',cells_la_help:'Área de localización de la nueva celda. Vacío = la misma que la celda principal. Con un área propia la radio se registra en cada cambio de celda (TS 100 392-2 cláusula 18.3.4.7.1a).',cells_add:'Añadir celda',cells_remove:'Quitar',cells_cell:'Celda {n}',ms_visitor:'Invitado · {net}',ms_vassi:'(V)ASSI aquí',ms_visitor_title:'Radio de la red {net} (migración, TS 100 392-2 cláusula 16.4.1.1 b)). Tiene una (V)ASSI en esta celda; las llamadas y SDS a su propia ISSI le llegan aquí.',cells_radios:'{n} radio(s)',
     cells_net_local:'local',cells_net_up:'núcleo conectado',cells_net_down:'núcleo desconectado',
     cells_single:'Celda única',rf_cells_note:'Elige una celda para ver su SDR en esta página.',cells_linked:'Celdas enlazadas',cells_independent:'Celdas independientes',
     cells_need_fields:'Hacen falta el dispositivo y la portadora.',cells_confirm_add:'¿Añadir esta celda? La estación se reinicia.',cells_confirm_remove:'¿Quitar la celda {n}? La estación se reinicia.',
@@ -8895,7 +9053,7 @@ const LANGS={
     no_terminals:'No hay radios registrados',no_calls:'No hay llamadas activas',
     live_log:'Log en Vivo',autoscroll:'Auto-desplaz.',filter_all:'Todos',
     clear:'Limpiar',export:'Exportar',restart:'Reiniciar',shutdown:'Apagar',delete:'Eliminar',save:'Guardar',
-    cfg_sec_configuration:'Configuración',cfg_sec_access:'Control de acceso',cfg_sec_remote:'Control remoto',cfg_sec_wx:'WX / METAR',    whitelist_title:'Lista blanca ISSI',whitelist_add:'Añadir ISSI',whitelist_empty:'Lista vacía — red abierta (cualquier radio puede registrarse).',
+    cfg_sec_configuration:'Configuración',cfg_sec_access:'Control de acceso',cfg_sec_remote:'Control remoto',cfg_sec_wx:'WX / METAR / APRS',    whitelist_title:'Lista blanca ISSI',whitelist_add:'Añadir ISSI',whitelist_empty:'Lista vacía — red abierta (cualquier radio puede registrarse).',
     whitelist_help:'Forma parte del perfil Cell. Lista vacía = red abierta. En la hoja de perfil, Guardar lo guarda en ese perfil; en Ajustes en vivo, Aplicar y reiniciar escribe solo la config activa.',
     whitelist_cell_banner:'Control de acceso del Cell “{cell}”. Viaja con ese perfil (no con Brew).',
     whitelist_live_banner:'Control de acceso del config.toml en vivo. Aplicar y reiniciar lo escribe en la estación.',
@@ -8907,10 +9065,12 @@ const LANGS={
     remote_issis_empty:'Ninguno aún',remote_cmds_empty:'Sin comandos aún',
     remote_cmds_title:'Comandos (código → acción)',remote_cmd_add:'Añadir comando',remote_status_code:'Código de estado',remote_action:'Acción',remote_cmd_del:'Quitar',
     remote_empty_issi:'Añade al menos un ISSI autorizado si está activado.',remote_invalid_code:'Introduce un código de estado (0–65535).',
-    wx_title:'Servicio WX / METAR',wx_help:'Servicio meteorológico integrado. Las radios envían un SDS como "METAR LROP" al ISSI del servicio y reciben un informe decodificado. Opcionalmente envía automáticamente el METAR de una estación fija a un ISSI o grupo a intervalos. Datos de aviationweather.gov. "APRSWX <CALL>" devuelve una estación meteorológica APRS de aprs.fi (requiere [aprs_wx] en config.toml).',
-    wx_enabled:'Activar respuesta METAR a petición',wx_service_issi:'ISSI del servicio',wx_periodic_enabled:'Activar envío periódico',
+    wx_title:'Servicio WX (METAR / APRS)',wx_help:'Servicio meteorológico integrado. Las radios envían un SDS al ISSI del servicio: "METAR <ICAO>" para un informe de aeropuerto decodificado o "APRSWX <INDICATIVO>" para el último informe de una estación meteorológica APRS. Ejemplo: "METAR EDDK". Ambas fuentes pueden enviar también sus datos periódicamente a un ISSI o grupo.',
+    wx_enabled:'Responder consultas meteorológicas (METAR, APRS)',wx_service_issi:'ISSI del servicio',wx_periodic_enabled:'Activar envío periódico',
     wx_periodic_icao:'ICAO de estación',wx_periodic_dest:'Destino',wx_periodic_isgroup:'El destino es grupo',wx_periodic_isgroup_hint:'(GSSI en vez de ISSI individual)',
     wx_periodic_interval:'Intervalo (segundos)',wx_interval_hint:'Mínimo 300 s (5 min) para no saturar la API meteorológica.',wx_periodic_incomplete:'Indica ICAO de estación y destino para el modo periódico.',
+    aprswx_apikey:'Clave API de aprs.fi',aprswx_apikey_ph_set:'guardada – vacío = conservar',aprswx_apikey_ph_unset:'p. ej. 123456.abcdefgh',aprswx_apikey_clear:'Quitar',aprswx_apikey_hint:'Gratis con una cuenta de aprs.fi: My account → API keys. Sin clave, el servicio APRS está desactivado.',aprswx_default_call:'Estación por defecto',aprswx_default_call_hint:'Para un "APRSWX" sin indicativo y para el envío periódico.',aprswx_max_age:'Marcar informes con más de (segundos)',aprswx_max_age_hint:'Los informes más antiguos llevan la marca "OLD". 0 = nunca.',aprswx_periodic_call:'Estación para el envío periódico',aprswx_periodic_call_hint:'Vacío = estación por defecto.',aprswx_periodic_incomplete:'El envío periódico APRS necesita clave API, estación y destino.',aprswx_key_removed:'La clave API se quitará al guardar.',aprswx_nokey:'No hay clave API guardada – las peticiones "APRSWX" no se responden.',wx_sec_general:'General',wx_sec_general_note:'para METAR y APRS',wx_sec_metar:'METAR',wx_sec_metar_note:'tiempo de aeropuertos de aviationweather.gov',wx_sec_aprs:'APRS',wx_sec_aprs_note:'estaciones APRS/CWOP de',wx_saved:'✓ Guardado – activo ya.',wx_save_partial:'General y METAR guardados, APRS no: ',aprswx_apikey_ph_set_short:'guardada',
+    ui_issi_or_gssi:'ISSI o GSSI',
     live_sds_desc:'Transmite un mensaje de texto a todos los radios de la celda, repitiéndose al intervalo de Home Mode Display.',
     live_sds_text:'Texto del mensaje (máx. 251 caracteres)',live_sds_repeat:'Repetir (0=∞)',live_sds_send:'Difundir',
     live_sds_clear_all:'Borrar Todo',live_sds_empty:'No hay difusiones activas.',
@@ -9127,13 +9287,15 @@ const LANGS={
     no_terminals:'Nincs regisztrált rádió',no_calls:'Nincs aktív hívás',
     live_log:'Élő napló',autoscroll:'Automatikus görgetés',filter_all:'Mind',
     clear:'Törlés',export:'Exportálás',restart:'Újraindítás',shutdown:'Leállítás',save:'Mentés',
-    cfg_sec_configuration:'Konfiguráció',cfg_sec_access:'Hozzáférés-vezérlés',cfg_sec_wx:'WX / METAR',whitelist_title:'ISSI engedélyezőlista',whitelist_add:'ISSI hozzáadása',whitelist_empty:'Üres lista — nyílt hálózat (bármely rádió regisztrálhat).',
+    cfg_sec_configuration:'Konfiguráció',cfg_sec_access:'Hozzáférés-vezérlés',cfg_sec_wx:'WX / METAR / APRS',whitelist_title:'ISSI engedélyezőlista',whitelist_add:'ISSI hozzáadása',whitelist_empty:'Üres lista — nyílt hálózat (bármely rádió regisztrálhat).',
     whitelist_help:'Ha a lista üres, bármely rádió regisztrálhat (nyílt hálózat). Ha vannak elemek, csak a listázott ISSI-k engedélyezettek; a többit elutasítja. A módosítások azonnal érvénybe lépnek és újraindítás után is megmaradnak.',
     whitelist_enforced:'AKTÍV',whitelist_open:'NYÍLT',whitelist_invalid:'Adjon meg érvényes ISSI-t (1–16777215).',
-    wx_title:'WX / METAR szolgáltatás',wx_help:'Beépített időjárás-szolgáltatás. A rádiók "METAR LROP" formájú SDS-t küldenek a szolgáltatás ISSI-jére, és dekódolt jelentést kapnak. Opcionálisan automatikusan elküldi egy rögzített állomás METAR-ját egy ISSI-re vagy csoportra adott időközönként. Adatok: aviationweather.gov.',
-    wx_enabled:'METAR válasz kérésre engedélyezése',wx_service_issi:'Szolgáltatás ISSI',wx_periodic_enabled:'Időszakos küldés engedélyezése',
+    wx_title:'WX szolgáltatás (METAR / APRS)',wx_help:'Beépített időjárás-szolgáltatás. A rádiók SDS-t küldenek a szolgáltatás ISSI-re: "METAR <ICAO>" egy dekódolt repülőtéri jelentéshez, vagy "APRSWX <HÍVÓJEL>" egy APRS időjárás-állomás legfrissebb jelentéséhez. Példa: "METAR EDDK". Mindkét forrás időszakosan is küldheti adatait egy ISSI-nek vagy csoportnak.',
+    wx_enabled:'Időjárás-lekérdezések megválaszolása (METAR, APRS)',wx_service_issi:'Szolgáltatás ISSI',wx_periodic_enabled:'Időszakos küldés engedélyezése',
     wx_periodic_icao:'Állomás ICAO',wx_periodic_dest:'Cél',wx_periodic_isgroup:'A cél csoport',wx_periodic_isgroup_hint:'(GSSI egyedi ISSI helyett)',
     wx_periodic_interval:'Időköz (másodperc)',wx_interval_hint:'Legalább 300 mp (5 perc), hogy ne terhelje túl az időjárás API-t.',wx_periodic_incomplete:'Add meg az állomás ICAO-t és a célt az időszakos módhoz.',
+    aprswx_apikey:'aprs.fi API-kulcs',aprswx_apikey_ph_set:'mentve – üres = megtartja',aprswx_apikey_ph_unset:'pl. 123456.abcdefgh',aprswx_apikey_clear:'Eltávolítás',aprswx_apikey_hint:'Ingyenes aprs.fi fiókkal: My account → API keys. Kulcs nélkül az APRS szolgáltatás ki van kapcsolva.',aprswx_default_call:'Alapértelmezett állomás',aprswx_default_call_hint:'Egyszerű "APRSWX" kéréshez és az időszakos küldéshez.',aprswx_max_age:'Régebbi jelentések jelölése (másodperc)',aprswx_max_age_hint:'A régebbi jelentések "OLD" jelölést kapnak. 0 = soha.',aprswx_periodic_call:'Állomás az időszakos küldéshez',aprswx_periodic_call_hint:'Üres = alapértelmezett állomás.',aprswx_periodic_incomplete:'Az időszakos APRS-küldéshez API-kulcs, állomás és cél szükséges.',aprswx_key_removed:'Az API-kulcs mentéskor törlődik.',aprswx_nokey:'Nincs mentett API-kulcs – az "APRSWX" kérésekre nincs válasz.',wx_sec_general:'Általános',wx_sec_general_note:'METAR-ra és APRS-re vonatkozik',wx_sec_metar:'METAR',wx_sec_metar_note:'repülőtéri időjárás az aviationweather.gov-ról',wx_sec_aprs:'APRS',wx_sec_aprs_note:'APRS/CWOP állomások, forrás:',wx_saved:'✓ Mentve – azonnal érvényes.',wx_save_partial:'Általános és METAR mentve, APRS nem: ',aprswx_apikey_ph_set_short:'mentve',
+    ui_issi_or_gssi:'ISSI vagy GSSI',
     sds_title:'⬡ SDS üzenet küldése',sds_dest:'Cél ISSI',
     sds_as_issi:'Küldés ISSI-ként: {issi}',
     sds_msg_label:'Üzenet',cancel:'Mégse',send:'Küldés',
@@ -9210,13 +9372,15 @@ const LANGS={
     no_terminals:'暂无终端注册',no_calls:'无活跃通话',
     live_log:'实时日志',autoscroll:'自动滚动',filter_all:'全部',
     clear:'清除',export:'导出',restart:'重启',shutdown:'关机',save:'保存',
-    cfg_sec_configuration:'配置',cfg_sec_access:'访问控制',cfg_sec_wx:'WX / METAR',whitelist_title:'ISSI 白名单',whitelist_add:'添加 ISSI',whitelist_empty:'列表为空 — 开放网络（任何电台均可注册）。',
+    cfg_sec_configuration:'配置',cfg_sec_access:'访问控制',cfg_sec_wx:'WX / METAR / APRS',whitelist_title:'ISSI 白名单',whitelist_add:'添加 ISSI',whitelist_empty:'列表为空 — 开放网络（任何电台均可注册）。',
     whitelist_help:'列表为空时，任何电台均可注册（开放网络）。有条目时，仅接受列出的 ISSI，其余一律拒绝。更改即时生效并在重启后保留。',
     whitelist_enforced:'已启用',whitelist_open:'开放',whitelist_invalid:'请输入有效的 ISSI（1–16777215）。',
-    wx_title:'WX / METAR 服务',wx_help:'内置气象服务。电台向服务 ISSI 发送如 "METAR LROP" 的 SDS 即可获得解码报告。可选择按间隔自动向 ISSI 或群组发送固定台站的 METAR。数据来自 aviationweather.gov。',
-    wx_enabled:'启用按需 METAR 响应',wx_service_issi:'服务 ISSI',wx_periodic_enabled:'启用定时广播',
+    wx_title:'WX 服务（METAR / APRS）',wx_help:'内置气象服务。电台向服务 ISSI 发送 SDS："METAR <ICAO>" 获取解码后的机场报告，或 "APRSWX <呼号>" 获取 APRS 气象站的最新报告。示例："METAR EDDK"。两种来源也可定时将数据发送到 ISSI 或通话组。',
+    wx_enabled:'启用按需气象响应（METAR、APRS）',wx_service_issi:'服务 ISSI',wx_periodic_enabled:'启用定时广播',
     wx_periodic_icao:'台站 ICAO',wx_periodic_dest:'目标',wx_periodic_isgroup:'目标为群组',wx_periodic_isgroup_hint:'（GSSI 而非单个 ISSI）',
     wx_periodic_interval:'间隔（秒）',wx_interval_hint:'最少 300 秒（5 分钟），以免频繁请求气象 API。',wx_periodic_incomplete:'定时模式需同时设置台站 ICAO 和目标。',
+    aprswx_apikey:'aprs.fi API 密钥',aprswx_apikey_ph_set:'已保存 – 留空即保留',aprswx_apikey_ph_unset:'例如 123456.abcdefgh',aprswx_apikey_clear:'移除',aprswx_apikey_hint:'使用 aprs.fi 账户免费获取：My account → API keys。没有密钥时 APRS 服务关闭。',aprswx_default_call:'默认气象站',aprswx_default_call_hint:'用于仅发送 "APRSWX" 以及定时发送。',aprswx_max_age:'标记早于此时间的报告（秒）',aprswx_max_age_hint:'较旧的报告标记为 "OLD"。0 = 从不。',aprswx_periodic_call:'定时发送的气象站',aprswx_periodic_call_hint:'留空 = 默认气象站。',aprswx_periodic_incomplete:'APRS 定时发送需要 API 密钥、气象站和目标。',aprswx_key_removed:'保存时将移除 API 密钥。',aprswx_nokey:'未保存 API 密钥 – 不会回复 "APRSWX" 查询。',wx_sec_general:'通用',wx_sec_general_note:'适用于 METAR 和 APRS',wx_sec_metar:'METAR',wx_sec_metar_note:'来自 aviationweather.gov 的机场天气',wx_sec_aprs:'APRS',wx_sec_aprs_note:'APRS/CWOP 气象站，来源：',wx_saved:'✓ 已保存 – 立即生效。',wx_save_partial:'通用和 METAR 已保存，APRS 未保存：',aprswx_apikey_ph_set_short:'已保存',
+    ui_issi_or_gssi:'ISSI 或 GSSI',
     sds_title:'⬡ 发送 SDS 短消息',sds_dest:'目标 ISSI',
     sds_as_issi:'以 ISSI {issi} 发送',
     live_sds_desc:'向本小区所有终端广播文本消息，按 Home Mode Display 间隔重复发送。直到删除或达到重复次数为止。',
@@ -9531,7 +9695,7 @@ const LANGS={
     "cfg_sec_configuration": "Configuração",
     "cfg_sec_access": "Controlo de acesso",
     "cfg_sec_remote": "Controlo remoto",
-    "cfg_sec_wx": "WX / METAR",
+    "cfg_sec_wx": "WX / METAR / APRS",
     "whitelist_title": "Lista de ISSI autorizados",
     "whitelist_add": "Adicionar ISSI",
     "whitelist_empty": "Lista vazia — rede aberta (qualquer rádio pode registar-se).",
@@ -9558,9 +9722,9 @@ const LANGS={
     "remote_cmd_del": "Remover",
     "remote_empty_issi": "Adiciona pelo menos um ISSI autorizado quando esta função estiver ativa.",
     "remote_invalid_code": "Introduz um código de estado (0–65535).",
-    "wx_title": "Serviço WX / METAR",
-    "wx_help": "Serviço meteorológico integrado. Os rádios enviam uma SDS, como «METAR LROP», para o ISSI do serviço para receber um relatório descodificado. Opcionalmente, envia automaticamente o METAR de uma estação fixa para um ISSI ou talkgroup a intervalos definidos. Dados de aviationweather.gov.",
-    "wx_enabled": "Ativar resposta a pedidos METAR",
+    "wx_title": "Serviço WX (METAR / APRS)",
+    "wx_help": "Serviço meteorológico integrado. Os rádios enviam uma SDS para o ISSI do serviço: «METAR <ICAO>» para um relatório de aeroporto descodificado ou «APRSWX <INDICATIVO>» para o último relatório de uma estação meteorológica APRS. Exemplo: «METAR EDDK». Ambas as fontes também podem enviar os seus dados periodicamente para um ISSI ou grupo.",
+    "wx_enabled": "Ativar resposta a pedidos meteorológicos (METAR, APRS)",
     "wx_service_issi": "ISSI do serviço",
     "wx_periodic_enabled": "Ativar difusão automática periódica",
     "wx_periodic_icao": "Código ICAO da estação",
@@ -9570,6 +9734,29 @@ const LANGS={
     "wx_periodic_interval": "Intervalo (segundos)",
     "wx_interval_hint": "Mínimo de 300 s (5 min) para não sobrecarregar a API meteorológica.",
     "wx_periodic_incomplete": "Define o código ICAO da estação e o destino para o modo periódico.",
+    "aprswx_apikey": "Chave API do aprs.fi",
+    "aprswx_apikey_ph_set": "guardada – vazio = manter",
+    "aprswx_apikey_ph_unset": "p. ex. 123456.abcdefgh",
+    "aprswx_apikey_clear": "Remover",
+    "aprswx_apikey_hint": "Gratuita com uma conta aprs.fi: My account → API keys. Sem chave, o serviço APRS fica desligado.",
+    "aprswx_default_call": "Estação predefinida",
+    "aprswx_default_call_hint": "Usada para um «APRSWX» simples e para o envio periódico.",
+    "aprswx_max_age": "Marcar relatórios com mais de (segundos)",
+    "aprswx_max_age_hint": "Os relatórios mais antigos recebem a marca «OLD». 0 = nunca.",
+    "aprswx_periodic_call": "Estação para o envio periódico",
+    "aprswx_periodic_call_hint": "Vazio = estação predefinida.",
+    "aprswx_periodic_incomplete": "O envio periódico APRS precisa de chave API, estação e destino.",
+    "aprswx_key_removed": "A chave API será removida ao guardar.",
+    "aprswx_nokey": "Nenhuma chave API guardada – os pedidos «APRSWX» não têm resposta.",
+    "wx_sec_general": "Geral",
+    "wx_sec_general_note": "aplica-se a METAR e APRS",
+    "wx_sec_metar": "METAR",
+    "wx_sec_metar_note": "tempo de aeroportos de aviationweather.gov",
+    "wx_sec_aprs": "APRS",
+    "wx_sec_aprs_note": "estações APRS/CWOP de",
+    "wx_saved": "✓ Guardado – ativo de imediato.",
+    "wx_save_partial": "Geral e METAR guardados, APRS não: ",
+    "aprswx_apikey_ph_set_short": "guardada",
     "sds_title": "⬡ Enviar mensagem SDS",
     "sds_dest": "ISSI de destino",
     "sds_as_issi": "Enviado com o ISSI {issi}",
@@ -10792,7 +10979,7 @@ const LANGS={
     "cfg_sec_configuration": "Configuration",
     "cfg_sec_access": "Contrôle d’accès",
     "cfg_sec_remote": "Commande à distance",
-    "cfg_sec_wx": "WX / METAR",
+    "cfg_sec_wx": "WX / METAR / APRS",
     "whitelist_title": "Liste des ISSI autorisés",
     "whitelist_add": "Ajouter un ISSI",
     "whitelist_empty": "Liste vide — réseau ouvert (toute radio peut s’enregistrer).",
@@ -10819,9 +11006,9 @@ const LANGS={
     "remote_cmd_del": "Supprimer",
     "remote_empty_issi": "Ajoutez au moins un ISSI autorisé lorsque cette fonction est activée.",
     "remote_invalid_code": "Saisissez un code d’état (0–65535).",
-    "wx_title": "Service WX / METAR",
-    "wx_help": "Service météorologique intégré. Les radios envoient un SDS tel que « METAR LROP » à l’ISSI du service pour recevoir un bulletin décodé. En option, envoyez automatiquement le METAR d’une station fixe à un ISSI ou talkgroup à intervalle défini. Données de aviationweather.gov.",
-    "wx_enabled": "Activer la réponse aux demandes METAR",
+    "wx_title": "Service WX (METAR / APRS)",
+    "wx_help": "Service météo intégré. Les radios envoient un SDS à l’ISSI du service : « METAR <ICAO> » pour un bulletin d’aéroport décodé ou « APRSWX <INDICATIF> » pour le dernier relevé d’une station météo APRS. Exemple : « METAR EDDK ». Les deux sources peuvent aussi envoyer leurs données périodiquement à un ISSI ou à un groupe.",
+    "wx_enabled": "Activer la réponse aux demandes météo (METAR, APRS)",
     "wx_service_issi": "ISSI du service",
     "wx_periodic_enabled": "Activer la diffusion automatique périodique",
     "wx_periodic_icao": "Code OACI de la station",
@@ -10831,6 +11018,29 @@ const LANGS={
     "wx_periodic_interval": "Intervalle (secondes)",
     "wx_interval_hint": "Minimum 300 s (5 min) pour ne pas surcharger l’API météorologique.",
     "wx_periodic_incomplete": "Définissez le code OACI de la station et la destination pour le mode périodique.",
+    "aprswx_apikey": "Clé API aprs.fi",
+    "aprswx_apikey_ph_set": "enregistrée – vide = conserver",
+    "aprswx_apikey_ph_unset": "p. ex. 123456.abcdefgh",
+    "aprswx_apikey_clear": "Supprimer",
+    "aprswx_apikey_hint": "Gratuite avec un compte aprs.fi : My account → API keys. Sans clé, le service APRS est désactivé.",
+    "aprswx_default_call": "Station par défaut",
+    "aprswx_default_call_hint": "Utilisée pour un « APRSWX » seul et pour l’envoi périodique.",
+    "aprswx_max_age": "Marquer les relevés de plus de (secondes)",
+    "aprswx_max_age_hint": "Les relevés plus anciens portent la mention « OLD ». 0 = jamais.",
+    "aprswx_periodic_call": "Station pour l’envoi périodique",
+    "aprswx_periodic_call_hint": "Vide = station par défaut.",
+    "aprswx_periodic_incomplete": "L’envoi périodique APRS nécessite une clé API, une station et une destination.",
+    "aprswx_key_removed": "La clé API sera supprimée à l’enregistrement.",
+    "aprswx_nokey": "Aucune clé API enregistrée – les demandes « APRSWX » restent sans réponse.",
+    "wx_sec_general": "Général",
+    "wx_sec_general_note": "pour METAR et APRS",
+    "wx_sec_metar": "METAR",
+    "wx_sec_metar_note": "météo des aéroports d’aviationweather.gov",
+    "wx_sec_aprs": "APRS",
+    "wx_sec_aprs_note": "stations APRS/CWOP, source :",
+    "wx_saved": "✓ Enregistré – actif immédiatement.",
+    "wx_save_partial": "Général et METAR enregistrés, APRS non : ",
+    "aprswx_apikey_ph_set_short": "enregistrée",
     "sds_title": "⬡ Envoyer un message SDS",
     "sds_dest": "ISSI de destination",
     "sds_as_issi": "Envoyé avec l’ISSI {issi}",
@@ -13912,7 +14122,7 @@ function lstRenderActivity(){
   }
   const liveRows=live.map(e=>`<tr>
       <td><span class="num">${escHtml(String(e.ts))}</span></td>
-      <td>${typeof idCell==='function'?idCell(e.issi):('<code>'+e.issi+'</code>')}</td>
+      <td>${msIdCell({issi:e.issi,home:state.homeByIssi&&state.homeByIssi[e.issi]},'')}</td>
       <td>${e.activityHtml}</td>
       <td><code>${escHtml(String(e.dest))}</code> · <span class="num accent">${e.dur}</span></td>
     </tr>`).join('');
@@ -13920,7 +14130,7 @@ function lstRenderActivity(){
     const destStr=e.dest?`<code>${e.dest}</code>`:'<span class="muted">—</span>';
     return`<tr>
       <td><span class="num">${escHtml(e.ts||'')}</span></td>
-      <td>${typeof idCell==='function'?idCell(e.issi):('<code>'+e.issi+'</code>')}</td>
+      <td>${msIdCell({issi:e.issi,home:lastHeardHome(e)},'')}</td>
       <td>${typeof activityBadge==='function'?activityBadge(e.activity):escHtml(e.activity||'')}</td>
       <td>${destStr}</td>
     </tr>`;
@@ -14300,7 +14510,7 @@ async function wifiCall(url, body){
 function escAttr(s){ return String(s).replace(/&/g,'&amp;').replace(/'/g,"&#39;").replace(/"/g,'&quot;'); }
 
 // ── State + WS ────────────────────────────────────────────────────────────
-let ws=null,state={ms:{},calls:{},emergencies:{},secByIssi:{},cellSec:null,lastHeard:[],sdsLog:[],dapnetLog:[],geoalarmEvents:[],brewOnline:false,brewVer:0,dgnaDefaultAttachmentMode:0,dgnaAttachmentModePickerEnabled:false},sdsDest=0,lstSdsSource=0;
+let ws=null,state={ms:{},calls:{},emergencies:{},secByIssi:{},homeByIssi:{},cellSec:null,lastHeard:[],sdsLog:[],dapnetLog:[],geoalarmEvents:[],brewOnline:false,brewVer:0,dgnaDefaultAttachmentMode:0,dgnaAttachmentModePickerEnabled:false},sdsDest=0,lstSdsSource=0;
 let dgnaUi={selectedGssi:0,targetChecks:{},statusLog:[],lastByIssi:{}};
 
 // ── RadioID callsigns (indicativ) ──────────────────────────────────────────────
@@ -14337,9 +14547,9 @@ function refreshCallsigns(){
   if(_csInflight||document.hidden)return;
   if(typeof dashLinkState!=='undefined'&&dashLinkState!=='online')return;
   const ids=new Set();
-  Object.values(state.ms).forEach(m=>ids.add(m.issi));
+  Object.values(state.ms).forEach(m=>{ids.add(m.issi);if(m.home&&m.home.issi)ids.add(m.home.issi);});
   Object.values(state.calls).forEach(c=>{if(c.caller_issi)ids.add(c.caller_issi);if(c.called_issi&&c.call_type!=='group')ids.add(c.called_issi);if(c.active_speaker)ids.add(c.active_speaker);});
-  state.lastHeard.forEach(e=>{if(e.issi)ids.add(e.issi);});
+  state.lastHeard.forEach(e=>{if(e.issi)ids.add(e.issi);const h=lastHeardHome(e);if(h&&h.issi)ids.add(h.issi);});
   (state.sdsLog||[]).forEach(e=>{if(e.source_issi)ids.add(e.source_issi);if(e.dest_issi&&!e.is_group)ids.add(e.dest_issi);});
   Object.values(state.emergencies||{}).forEach(e=>{if(e.issi)ids.add(e.issi);});
   const unknown=[...ids].filter(id=>id&&callsigns[id]===undefined).slice(0,256);
@@ -14599,6 +14809,7 @@ function handleMsg(msg){
       if(msg.log&&msg.log.length){document.getElementById('log-container').innerHTML='';msg.log.forEach(e=>appendLog(e));}
       setBrewStatus(!!msg.brew_online,Math.max(1,msg.brew_version||0));
       state.secByIssi={};(msg.ms||[]).forEach(m=>{state.secByIssi[m.issi]={authenticated:!!m.authenticated,encrypting:!!m.encrypting};});
+      state.homeByIssi={};(msg.ms||[]).forEach(m=>{if(m.home)state.homeByIssi[m.issi]=m.home;});
       setCellSecurity(msg.cell_security||null);
       if(msg.fallback_config_active){showFallbackBanner(msg.fallback_config_reason||'');}
       // If the server already has recent RF snapshots, paint them instantly
@@ -14620,10 +14831,10 @@ function handleMsg(msg){
       // registered entries must have a defined-but-null selected_group so the equality
       // comparison `g === sel` in renderStations behaves consistently with the server-side
       // None initialiser in server.rs.
-      state.ms[msg.issi]=Object.assign({issi:msg.issi,groups:[],group_catalog:[],selected_group:null,rssi_dbfs:null,energy_saving_mode:0,authenticated:false,encrypting:false},state.ms[msg.issi]||{},state.secByIssi[msg.issi]||{},{issi:msg.issi,_last_seen_ts:Date.now()});
+      state.ms[msg.issi]=Object.assign({issi:msg.issi,groups:[],group_catalog:[],selected_group:null,rssi_dbfs:null,energy_saving_mode:0,authenticated:false,encrypting:false},state.ms[msg.issi]||{},state.secByIssi[msg.issi]||{},{home:state.homeByIssi[msg.issi]||null},{issi:msg.issi,_last_seen_ts:Date.now()});
       renderStations();renderDgnaPage();break;
     case 'ms_deregistered':
-      delete state.ms[msg.issi];delete state.secByIssi[msg.issi];renderStations();renderDgnaPage();break;
+      delete state.ms[msg.issi];delete state.secByIssi[msg.issi];delete state.homeByIssi[msg.issi];renderStations();renderDgnaPage();break;
     case 'otar_sck':
       secpOtar[msg.issi]=msg.status;if(document.getElementById('page-security').classList.contains('active'))secpRenderSubs();break;
     case 'ms_security':{
@@ -14634,12 +14845,17 @@ function handleMsg(msg){
       if(msg.encrypting!=null)f.encrypting=!!msg.encrypting;
       if(state.ms[msg.issi])Object.assign(state.ms[msg.issi],f);
       renderStations();break;}
+    case 'ms_visitor':
+      // Multi Network visitor: the row is its (V)ASSI; show its own ISSI and network too.
+      state.homeByIssi[msg.issi]=msg.home;
+      if(state.ms[msg.issi]){state.ms[msg.issi].home=msg.home;renderStations();}
+      refreshCallsigns();break;
     case 'ms_cell':
       if(state.ms[msg.issi]){state.ms[msg.issi].cell=msg.cell;renderStations();}
       break;
     case 'ms_moved_away':
       // Still on the cell it left: it went to another station (a sibling cell's ms_cell moves the row).
-      if(state.ms[msg.issi]&&(state.ms[msg.issi].cell??0)===msg.cell){delete state.ms[msg.issi];delete state.secByIssi[msg.issi];renderStations();renderDgnaPage();}
+      if(state.ms[msg.issi]&&(state.ms[msg.issi].cell??0)===msg.cell){delete state.ms[msg.issi];delete state.secByIssi[msg.issi];delete state.homeByIssi[msg.issi];renderStations();renderDgnaPage();}
       break;
     case 'ms_rssi':
       if(state.ms[msg.issi]){state.ms[msg.issi].rssi_dbfs=msg.rssi_dbfs;state.ms[msg.issi]._last_seen_ts=Date.now();}
@@ -14707,7 +14923,14 @@ function handleMsg(msg){
       tsClearCallCarrier(msg.call_id);updateTsBlocksCarrier();
       delete state.calls[msg.call_id];renderCalls();break;
     case 'ts_voice':
-      if(msg.carrier_num!=null)tsVoiceCarrier(msg.carrier_num,msg.ts,msg.speaker_issi);break;
+      if(msg.carrier_num!=null)tsVoiceCarrier(msg.carrier_num,msg.ts,msg.speaker_issi);
+      // The Calls page follows the talker like the Home time slots do: a voice burst names the
+      // speaker even when no speaker_changed came for it.
+      if(msg.speaker_issi){
+        const vc=Object.values(state.calls).find(c=>(c.carrier_num===msg.carrier_num&&c.ts===msg.ts)||(c.peer_carrier_num===msg.carrier_num&&c.peer_ts===msg.ts));
+        if(vc&&vc.active_speaker!==msg.speaker_issi){vc.active_speaker=msg.speaker_issi;renderCalls();}
+      }
+      break;
     case 'speaker_changed':
       if(state.calls[msg.call_id])state.calls[msg.call_id].active_speaker=msg.speaker_issi;
       if(msg.carrier_num!=null)tsEnsureCarrierInfo(msg.carrier_num);
@@ -14788,9 +15011,14 @@ function pushLastHeard(entry){
   // call_started often embeds last_heard and the server also emits a last_heard event.
   const dup=(state.lastHeard||[]).some(e=>e&&e.issi===issi&&e.activity===activity&&(e.dest||0)===dest&&e.ts===ts);
   if(dup)return;
-  state.lastHeard.unshift({ts,issi,activity,dest});
+  // Keep a Multi Network guest's home identity with the entry: it stays readable after the
+  // radio has left and its (V)ASSI is gone from homeByIssi.
+  const home=entry.home||(state.homeByIssi&&state.homeByIssi[issi])||null;
+  state.lastHeard.unshift({ts,issi,activity,dest,home});
   if(state.lastHeard.length>50)state.lastHeard.length=50;
 }
+// Home identity of a Last Heard entry: stored with it, else the radio's current one.
+function lastHeardHome(e){return (e&&e.home)||(state.homeByIssi&&state.homeByIssi[e.issi])||null;}
 function activityBadge(activity){
   if(activity==='call_group')return`<span class="pill pill-info">${t('act_call_group')}</span>`;
   if(activity==='call_individual')return`<span class="pill pill-warn">${t('act_call_individual')}</span>`;
@@ -15316,6 +15544,14 @@ function scheduleStationsRender(){
   },250);
 }
 
+// A Multi Network visitor is listed under its own ISSI (with its callsign), its (V)ASSI on this
+// cell below and a chip with its home network; every other radio as before.
+function msIdCell(m,cellChip){
+  const h=m.home;
+  if(!h||!h.issi)return idCell(m.issi)+cellChip;
+  const net=h.network?h.network:`${h.mcc}/${h.mnc}`;
+  return `${idCell(h.issi)} <span class="badge badge-blue" title="${escHtmlAttr(t('ms_visitor_title',{net:`${h.mcc}/${h.mnc}`}))}">${escHtml(t('ms_visitor',{net}))}</span>${cellChip}<div style="font-size:11px;color:var(--text2);margin-top:2px">${t('ms_vassi')} <code>${m.issi}</code></div>`;
+}
 function renderStations(){
   const ms=Object.values(state.ms);
   const msCount=ms.length,callCount=Object.keys(state.calls).length;
@@ -15338,7 +15574,7 @@ function renderStations(){
     const ls=m._last_seen_ts?Math.floor((Date.now()-m._last_seen_ts)/1000):m.last_seen_secs_ago;
     const emg=!!state.emergencies[m.issi];
     return`<tr${emg?' class="row-emergency"':''} data-ms-issi="${m.issi}">
-      <td>${emg?'<span class="badge badge-emergency">'+t('call_emergency')+'</span> ':''}${idCell(m.issi)}${m.cell!=null?' <span class="badge badge-dim" title="'+escHtmlAttr(t('cells_cell',{n:m.cell}))+'">C'+m.cell+'</span>':''}</td><td>${grps}</td>
+      <td>${emg?'<span class="badge badge-emergency">'+t('call_emergency')+'</span> ':''}${msIdCell(m,m.cell!=null?' <span class="badge badge-dim" title="'+escHtmlAttr(t('cells_cell',{n:m.cell}))+'">C'+m.cell+'</span>':'')}</td><td>${grps}</td>
       <td class="col-mobile-hide">${eeLabel(m.energy_saving_mode||0)}</td>
       <td><div class="gauge ${gcls}"><div class="gauge-track"><div class="gauge-fill" style="width:${pct}%"></div></div><span class="gauge-value">${rL}</span></div></td>
       <td>${secCell(m)}</td>
@@ -15373,7 +15609,7 @@ function renderCalls(){
     // Emergency call = ETSI call priority 15 (terminal emergency button). Flag it prominently.
     const emg=(c.priority||0)>=15;
     const emgBadge=emg?`<span class="pill pill-danger"><span class="pill-icon">${svgIcon('emergency')}</span>${t('call_emergency')}</span> `:'';
-    return`<tr${emg?' class="row-emergency"':''}><td class="col-mobile-hide"><code>${c.call_id}</code></td><td>${emgBadge}<span class="pill ${pillv}">${label}</span></td><td>${c.caller_issi?idCell(c.caller_issi):'<span class="muted">—</span>'}</td><td>${to}</td><td class="col-mobile-hide">${spk}</td><td><span class="num accent">${mm}:${ss}</span></td></tr>`;
+    return`<tr${emg?' class="row-emergency"':''}><td class="col-mobile-hide"><code>${c.call_id}</code></td><td>${emgBadge}<span class="pill ${pillv}">${label}</span></td><td>${c.caller_issi?idCell(c.caller_issi):'<span class="muted">—</span>'}</td><td>${to}</td><td>${spk}</td><td><span class="num accent">${mm}:${ss}</span></td></tr>`;
   }).join('');
   applyTableStackLabels(tb);
   }
@@ -15388,7 +15624,8 @@ function renderLastHeard(){
   tb.innerHTML=state.lastHeard.map(e=>{
     const destStr=e.dest?`<code>${e.dest}</code>`:'<span class="muted">—</span>';
     const isOnline=!!state.ms[e.issi];
-    const issiHtml=`${idCell(e.issi)}${isOnline?` <span class="pill pill-ok">${t('online_badge')}</span>`:''}`;
+    const online=isOnline?` <span class="pill pill-ok">${t('online_badge')}</span>`:'';
+    const issiHtml=msIdCell({issi:e.issi,home:lastHeardHome(e)},online);
     return`<tr>
       <td><span class="num">${e.ts}</span></td>
       <td>${issiHtml}</td><td>${activityBadge(e.activity)}</td><td>${destStr}</td>
@@ -16339,6 +16576,9 @@ const CFG_HELP_BY_ID={
   'rm-tel-tls':'roam_help_link_tls','rm-cmd-tls':'roam_help_link_tls','rm-tel-pass':'roam_help_link_pass','rm-cmd-pass':'roam_help_link_pass','rm-tel-lat':'roam_help_tel_pos','rm-tel-lon':'roam_help_tel_pos','rm-tel-site':'roam_help_tel_site',
   'rm-n-id':'roam_help_n_id','rm-n-carrier':'roam_help_n_carrier','rm-n-ext':'roam_help_n_ext','rm-n-types':'roam_help_n_types','rm-n-sync':'roam_help_n_sync',
   'rm-n-load':'roam_help_n_load','rm-n-la':'roam_help_n_la','rm-n-rxlev':'roam_help_n_rxlev','rm-n-txpwr':'roam_help_n_txpwr',
+  'wx-periodic-interval':'wx_interval_hint','aprswx-periodic-interval':'wx_interval_hint',
+  'aprswx-apikey':'aprswx_apikey_hint','aprswx-default-call':'aprswx_default_call_hint',
+  'aprswx-max-age':'aprswx_max_age_hint','aprswx-periodic-call':'aprswx_periodic_call_hint',
 };
 let cfgHelpPop=null,cfgHelpBtn=null;
 function closeCfgHelp(){
@@ -17138,12 +17378,21 @@ async function saveSdsCommands(){
 }
 function setRemoteMsg(txt,ok){const el=document.getElementById('remote-msg');if(!el)return;el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';setTimeout(()=>{if(el.textContent===txt)el.textContent='';},4000);}
 
-// ── WX / METAR service ──────────────────────────────────────────────────────
+// ── WX service: General + METAR ([wx_service]) and APRS weather ([aprs_wx]) ──────
+let aprsWxHasKey=false, aprsWxClearKey=false;
+function updateAprsWxKeyUi(){
+  const key=document.getElementById('aprswx-apikey');if(!key)return;
+  const saved=aprsWxHasKey&&!aprsWxClearKey;
+  const ph=saved?(matchMedia('(max-width:700px)').matches?'aprswx_apikey_ph_set_short':'aprswx_apikey_ph_set'):'aprswx_apikey_ph_unset';
+  key.setAttribute('data-i18n-placeholder',ph);key.placeholder=t(ph);
+  document.getElementById('aprswx-apikey-clear').style.display=saved?'':'none';
+  document.getElementById('aprswx-nokey').style.display=(saved||key.value.trim())?'none':'';
+}
 async function loadWx(){
   try{
-    const r=await fetch('/api/wx');
-    if(!r.ok){setWxMsg(t('conn_error'),false);return;}
-    const d=await r.json();
+    const [r,ra]=await Promise.all([fetch('/api/wx'),fetch('/api/aprs_wx',{cache:'no-store'})]);
+    if(!r.ok||!ra.ok){setWxMsg(t('conn_error'),false);return;}
+    const d=await r.json(), a=await ra.json();
     document.getElementById('wx-enabled').checked=!!d.enabled;
     document.getElementById('wx-service-issi').value=d.service_issi||'';
     document.getElementById('wx-periodic-enabled').checked=!!d.periodic_enabled;
@@ -17151,26 +17400,57 @@ async function loadWx(){
     document.getElementById('wx-periodic-issi').value=d.periodic_issi||'';
     document.getElementById('wx-periodic-isgroup').checked=!!d.periodic_is_group;
     document.getElementById('wx-periodic-interval').value=d.periodic_interval_secs||1800;
+    aprsWxHasKey=!!a.has_apikey;aprsWxClearKey=false;
+    const key=document.getElementById('aprswx-apikey');key.value='';
+    if(!key.dataset.hook){key.dataset.hook='1';key.addEventListener('input',updateAprsWxKeyUi);}
+    document.getElementById('aprswx-default-call').value=a.default_call||'';
+    document.getElementById('aprswx-max-age').value=(a.max_age_secs??3600);
+    document.getElementById('aprswx-periodic-enabled').checked=!!a.periodic_enabled;
+    document.getElementById('aprswx-periodic-call').value=a.periodic_call||'';
+    document.getElementById('aprswx-periodic-dest').value=a.periodic_dest||'';
+    document.getElementById('aprswx-periodic-isgroup').checked=!!a.periodic_is_group;
+    document.getElementById('aprswx-periodic-interval').value=a.periodic_interval_secs||1800;
+    updateAprsWxKeyUi();
   }catch{setWxMsg(t('conn_error'),false);}
 }
+function clearAprsWxKey(){aprsWxClearKey=true;document.getElementById('aprswx-apikey').value='';updateAprsWxKeyUi();setWxMsg(t('aprswx_key_removed'),true);}
 async function saveWx(){
+  const val=id=>document.getElementById(id);
+  const call=id=>(val(id).value||'').trim().toUpperCase();
   const body={
-    enabled:document.getElementById('wx-enabled').checked,
-    service_issi:parseInt(document.getElementById('wx-service-issi').value)||9998,
-    periodic_enabled:document.getElementById('wx-periodic-enabled').checked,
-    periodic_issi:parseInt(document.getElementById('wx-periodic-issi').value)||0,
-    periodic_is_group:document.getElementById('wx-periodic-isgroup').checked,
-    periodic_icao:(document.getElementById('wx-periodic-icao').value||'').trim().toUpperCase(),
-    periodic_interval_secs:Math.max(300,parseInt(document.getElementById('wx-periodic-interval').value)||1800)
+    enabled:val('wx-enabled').checked,
+    service_issi:parseInt(val('wx-service-issi').value)||9998,
+    periodic_enabled:val('wx-periodic-enabled').checked,
+    periodic_issi:parseInt(val('wx-periodic-issi').value)||0,
+    periodic_is_group:val('wx-periodic-isgroup').checked,
+    periodic_icao:(val('wx-periodic-icao').value||'').trim().toUpperCase(),
+    periodic_interval_secs:Math.max(300,parseInt(val('wx-periodic-interval').value)||1800)
   };
   if(body.periodic_enabled&&(!body.periodic_issi||!body.periodic_icao)){setWxMsg(t('wx_periodic_incomplete'),false);return;}
+  const key=(val('aprswx-apikey').value||'').trim();
+  const aprs={
+    apikey:key,
+    apikey_clear:aprsWxClearKey&&!key,
+    default_call:call('aprswx-default-call'),
+    max_age_secs:Math.max(0,parseInt(val('aprswx-max-age').value)||0),
+    periodic_enabled:val('aprswx-periodic-enabled').checked,
+    periodic_call:call('aprswx-periodic-call'),
+    periodic_dest:parseInt(val('aprswx-periodic-dest').value)||0,
+    periodic_is_group:val('aprswx-periodic-isgroup').checked,
+    periodic_interval_secs:Math.max(300,parseInt(val('aprswx-periodic-interval').value)||1800)
+  };
+  const willHaveKey=!!key||(aprsWxHasKey&&!aprsWxClearKey);
+  if(aprs.periodic_enabled&&(!willHaveKey||!(aprs.periodic_call||aprs.default_call)||!aprs.periodic_dest)){setWxMsg(t('aprswx_periodic_incomplete'),false);return;}
+  const post=(url,b)=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
   try{
-    const r=await fetch('/api/wx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(r.ok){setWxMsg(t('saved'),true);loadWx();}
-    else setWxMsg(t('save_fail')+': '+await r.text(),false);
+    const r=await post('/api/wx',body);
+    if(!r.ok){setWxMsg(t('save_fail')+': '+await r.text(),false);return;}
+    const ra=await post('/api/aprs_wx',aprs);
+    if(!ra.ok){setWxMsg(t('wx_save_partial')+await ra.text(),false);return;}
+    setWxMsg(t('wx_saved'),true);loadWx();
   }catch{setWxMsg(t('conn_error'),false);}
 }
-function setWxMsg(txt,ok){const el=document.getElementById('wx-msg');el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';setTimeout(()=>{if(el.textContent===txt)el.textContent='';},4000);}
+function setWxMsg(txt,ok){const el=document.getElementById('wx-msg');el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';setTimeout(()=>{if(el.textContent===txt)el.textContent='';},5000);}
 
 // ── Telegram alerts ─────────────────────────────────────────────────────────
 let tgChats=[];            // recipient chat IDs (numbers)
@@ -17505,6 +17785,28 @@ function setTgRecipMsg(txt,ok){const el=document.getElementById('tg-recipients-m
 
 
 function wsSend(msg){if(ws&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify(msg));return true;}return false;}
+// Station default language ([dashboard] language, also set in the Setup wizard). A change restarts
+// the service (Sebastian 2026-11-12), so every page and the login come back in it.
+function sysLangRender(){
+  const el=document.getElementById('sys-lang');if(!el)return;
+  el.innerHTML=(STATION_LANG?'':'<option value="" selected disabled>'+escHtml(t('sys_lang_browser'))+'</option>')+
+    Object.keys(LANGUAGE_NAMES).map(l=>'<option value="'+l+'"'+(l===STATION_LANG?' selected':'')+'>'+escHtml(LANGUAGE_NAMES[l])+'</option>').join('');
+}
+async function sysLangChange(el){
+  const l=el.value;if(!l||l===STATION_LANG)return;
+  const ok=await openSvcConfirm({title:t('sys_lang'),body:t('sys_lang_confirm',{lang:LANGUAGE_NAMES[l]||l}),confirmLabel:t('restart')});
+  if(!ok){sysLangRender();return;}
+  try{
+    const r=await fetch('/api/setup/language',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:l})});
+    if(!r.ok){await dashAlert(t('notice'),await r.text());sysLangRender();return;}
+    // The station default wins over a language this browser picked before.
+    try{localStorage.removeItem('fs_lang');}catch{}
+    const rr=await fetch('/api/service/restart',{method:'POST',credentials:'same-origin'});
+    if(!rr.ok)wsSend({type:'restart'});
+  }catch{wsSend({type:'restart'});}
+  beginServiceRestartWait();
+}
+document.addEventListener('DOMContentLoaded',sysLangRender);
 async function restartService(){
   const ok=await openSvcConfirm({
     title:t('restart'),
@@ -17529,10 +17831,17 @@ function openSvcConfirm(opts){
   const cancel=document.getElementById('svc-confirm-cancel');
   if(title)title.textContent=opts.title||'';
   if(body)body.textContent=opts.body||'';
-  if(cancel)cancel.style.display=opts.alertOnly?'none':'';
+  if(cancel){
+    cancel.style.display=opts.alertOnly?'none':'';
+    cancel.textContent=opts.cancelLabel||t('cancel');
+    cancel.className='btn'+(opts.cancelClass?' '+opts.cancelClass:'');
+    // okFirst: the confirm button on the left, Cancel on the right.
+    cancel.style.order=opts.okFirst?'2':'';
+  }
   if(ok){
     ok.textContent=opts.confirmLabel||(opts.alertOnly?t('ok'):t('confirm'));
-    ok.className='btn '+(opts.danger?'btn-danger':'btn-primary');
+    ok.className='btn '+(opts.okClass||(opts.danger?'btn-danger':'btn-primary'));
+    ok.style.order=opts.okFirst?'1':'';
   }
   return new Promise(resolve=>{
     _svcConfirmResolve=resolve;
@@ -19129,18 +19438,114 @@ async function loadRoaming(){
 }
 function roamRenderBrew(){
   const b=roamData.brew,el=document.getElementById('roam-brew');if(!el)return;
-  if(!b.configured){el.textContent=t('roam_brew_off');return;}
+  if(!b.configured){el.innerHTML=escHtml(t('roam_brew_off'))+fleetRow();return;}
   const wasOpen=!!el.querySelector('details[open]');
   const on=b.extensions.filter(x=>x.offered).length;
-  const cat={'bts-info':'roam_feat_roam','handover-v1':'roam_feat_roam','ms-cell':'roam_feat_roam','ms-moved':'roam_feat_roam','ms-reselection':'roam_feat_roam','call-restore':'roam_feat_calls','call-handoff':'roam_feat_calls','cell-directory':'roam_feat_cells','group-access':'roam_feat_groups','issi-check':'roam_feat_net','mni':'roam_feat_net'};
-  const order=['roam_feat_roam','roam_feat_calls','roam_feat_cells','roam_feat_groups','roam_feat_net','roam_feat_other'];
+  const cat={'fleet-control':'roam_feat_fleet','bts-info':'roam_feat_roam','handover-v1':'roam_feat_roam','ms-cell':'roam_feat_roam','ms-moved':'roam_feat_roam','ms-reselection':'roam_feat_roam','call-restore':'roam_feat_calls','call-handoff':'roam_feat_calls','cell-directory':'roam_feat_cells','group-access':'roam_feat_groups','issi-check':'roam_feat_net','mni':'roam_feat_net'};
+  const order=['roam_feat_fleet','roam_feat_roam','roam_feat_calls','roam_feat_cells','roam_feat_groups','roam_feat_net','roam_feat_other'];
   const ext=order.map(k=>{
     const xs=b.extensions.filter(x=>(cat[x.name]||'roam_feat_other')===k);
     return xs.length?'<div class="roam-feat-cat">'+escHtml(t(k))+'</div><div class="roam-feat-row">'+xs.map(x=>'<span class="roam-feat"><i class="'+(x.offered?'on':'off')+'"></i>'+escHtml(x.name)+'</span>').join('')+'</div>':'';
   }).join('');
   el.innerHTML='<b>Brew</b> '+escHtml(b.login||'')+' · '+escHtml(t(b.link_up?'roam_link_up':'roam_link_down'))+
+    // Fleet Control: the switch sits outside the collapsed list so it is always visible.
+    fleetRow()+
     '<details class="roam-feats"'+(wasOpen?' open':'')+'><summary>'+escHtml(t('roam_ext'))+' <span style="color:var(--muted)">'+on+'/'+b.extensions.length+'</span></summary><div>'+ext+'</div></details>';
 }
+/* ── Fleet Control (Docs/fleet-control.md): switch, control channel dialog, sidebar field ── */
+let fleetState=null;
+function fleetRow(){
+  const f=(roamData&&roamData.fleet_control)||fleetState;if(!f||!f.offered)return '';
+  return '<label class="roam-fleet"><span class="rf-text"><b>Fleet Control</b><span class="rf-sub">'+escHtml(t('fleet_desc'))+'</span></span>'+
+    '<span class="sw"><input type="checkbox" id="rm-fleet-on"'+(f.enabled?' checked':'')+' onchange="fleetToggle(this.checked)"><i></i></span></label>';
+}
+async function fleetPost(body){
+  const r=await fetch('/api/fleet-control',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const txt=await r.text();if(!r.ok)throw new Error(txt||String(r.status));return JSON.parse(txt);
+}
+// Switching remote management off asks twice (Sebastian 2026-11-12), with the buttons and their
+// colours swapped between the two dialogs so a double tap on one spot cannot get through:
+// 1) explanation, "I understand" left, red Cancel right; 2) "are you sure", Cancel left, red Yes right.
+async function confirmTwice(title,body1,body2){
+  if(!await openSvcConfirm({title:title,body:body1,confirmLabel:t('fleet_off_understood'),okFirst:true,okClass:'btn-primary',cancelClass:'btn-danger-solid'}))return false;
+  return openSvcConfirm({title:title,body:body2,confirmLabel:t('fleet_off_yes'),okClass:'btn-danger-solid'});
+}
+async function fleetToggle(on){
+  const box=document.getElementById('rm-fleet-on');
+  if(!on&&!await confirmTwice(t('fleet_off_title'),t('fleet_off_body1'),t('fleet_off_body2'))){if(box)box.checked=true;return;}
+  try{
+    const j=await fleetPost({enabled:on});
+    if(j.need_command){if(box)box.checked=false;fleetCmdOpen();return;}
+    if(j.restart)setText('roam-msg',t('fleet_restarting'));
+  }catch(e){if(box)box.checked=!on;setText('roam-msg',String(e.message||e));return;}
+  await refreshFleetControl();
+  if(roamData&&fleetState)roamData.fleet_control=fleetState;
+}
+function fleetCmdOpen(){
+  const f=(roamData&&roamData.fleet_control)||fleetState||{};
+  // The server address is never pre-filled (Sebastian); the user is the Brew login.
+  document.getElementById('fc-host').value='';
+  document.getElementById('fc-port').value='443';
+  document.getElementById('fc-tls').checked=true;
+  document.getElementById('fc-user').value=f.brew_login||'';
+  document.getElementById('fc-pass').value='';
+  setText('fc-msg','');
+  document.getElementById('fleet-cmd-modal').classList.add('open');
+  setTimeout(()=>document.getElementById('fc-host').focus(),30);
+}
+function fleetCmdClose(){document.getElementById('fleet-cmd-modal').classList.remove('open');}
+async function fleetCmdSave(){
+  const v=id=>document.getElementById(id).value.trim();
+  if(!v('fc-host')){setText('fc-msg',t('fleet_need_host'));return;}
+  const port=parseInt(v('fc-port')||'443',10);
+  const body={enabled:true,command:{host:v('fc-host'),port:port,use_tls:document.getElementById('fc-tls').checked,username:v('fc-user'),password:document.getElementById('fc-pass').value}};
+  const btn=document.getElementById('fc-save');btn.disabled=true;
+  try{
+    await fleetPost(body);
+    fleetCmdClose();setText('roam-msg',t('fleet_restarting'));
+  }catch(e){setText('fc-msg',String(e.message||e));}
+  finally{btn.disabled=false;}
+}
+async function refreshFleetControl(){
+  if(document.hidden)return;
+  try{
+    const r=await fetch('/api/fleet-control',{credentials:'same-origin',cache:'no-store'});
+    if(r.ok)fleetState=await r.json();
+    else if(r.status===401){
+      // Public overview without a session: only the banner status is open to visitors.
+      const p=await fetch('/api/fleet-banner',{credentials:'same-origin',cache:'no-store'});if(!p.ok)return;
+      fleetState=await p.json();
+    }else return;
+  }catch{return;}
+  renderFleetBadge();
+  renderMaintBanner();
+}
+function renderMaintBanner(){
+  const b=document.getElementById('maint-banner');if(!b)return;
+  const f=fleetState||{};const live=f.live_update,m=f.maintenance;
+  if(!live&&!m){b.style.display='none';return;}
+  const title=document.getElementById('maint-title'),sub=document.getElementById('maint-sub');
+  if(live){
+    title.textContent=t('maint_live_title');
+    sub.textContent=t('maint_live_sub')+(live.percent!=null?' · '+live.percent+' %':'');
+  }else{
+    title.textContent=t('maint_title');
+    const min=Math.max(1,Math.ceil((m.left_secs||0)/60));
+    sub.textContent=(m.by?t('maint_sub',{by:m.by,min:min}):t('maint_sub_noby',{min:min}))+(m.reason?' · '+m.reason:'');
+  }
+  b.style.display='flex';
+}
+function renderFleetBadge(){
+  // Sidebar under Health: only when the server supports Fleet Control; green on, red off.
+  const b=document.getElementById('fleet-badge'),l=document.getElementById('fleet-badge-label');if(!b||!l)return;
+  const f=fleetState;if(!f||!f.offered){b.style.display='none';return;}
+  l.textContent=t(f.enabled?'fleet_on':'fleet_off');
+  l.style.color=f.enabled?'#3fb950':'var(--danger)';
+  b.style.display='flex';
+  b.title='Fleet Control: '+t(f.enabled?'fleet_on':'fleet_off')+(f.connected?'':'\n'+t('fleet_not_connected'));
+}
+setInterval(refreshFleetControl,5000);
+setTimeout(refreshFleetControl,1500);
 function roamRenderCells(){
   const tb=document.getElementById('roam-cells-tbody');if(!tb)return;
   const primaryLa=roamData.cells[0].location_area;
@@ -19292,6 +19697,10 @@ function roamServicesText(d){
   const on=ROAM_SERVICES.filter(k=>d[k]);
   return on.length?on.map(k=>t('roam_svc_'+k)).join(', '):t('roam_services_none');
 }
+// MCC/MNC a cell broadcasts: its network (Multi Network), else the station's. A neighbour entry
+// without MCC/MNC means the serving cell's own (TS 100 392-2 table 18.64, notes 1 and 2).
+function roamCellMm(c){const n=c&&(roamData.networks||[]).find(x=>x.name===c.network);return n?[n.mcc,n.mnc]:[roamData.mcc,roamData.mnc];}
+function roamMmText(mcc,mnc,c){const d=roamCellMm(c);return (mcc!=null?mcc:d[0])+'/'+(mnc!=null?mnc:d[1]);}
 function roamRenderNeighbours(){
   if(!roamData)return;
   const c=roamCell();
@@ -19302,6 +19711,7 @@ function roamRenderNeighbours(){
   const rows=(editable?c.neighbours:[]).map((n,i)=>'<tr><td data-label="ID">'+n.cell_identifier_ca+'</td>'+
     '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(n.main_carrier_number,n.main_carrier_number_extension!=null?n.main_carrier_number_extension:c.carrier_ext)+'</td>'+
     '<td data-label="LA">'+(n.location_area!=null?n.location_area:'—')+'</td>'+
+    '<td data-label="MCC/MNC">'+roamMmText(n.mcc,n.mnc,c)+'</td>'+
     '<td data-label="'+escHtmlAttr(t('roam_th_server'))+'">'+roamServerCell(n,c)+'</td>'+
     '<td data-label="'+escHtmlAttr(t('roam_th_types'))+'">'+n.cell_reselection_types_supported+' — '+escHtml(t('roam_types_'+n.cell_reselection_types_supported))+'</td>'+
     '<td data-label="'+escHtmlAttr(t('roam_th_services'))+'">'+escHtml(roamServicesText(n.bs_service_details))+'</td>'+
@@ -19310,9 +19720,10 @@ function roamRenderNeighbours(){
   const auto=(c.siblings||[]).map(s=>'<tr style="color:var(--muted)"><td data-label="ID">'+s.cell_identifier_ca+'</td>'+
     '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(s.main_carrier_number,(roamData.cells.find(x=>x.main_carrier===s.main_carrier_number)||c).carrier_ext)+'</td>'+
     '<td data-label="LA">'+(s.location_area!=null?s.location_area:'—')+'</td>'+
+    '<td data-label="MCC/MNC">'+roamMmText(s.mcc,s.mnc,roamData.cells.find(x=>x.main_carrier===s.main_carrier_number)||c)+'</td>'+
     '<td colspan="4">'+escHtml(t('roam_auto_sibling'))+'</td></tr>');
   const tb=document.getElementById('roam-nb-tbody');
-  if(tb)tb.innerHTML=rows.concat(auto).join('')||'<tr><td colspan="7" style="color:var(--muted)">'+escHtml(t('roam_nb_none'))+'</td></tr>';
+  if(tb)tb.innerHTML=rows.concat(auto).join('')||'<tr><td colspan="8" style="color:var(--muted)">'+escHtml(t('roam_nb_none'))+'</td></tr>';
   const count=(editable?c.neighbours.length:0)+(c.siblings||[]).length;
   setText('roam-nb-count',t('roam_nb_count',{n:count}));
   roamRenderDirectory();
@@ -19326,7 +19737,7 @@ function roamSameBand(a,b){return a!=null&&b!=null&&(a&0x3f0)===(b&0x3f0);}
 function roamMatch(n,c){
   const dir=roamData&&roamData.directory;if(!dir)return null;
   const ext=n.main_carrier_number_extension!=null?n.main_carrier_number_extension:c.carrier_ext;
-  const mcc=n.mcc!=null?n.mcc:roamData.mcc,mnc=n.mnc!=null?n.mnc:roamData.mnc;
+  const d=roamCellMm(c),mcc=n.mcc!=null?n.mcc:d[0],mnc=n.mnc!=null?n.mnc:d[1];
   const la=n.location_area!=null?n.location_area:c.location_area;
   return dir.find(e=>e.mcc===mcc&&e.mnc===mnc&&e.carrier===n.main_carrier_number&&roamSameBand(e.carrier_ext,ext)&&e.location_area===la)||null;
 }
@@ -19334,7 +19745,8 @@ function roamMatch(n,c){
 // absent LA in its entry is e's own.
 function roamListsCell(e,c){
   if(!e.neighbours)return null;
-  return e.neighbours.some(x=>x.mcc===roamData.mcc&&x.mnc===roamData.mnc&&x.carrier===c.main_carrier&&roamSameBand(x.carrier_ext,c.carrier_ext)&&(x.location_area!=null?x.location_area:e.location_area)===c.location_area);
+  const d=roamCellMm(c);
+  return e.neighbours.some(x=>x.mcc===d[0]&&x.mnc===d[1]&&x.carrier===c.main_carrier&&roamSameBand(x.carrier_ext,c.carrier_ext)&&(x.location_area!=null?x.location_area:e.location_area)===c.location_area);
 }
 // Where neighbour entry n of cell c differs from what the cell e broadcasts. An absent element means
 // "same as the serving cell" (table 18.64 note 2), so the serving cell's own value is compared then.
@@ -19369,12 +19781,14 @@ function roamServerCell(n,c){
   if(!roamData.directory)return '<span style="color:var(--muted)">—</span>';
   const e=roamMatch(n,c);
   if(!e)return '<span style="color:var(--muted)">'+escHtml(t('roam_dir_unknown'))+'</span>';
-  let h=roamDot(e.online)+escHtml(e.id)+(e.online?'':' <span style="color:var(--muted)">'+escHtml(t('roam_offline'))+'</span>');
+  // One block: the cell id on its own line (never broken), the warnings below it (phones stack the
+  // cell's children side by side otherwise).
+  let h='<div class="roam-srv"><span style="white-space:nowrap">'+roamDot(e.online)+escHtml(e.id)+(e.online?'':' <span style="color:var(--muted)">'+escHtml(t('roam_offline'))+'</span>')+'</span>';
   const warn=[];
   if(roamListsCell(e,c)===false)warn.push(t('roam_not_mutual',{id:e.id}));
   roamDiffs(n,c,e).forEach(x=>warn.push(x));
-  warn.forEach(w=>{h+='<div style="color:var(--warn,#c98a00);font-size:12px">⚠ '+escHtml(w)+'</div>';});
-  return h;
+  warn.forEach(w=>{h+='<div style="color:var(--warn,#c98a00);font-size:12px;margin-top:4px">⚠ '+escHtml(w)+'</div>';});
+  return h+'</div>';
 }
 function roamRenderDirectory(){
   const tb=document.getElementById('roam-dir-tbody');if(!tb||!roamData)return;
@@ -19382,7 +19796,7 @@ function roamRenderDirectory(){
   const offered=((roamData.brew||{}).extensions||[]).some(x=>x.name==='cell-directory'&&x.offered);
   const pick=document.getElementById('rm-n-pick'),pickRow=document.getElementById('rm-n-pick-row');
   if(pickRow)pickRow.style.display=dir&&dir.length?'':'none';
-  if(pick&&dir)pick.innerHTML='<option value="">—</option>'+dir.map((e,i)=>'<option value="'+i+'">'+escHtml(e.id+' · '+e.carrier+' · '+roamMhz(e.carrier,e.carrier_ext)+' · LA '+e.location_area+(e.online?'':' · '+t('roam_offline')))+'</option>').join('');
+  if(pick&&dir)pick.innerHTML='<option value="">—</option>'+dir.map((e,i)=>'<option value="'+i+'">'+escHtml(e.id+' · '+e.carrier+' · '+roamMhz(e.carrier,e.carrier_ext)+' · LA '+e.location_area+' · '+e.mcc+'/'+e.mnc+(e.online?'':' · '+t('roam_offline')))+'</option>').join('');
   if(!dir){tb.innerHTML='';setText('roam-dir-note',t(offered?'roam_dir_wait':'roam_dir_off'));return;}
   setText('roam-dir-note',t('roam_dir_count',{n:dir.length}));
   const own=c=>c.primary||c.own_list?c.neighbours:[];
@@ -19396,18 +19810,19 @@ function roamRenderDirectory(){
       '<td data-label="'+escHtmlAttr(t('roam_th_state'))+'"><span style="white-space:nowrap">'+roamDot(e.online)+escHtml(t(e.online?'roam_online':'roam_offline'))+'</span></td>'+
       '<td data-label="'+escHtmlAttr(t('cells_carrier'))+'">'+roamCarrier(e.carrier,e.carrier_ext)+'</td>'+
       '<td data-label="LA">'+e.location_area+'</td>'+
+      '<td data-label="MCC/MNC">'+e.mcc+'/'+e.mnc+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_levels'))+'">'+escHtml(lv)+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_listed_here'))+'">'+escHtml(by.length?by.join(', '):t('roam_dir_none'))+'</td>'+
       '<td data-label="'+escHtmlAttr(t('roam_th_lists_us'))+'">'+escHtml(e.neighbours?(back.length?back.join(', '):t('roam_dir_none')):'—')+'</td>'+
       '<td data-label="'+escHtmlAttr(t('th_actions'))+'">'+(listed>=0?'<button class="btn btn-sm" onclick="roamEditListed('+listed+')">'+escHtml(t('roam_edit'))+'</button>':'<button class="btn btn-sm" onclick="roamAddFromDir('+i+')">'+escHtml(t('roam_dir_add'))+'</button>')+'</td></tr>';
-  }).join('')||'<tr><td colspan="8" style="color:var(--muted)">'+escHtml(t('roam_dir_empty'))+'</td></tr>';
+  }).join('')||'<tr><td colspan="9" style="color:var(--muted)">'+escHtml(t('roam_dir_empty'))+'</td></tr>';
 }
 // Fill the open editor from directory cell i: carrier, band plan, LA, network when foreign, the
 // levels and services the cell broadcasts.
 function roamPick(i){
   const e=roamData&&roamData.directory&&roamData.directory[parseInt(i,10)];if(!e)return;
   vcSet('rm-n-carrier',String(e.carrier));vcSet('rm-n-ext',String(e.carrier_ext));vcSet('rm-n-la',String(e.location_area));
-  const foreign=e.mcc!==roamData.mcc||e.mnc!==roamData.mnc;
+  const own=roamCellMm(roamCell()),foreign=e.mcc!==own[0]||e.mnc!==own[1];
   vcSet('rm-n-mcc',foreign?String(e.mcc):'');vcSet('rm-n-mnc',foreign?String(e.mnc):'');
   vcSet('rm-n-rxlev',e.rxlev_access_min_dbm!=null?String((e.rxlev_access_min_dbm+125)/5):'');
   vcSet('rm-n-txpwr',e.ms_txpwr_max_dbm!=null?String((e.ms_txpwr_max_dbm-10)/5):'');
@@ -19446,6 +19861,8 @@ function roamNew(){
   roamRenderNeighbours();
 }
 function roamFillEditor(n){
+  // Empty MCC/MNC = the serving cell's network (table 18.64): shown as the placeholder.
+  {const d=roamCellMm(roamCell());const a=document.getElementById('rm-n-mcc'),b=document.getElementById('rm-n-mnc');if(a)a.placeholder=String(d[0]);if(b)b.placeholder=String(d[1]);setText('rm-n-mm-hint',t('roam_n_mm_hint',{mm:d[0]+'/'+d[1]}));}
   const v=x=>x==null?'':String(x);
   vcSet('rm-n-id',v(n.cell_identifier_ca));vcSet('rm-n-carrier',v(n.main_carrier_number));vcSet('rm-n-ext',v(n.main_carrier_number_extension));
   vcSet('rm-n-types',v(n.cell_reselection_types_supported));vcSet('rm-n-load',v(n.cell_load_ca));vcSet('rm-n-la',v(n.location_area));
@@ -19537,6 +19954,12 @@ function roamRenderLinks(){
   vcSet('rm-tel-lat',l?l.latitude:ROAM_DEFAULT_POS.lat);
   vcSet('rm-tel-lon',l?l.longitude:ROAM_DEFAULT_POS.lon);
 }
+// Remote command / control off: same double confirmation as Fleet Control (it runs over this channel).
+async function roamCmdToggle(box){
+  const was=!!(roamData&&roamData.command&&roamData.command.enabled);
+  if(!box.checked&&was&&!await confirmTwice(t('cmd_off_title'),t('cmd_off_body1'),t('cmd_off_body2')))box.checked=true;
+  roamLinkState('cmd');
+}
 function roamLinkState(p){
   const on=!!(document.getElementById('rm-'+p+'-on')||{}).checked;
   setText('rm-'+p+'-state',t(on?'roam_mn_on':'roam_mn_off'));
@@ -19584,6 +20007,10 @@ async function roamSave(extra){
   if(extra&&typeof extra==='object'&&!(extra instanceof Event))Object.assign(body,extra);
   if(body.cells[0].location_area==null){setText('roam-msg',t('roam_need_la'));return false;}
   if(!confirm(t('roam_confirm_save')))return false;
+  // Command channel switched off while Fleet Control is on: switch Fleet Control off first, so the
+  // server logs it (admins and fleet managers see it) before the channel goes away.
+  {const f=(roamData&&roamData.fleet_control)||fleetState;
+   if(roamData.command&&roamData.command.enabled&&!body.command.enabled&&f&&f.enabled){try{await fleetPost({enabled:false});await new Promise(r=>setTimeout(r,1500));}catch(e){}}}
   try{
     const r=await fetch('/api/roaming',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     setText('roam-msg',await r.text());
@@ -22051,9 +22478,22 @@ input:focus{border-color:var(--accent2);background:var(--bg4);}
   input[type="text"],input[type="password"]{font-size:16px;padding:14px 14px;}
   .btn-login{font-size:15px;padding:14px 16px;min-height:48px;}
 }
+/* Fleet Control maintenance / live-update banner (same look as in the dashboard). */
+.maint-banner{position:fixed;top:0;left:0;right:0;z-index:50;display:none;align-items:center;gap:12px;
+  padding:12px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+  background:repeating-linear-gradient(135deg,#c62828 0 18px,#b71c1c 18px 36px);color:#fff;
+  box-shadow:0 4px 14px rgba(0,0,0,.25);}
+.maint-banner svg{width:26px;height:26px;flex-shrink:0;}
+.maint-title{font-size:16px;font-weight:800;letter-spacing:.02em;text-transform:uppercase;}
+.maint-sub{font-size:13px;font-weight:500;opacity:.95;margin-top:3px;}
+@media (max-width:640px){.maint-title{font-size:14px;}.maint-sub{font-size:12px;}}
 </style>
 </head>
 <body>
+<div id="maint-banner" class="maint-banner" role="alert">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  <div><div class="maint-title" id="maint-title"></div><div class="maint-sub" id="maint-sub"></div></div>
+</div>
 <div class="login-card">
   <div class="logo-wrap">
     <div class="logo-mark">
@@ -22167,7 +22607,87 @@ form.addEventListener('submit', async (e) => {
 if (window.innerWidth > 600) {
   document.getElementById('username').focus();
 }
+// Fleet Control banner: the server's maintenance flag or a live update (RF on) must be visible
+// before login too. /api/fleet-banner is open without a session and carries only this status.
+const MAINT_I18N={
+  en:{t:'Maintenance: work on this base station in progress',by:'Set by {by} from the Brew server · ends in {min} min',noby:'Set from the Brew server · ends in {min} min',lt:'Live system update: RF on!',ls:'The station is building a new version and stays on the air; the service restarts when it is done.'},
+  es:{t:'Mantenimiento: se está trabajando en esta estación base',by:'Activado por {by} desde el servidor Brew · termina en {min} min',noby:'Activado desde el servidor Brew · termina en {min} min',lt:'Actualización en vivo: ¡RF activa!',ls:'La estación compila una nueva versión y sigue en el aire; el servicio se reinicia al terminar.'},
+  de:{t:'Wartung: Es wird an der Basisstation gearbeitet',by:'Gesetzt von {by} am Brew-Server · endet in {min} min',noby:'Gesetzt am Brew-Server · endet in {min} min',lt:'Live-Systemupdate: RF an!',ls:'Die Station baut eine neue Version und bleibt auf Sendung; danach startet der Dienst neu.'},
+};
+const M=MAINT_I18N[_lang]||MAINT_I18N.en;
+async function refreshMaintBanner(){
+  if(document.hidden)return;
+  let f;
+  try{const r=await fetch('/api/fleet-banner',{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;f=await r.json();}catch(e){return;}
+  const b=document.getElementById('maint-banner');
+  const live=f.live_update,m=f.maintenance;
+  if(!live&&!m){b.style.display='none';document.body.style.paddingTop='';return;}
+  const title=document.getElementById('maint-title'),sub=document.getElementById('maint-sub');
+  if(live){
+    title.textContent=M.lt;
+    sub.textContent=M.ls+(live.percent!=null?' · '+live.percent+' %':'');
+  }else{
+    const min=String(Math.max(1,Math.ceil((m.left_secs||0)/60)));
+    title.textContent=M.t;
+    sub.textContent=(m.by?M.by.replace('{by}',m.by):M.noby).replace('{min}',min)+(m.reason?' · '+m.reason:'');
+  }
+  b.style.display='flex';
+  document.body.style.paddingTop=(b.offsetHeight+20)+'px';
+}
+refreshMaintBanner();
+setInterval(refreshMaintBanner,5000);
 </script>
 </body>
 </html>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::DASHBOARD_HTML as H;
+
+    #[test]
+    fn switching_remote_management_off_asks_twice_with_swapped_buttons() {
+        // Sebastian 2026-11-12: "I understand" left + red Cancel right, then Cancel left + red Yes.
+        assert!(H.contains("okFirst:true,okClass:'btn-primary',cancelClass:'btn-danger-solid'"));
+        assert!(H.contains("confirmLabel:t('fleet_off_yes'),okClass:'btn-danger-solid'"));
+        assert!(H.contains("if(!on&&!await confirmTwice(t('fleet_off_title')"));
+        assert!(H.contains(r#"id="rm-cmd-on" onchange="roamCmdToggle(this)""#));
+        assert!(H.contains("await confirmTwice(t('cmd_off_title')"));
+        for k in ["fleet_off_body2:", "cmd_off_body2:", "fleet_off_understood:"] {
+            assert_eq!(H.matches(k).count(), 3, "{k} in en, de and es");
+        }
+    }
+
+    #[test]
+    fn last_heard_shows_a_guest_with_its_home_issi() {
+        // Sebastian 2026-11-15: Last Heard still showed only the (V)ASSI of a Multi Network guest.
+        assert!(H.contains("state.lastHeard.unshift({ts,issi,activity,dest,home});"));
+        assert!(H.contains("const issiHtml=msIdCell({issi:e.issi,home:lastHeardHome(e)},online);"));
+        assert!(H.contains("<td>${msIdCell({issi:e.issi,home:lastHeardHome(e)},'')}</td>"));
+        assert!(!H.contains("<td>${typeof idCell==='function'?idCell(e.issi)"), "LST activity rows too");
+    }
+
+    #[test]
+    fn neighbour_tables_always_show_mcc_mnc() {
+        assert!(H.contains(r#"'<td data-label="MCC/MNC">'+roamMmText(n.mcc,n.mnc,c)+'</td>'"#));
+        assert!(H.contains(r#"'<td data-label="MCC/MNC">'+e.mcc+'/'+e.mnc+'</td>'"#));
+        assert_eq!(H.matches("<th>MCC/MNC</th>").count(), 2, "neighbour table and server cell list");
+        assert!(H.contains("setText('rm-n-mm-hint'"));
+    }
+
+    #[test]
+    fn server_cell_warning_sits_under_the_cell_id() {
+        // Sebastian 2026-11-13 (phone): the warning beside the id broke "1000001/0" into pieces.
+        assert!(H.contains(r#"let h='<div class="roam-srv"><span style="white-space:nowrap">'+roamDot(e.online)"#));
+        assert!(H.contains("return h+'</div>';"));
+    }
+
+    #[test]
+    fn system_page_sets_the_default_language_and_restarts() {
+        assert!(H.contains(r#"<select id="sys-lang" class="form-input" style="width:auto;min-width:170px" onchange="sysLangChange(this)">"#));
+        let f = &H[H.find("async function sysLangChange").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        assert!(f.contains("'/api/setup/language'") && f.contains("'/api/service/restart'"), "stores, then restarts");
+        assert_eq!(H.matches("sys_lang_confirm:").count(), 3, "en, de, es");
+    }
+}

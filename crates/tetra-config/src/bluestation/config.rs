@@ -765,6 +765,7 @@ impl SharedConfig {
             .map(|(carrier_num, _, _)| carrier_num)
             .collect::<Vec<_>>();
         state.timeslot_alloc.configure_carriers(&carriers);
+        state.fleet_control.enabled = cfg.control.as_ref().is_some_and(|c| c.fleet_control);
 
         Ok(Self {
             cfg: Arc::new(cfg),
@@ -811,6 +812,26 @@ impl SharedConfig {
             }
         } else {
             base
+        }
+    }
+
+    /// Effective APRS weather settings (`[aprs_wx]`): the dashboard runtime override if present,
+    /// otherwise the config file values. Returns an owned [`CfgAprsWx`] so callers don't hold
+    /// the state lock.
+    pub fn effective_aprs_wx(&self) -> crate::bluestation::CfgAprsWx {
+        if let Some(o) = self.state_read().aprs_wx_override.as_ref() {
+            crate::bluestation::CfgAprsWx {
+                apikey: SecretField::from(o.apikey.clone()),
+                default_call: o.default_call.clone(),
+                max_age_secs: o.max_age_secs,
+                periodic_enabled: o.periodic_enabled,
+                periodic_call: o.periodic_call.clone(),
+                periodic_dest: o.periodic_dest,
+                periodic_is_group: o.periodic_is_group,
+                periodic_interval_secs: o.periodic_interval_secs,
+            }
+        } else {
+            self.cfg.aprs_wx.clone()
         }
     }
 
