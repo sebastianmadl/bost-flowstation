@@ -2,6 +2,8 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+> **Note on encryption.** The air-interface encryption in this project (TEA, security class 3, E2EE) comes from contributors and upstream FlowStation. The SC3 patch (PR #47) was a contributed patch that the fork maintainer only submitted. Key management or key distribution through a server is not part of this project and will not be added. Please do not extend the encryption or build server-side key management on top of this code: it can put everyone involved in its development at risk.
+
 ## Unreleased — Fleet Control (phases 1 to 7)
 
 - **Fix: Multi Network visitor going back to its own network.** When the MTP went from the cell of another network (as a visitor, on a (V)ASSI) to its own network's cell on the same station, the visitor cell did not notice: the Brew server says "the radio registered elsewhere" with the radio's own ISSI, and there the radio only existed on its (V)ASSI. The old registration stayed for about 30 to 50 s until the presence check. The cell now finds the (V)ASSI behind the notice, drops the registration at once and releases the (V)ASSI, which is invalid after the migration (TS 100 392-2 clause 16.4.7.1). Also, a (V)ASSI the presence check had already deregistered is no longer deregistered a second time when the radio migrates again (that second one reached the server with the bare (V)ASSI), and a visitor's reselection and RSSI reach the server under its own ISSI.

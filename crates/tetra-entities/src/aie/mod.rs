@@ -4,6 +4,10 @@
 //! Built: the policy and signalling around AIE (phase 1), and TEA1, TB5, TA61 and MAC-layer
 //! encryption of signalling and voice. SC3 uses per-subscriber DCKs and one CCK.
 //! See Docs/sc3-implementation.md for scope and validation limits.
+//!
+//! Note: this fork does not extend the encryption code and does not add key management or key
+//! distribution through a server; please do not build that on top of it, it can put everyone
+//! involved in its development at risk. See the note at the top of `CHANGELOG_en.md`.
 
 pub mod cipher;
 pub mod ta61;
