@@ -111,7 +111,12 @@ pub enum ControlCommand {
     /// Fleet Control (`update-v1`): run the update check against the station's own OTA source
     /// (fresh, no cache). Answered by the control worker with a [`ControlResponse::UpdateInfo`]
     /// when the check is done (it asks GitHub, so it can take some seconds).
-    CheckUpdate { handle: u32 },
+    CheckUpdate {
+        handle: u32,
+        /// Read token for the update source, for this check only (never stored or logged).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<crate::net_dashboard::source_auth::SourceToken>,
+    },
 
     /// Fleet Control (`update-v1`): start the OTA like the dashboard's Update button, from the
     /// station's own OTA source. Answered at once with a [`ControlResponse::CommandResult`]
@@ -126,6 +131,9 @@ pub enum ControlCommand {
         /// station's own source.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<UpdateSource>,
+        /// Read token for the update source, for this update only (never stored or logged).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<crate::net_dashboard::source_auth::SourceToken>,
     },
 
     /// Fleet Control (`maintenance-v1`): switch the maintenance flag. While it is on, every page

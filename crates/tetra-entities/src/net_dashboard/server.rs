@@ -1553,6 +1553,9 @@ pub(crate) fn run_update(update: SharedUpdateState, config_path: String, source_
         tracing::info!("UPDATE: {}", label);
         let mut cmd = std::process::Command::new(program);
         cmd.args(args).current_dir(dir);
+        if program == "git" {
+            crate::net_dashboard::source_auth::git_env(&mut cmd);
+        }
         stream_cmd(update, label, cmd)
     }
 
@@ -2068,6 +2071,8 @@ fn run_installer(update: &SharedUpdateState, src_dir: &std::path::Path, script: 
         .env("BOST_SRC", src_dir)
         .stdin(std::process::Stdio::null())
         .current_dir(src_dir);
+    // git in the installer runs as root and inherits this environment (the build does not).
+    crate::net_dashboard::source_auth::git_env(&mut cmd);
     // The service runs with real-time scheduling (unit: CPUSchedulingPolicy=fifo) and children
     // inherit it: a build at that priority would starve the radio. Run the installer as a normal
     // task with lower priority (nice 10), like a terminal session.

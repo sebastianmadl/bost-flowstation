@@ -185,8 +185,13 @@ pub fn active_calls() -> usize {
 
 /// Start the OTA like the dashboard's Update button. `during_call`: start even while a call is
 /// in progress (the radio goes off the air for the build). `source`: live update from that
-/// repository and branch with the radio kept on.
-pub fn start(during_call: bool, source: Option<&crate::net_control::commands::UpdateSource>) -> Result<(), StartRefused> {
+/// repository and branch with the radio kept on. `auth`: read token for the source, held only
+/// while this update runs.
+pub fn start(
+    during_call: bool,
+    source: Option<&crate::net_control::commands::UpdateSource>,
+    auth: Option<&crate::net_dashboard::source_auth::SourceToken>,
+) -> Result<(), StartRefused> {
     let (config_path, source_dir) = {
         let reg = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         let Some(r) = reg.as_ref() else { return Err(StartRefused::Unavailable) };
@@ -200,19 +205,26 @@ pub fn start(during_call: bool, source: Option<&crate::net_control::commands::Up
     let update = shared_update_state();
     try_begin(&update, during_call, active_calls())?;
     let u = Arc::clone(&update);
+    let auth = auth.cloned();
     let spawned = match source {
         Some(s) => {
             let (repo, branch) = (s.repo.trim().to_string(), s.branch.trim().to_string());
             tracing::info!("Fleet Control: live update from {repo} ({branch}) started by the Brew server");
             std::thread::Builder::new()
                 .name("ota-live-update".into())
-                .spawn(move || crate::net_dashboard::server::run_live_update(u, source_dir, repo, branch))
+                .spawn(move || {
+                    let _auth = crate::net_dashboard::source_auth::scope(auth.as_ref());
+                    crate::net_dashboard::server::run_live_update(u, source_dir, repo, branch)
+                })
         }
         None => {
             tracing::info!("Fleet Control: OTA update started by the Brew server");
             std::thread::Builder::new()
                 .name("ota-update".into())
-                .spawn(move || crate::net_dashboard::server::run_update(u, config_path, source_dir))
+                .spawn(move || {
+                    let _auth = crate::net_dashboard::source_auth::scope(auth.as_ref());
+                    crate::net_dashboard::server::run_update(u, config_path, source_dir)
+                })
         }
     };
     if spawned.is_err()

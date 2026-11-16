@@ -175,10 +175,11 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 self.send_response(&response);
                 return;
             }
-            Some(fleet::UpdateAction::Check { handle }) => {
+            Some(fleet::UpdateAction::Check { handle, auth }) => {
                 // The check asks GitHub (seconds): run it off the loop, the loop sends the answer.
                 let tx = self.async_tx.clone();
                 let _ = std::thread::Builder::new().name("fleet-update-check".into()).spawn(move || {
+                    let _auth = crate::net_dashboard::source_auth::scope(auth.as_ref());
                     let _ = tx.send(fleet::update_info(handle, crate::net_dashboard::ota_remote::check()));
                 });
                 return;

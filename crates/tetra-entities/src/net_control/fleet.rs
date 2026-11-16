@@ -192,7 +192,7 @@ pub enum UpdateAction {
     /// Answer at once with this.
     Reply(ControlResponse),
     /// Run the update check off the loop and answer `handle` with an `UpdateInfo` when done.
-    Check { handle: u32 },
+    Check { handle: u32, auth: Option<crate::net_dashboard::source_auth::SourceToken> },
 }
 
 /// Handle `CheckUpdate` / `StartUpdate` (`None` for every other command). `enabled`: the switch;
@@ -202,11 +202,11 @@ pub fn update_command(
     command: &ControlCommand,
     enabled: bool,
     ota_available: bool,
-    start: impl FnOnce(bool, Option<&crate::net_control::commands::UpdateSource>) -> Result<(), crate::net_dashboard::ota_remote::StartRefused>,
+    start: impl FnOnce(bool, Option<&crate::net_control::commands::UpdateSource>, Option<&crate::net_dashboard::source_auth::SourceToken>) -> Result<(), crate::net_dashboard::ota_remote::StartRefused>,
 ) -> Option<UpdateAction> {
     use crate::net_dashboard::ota_remote::StartRefused;
     let handle = match command {
-        ControlCommand::CheckUpdate { handle } | ControlCommand::StartUpdate { handle, .. } => *handle,
+        ControlCommand::CheckUpdate { handle, .. } | ControlCommand::StartUpdate { handle, .. } => *handle,
         _ => return None,
     };
     if !enabled {
@@ -216,8 +216,8 @@ pub fn update_command(
         return Some(UpdateAction::Reply(result(handle, false, code::UNAVAILABLE, "No OTA on this station (dashboard not running)")));
     }
     Some(match command {
-        ControlCommand::CheckUpdate { .. } => UpdateAction::Check { handle },
-        ControlCommand::StartUpdate { during_call, source, .. } => UpdateAction::Reply(match start(*during_call, source.as_ref()) {
+        ControlCommand::CheckUpdate { auth, .. } => UpdateAction::Check { handle, auth: auth.clone() },
+        ControlCommand::StartUpdate { during_call, source, auth, .. } => UpdateAction::Reply(match start(*during_call, source.as_ref(), auth.as_ref()) {
             Ok(()) => result(handle, true, code::OK, if source.is_some() { "Live update started" } else { "Update started" }),
             Err(StartRefused::InvalidSource) => result(handle, false, code::INVALID_SOURCE, "Live update: only a plain https:// repository and branch name"),
             Err(StartRefused::Busy) => result(handle, false, code::BUSY, "An update is already running"),
@@ -304,36 +304,36 @@ mod tests {
 
     #[test]
     fn update_commands_need_the_switch_and_an_ota() {
-        let never = |_, _: Option<&UpdateSource>| -> Result<(), StartRefused> { panic!("must not start") };
-        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 1, during_call: false, source: None }, false, true, never)), (false, "fleet_control_off".into()));
-        assert_eq!(code_of(update_command(&ControlCommand::CheckUpdate { handle: 2 }, false, true, never)), (false, "fleet_control_off".into()));
-        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false, source: None }, true, false, never)), (false, "unavailable".into()));
-        assert!(matches!(update_command(&ControlCommand::CheckUpdate { handle: 4 }, true, true, never), Some(UpdateAction::Check { handle: 4 })));
+        let never = |_, _: Option<&UpdateSource>, _: Option<&crate::net_dashboard::source_auth::SourceToken>| -> Result<(), StartRefused> { panic!("must not start") };
+        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 1, during_call: false, source: None, auth: None }, false, true, never)), (false, "fleet_control_off".into()));
+        assert_eq!(code_of(update_command(&ControlCommand::CheckUpdate { handle: 2, auth: None }, false, true, never)), (false, "fleet_control_off".into()));
+        assert_eq!(code_of(update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false, source: None, auth: None }, true, false, never)), (false, "unavailable".into()));
+        assert!(matches!(update_command(&ControlCommand::CheckUpdate { handle: 4, auth: None }, true, true, never), Some(UpdateAction::Check { handle: 4, .. })));
         assert!(update_command(&ControlCommand::FleetPing { handle: 5 }, true, true, never).is_none());
     }
 
     #[test]
     fn start_update_outcomes() {
         let mut seen = None;
-        let ok = update_command(&ControlCommand::StartUpdate { handle: 1, during_call: true, source: None }, true, true, |d, s| {
+        let ok = update_command(&ControlCommand::StartUpdate { handle: 1, during_call: true, source: None, auth: None }, true, true, |d, s, _| {
             seen = Some((d, s.cloned()));
             Ok(())
         });
         assert_eq!(code_of(ok), (true, "ok".into()));
         assert_eq!(seen, Some((true, None)), "during_call is passed on");
-        let busy = update_command(&ControlCommand::StartUpdate { handle: 2, during_call: false, source: None }, true, true, |_, _| Err(StartRefused::Busy));
+        let busy = update_command(&ControlCommand::StartUpdate { handle: 2, during_call: false, source: None, auth: None }, true, true, |_, _, _| Err(StartRefused::Busy));
         assert_eq!(code_of(busy), (false, "busy".into()));
-        let call = update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false, source: None }, true, true, |_, _| Err(StartRefused::CallActive));
+        let call = update_command(&ControlCommand::StartUpdate { handle: 3, during_call: false, source: None, auth: None }, true, true, |_, _, _| Err(StartRefused::CallActive));
         assert_eq!(code_of(call), (false, "call_active".into()));
         let src = UpdateSource { repo: "https://github.com/sebastianmadl/bost-flowstation".into(), branch: "fleet-control".into() };
         let mut got = None;
-        let live = update_command(&ControlCommand::StartUpdate { handle: 4, during_call: false, source: Some(src.clone()) }, true, true, |_, s| {
+        let live = update_command(&ControlCommand::StartUpdate { handle: 4, during_call: false, source: Some(src.clone()), auth: None }, true, true, |_, s, _| {
             got = s.cloned();
             Ok(())
         });
         assert_eq!(code_of(live), (true, "ok".into()));
         assert_eq!(got, Some(src.clone()), "the live source is passed on");
-        let bad = update_command(&ControlCommand::StartUpdate { handle: 5, during_call: false, source: Some(src) }, true, true, |_, _| Err(StartRefused::InvalidSource));
+        let bad = update_command(&ControlCommand::StartUpdate { handle: 5, during_call: false, source: Some(src), auth: None }, true, true, |_, _, _| Err(StartRefused::InvalidSource));
         assert_eq!(code_of(bad), (false, "invalid_source".into()));
     }
 
@@ -414,14 +414,14 @@ mod tests {
     fn update_wire_shapes() {
         let codec = ControlCodecJson;
         let c = codec.decode_command(br#"{"CheckUpdate":{"handle":9}}"#).unwrap();
-        assert!(matches!(c, ControlCommand::CheckUpdate { handle: 9 }));
+        assert!(matches!(c, ControlCommand::CheckUpdate { handle: 9, .. }));
         let s = codec.decode_command(br#"{"StartUpdate":{"handle":10}}"#).unwrap();
-        assert!(matches!(s, ControlCommand::StartUpdate { handle: 10, during_call: false, source: None }), "during_call defaults to false");
+        assert!(matches!(s, ControlCommand::StartUpdate { handle: 10, during_call: false, source: None, .. }), "during_call defaults to false");
         let s = codec.decode_command(br#"{"StartUpdate":{"handle":11,"during_call":true}}"#).unwrap();
-        assert!(matches!(s, ControlCommand::StartUpdate { handle: 11, during_call: true, source: None }));
+        assert!(matches!(s, ControlCommand::StartUpdate { handle: 11, during_call: true, source: None, auth: None }));
         let s = codec.decode_command(br#"{"StartUpdate":{"handle":12,"source":{"repo":"https://github.com/sebastianmadl/bost-flowstation","branch":"fleet-control"}}}"#).unwrap();
         match s {
-            ControlCommand::StartUpdate { handle: 12, during_call: false, source: Some(src) } => {
+            ControlCommand::StartUpdate { handle: 12, during_call: false, source: Some(src), auth: None } => {
                 assert_eq!((src.repo.as_str(), src.branch.as_str()), ("https://github.com/sebastianmadl/bost-flowstation", "fleet-control"));
             }
             other => panic!("unexpected {other:?}"),

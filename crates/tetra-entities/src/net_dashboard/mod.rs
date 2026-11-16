@@ -19,6 +19,7 @@ pub mod security;
 pub mod server;
 pub mod setup;
 pub mod snom_notify;
+pub mod source_auth;
 pub mod state;
 pub mod station_bundle;
 pub mod telegram;
