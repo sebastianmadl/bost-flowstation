@@ -2,7 +2,7 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
-## Unreleased — Fleet Control (phases 1 to 7)
+## v0.5.12 — Fleet Control (phases 1 to 7)
 
 - **Fix: Multi Network visitor going back to its own network.** When the MTP went from the cell of another network (as a visitor, on a (V)ASSI) to its own network's cell on the same station, the visitor cell did not notice: the Brew server says "the radio registered elsewhere" with the radio's own ISSI, and there the radio only existed on its (V)ASSI. The old registration stayed for about 30 to 50 s until the presence check. The cell now finds the (V)ASSI behind the notice, drops the registration at once and releases the (V)ASSI, which is invalid after the migration (TS 100 392-2 clause 16.4.7.1). Also, a (V)ASSI the presence check had already deregistered is no longer deregistered a second time when the radio migrates again (that second one reached the server with the bare (V)ASSI), and a visitor's reselection and RSSI reach the server under its own ISSI.
 - **Last Heard: Multi Network visitors with their own ISSI.** Like the registered radios list, the Last Heard page (and the LST dispatch activity) now shows a visitor's own ISSI with callsign, the **Guest · network** chip and the (V)ASSI below. The entry keeps that identity, so it stays readable after the radio has left. Display only.
