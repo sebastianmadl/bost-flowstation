@@ -2,6 +2,10 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+## Not yet released — RF waterfall
+
+- **The RF waterfall draws again** (desktop and phone). Since the RF view per cell it read an empty buffer until another cell was picked, so it stayed blank.
+
 ## v0.5.19 — The Brew server knows which groups were given by DGNA
 
 - **DGNA groups to the Brew server.** With a server that offers it on the control channel (extension `dgna-report`, brew-server 1.21.9 or newer with `[control]`), the station reports every DGNA assign and remove over the control channel, also those made on its own dashboard, and after each connect it sends every DGNA group it knows. So the server keeps which groups each radio has (also across a restart) and can take them back later. Nothing changes on the air interface, and it does not depend on the Fleet Control switch. A server without `dgna-report` gets nothing new. Shown on the Infrastructure page, "Server features", under groups. See `Docs/fleet-control.md`.

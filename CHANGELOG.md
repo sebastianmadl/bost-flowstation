@@ -4,6 +4,10 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## Not yet released — Cascada RF
+
+- **La cascada de RF vuelve a dibujarse** (escritorio y móvil). Desde la vista RF por celda leía un búfer vacío hasta elegir otra celda, así que se quedaba en blanco.
+
 ## v0.5.19 — El servidor Brew sabe qué grupos se dieron por DGNA
 
 - **Grupos DGNA al servidor Brew.** Con un servidor que lo ofrece en el canal de control (extensión `dgna-report`, brew-server 1.21.9 o posterior con `[control]`), la estación informa por el canal de control de cada asignación y retirada DGNA, también de las hechas en su propio dashboard, y tras cada conexión envía todos los grupos DGNA que conoce. Así el servidor guarda qué grupos tiene cada radio (también tras un reinicio) y puede retirarlos más tarde. No cambia nada en el interfaz aire y no depende del interruptor de Fleet Control. Un servidor sin `dgna-report` no recibe nada nuevo. Aparece en la página Infrastructure, "Server features", bajo grupos. Ver `Docs/fleet-control.md`.
