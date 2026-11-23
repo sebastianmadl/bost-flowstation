@@ -2,6 +2,10 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+## Not yet released — Security class next to each cell
+
+- **Home: security class and algorithm next to each cell.** The cell header shows "SC2 · TEA2" (or "SC1 · open") from that cell's settings, also with a single cell. `GET /api/cells` carries `security` per cell (`class`, and `ksg` 1–4 = TEA1–TEA4 for an encrypted cell).
+
 ## v0.6.7 — Cells page and several cells on one SDR
 
 Several cells on one SDR and per-cell security: Yiannis Samouhos (ysamouhos). Cells page and configuration interface: Sebastian, OE4SXM.

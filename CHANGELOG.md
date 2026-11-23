@@ -4,6 +4,10 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## Not yet released — Clase de seguridad junto a cada celda
+
+- **Inicio: clase de seguridad y algoritmo junto a cada celda.** La cabecera de la celda muestra «SC2 · TEA2» (o «SC1 · abierta») según los ajustes de esa celda, también con una sola celda. `GET /api/cells` incluye `security` por celda (`class` y, en una celda cifrada, `ksg` 1–4 = TEA1–TEA4).
+
 ## v0.6.7 — Página Celdas y varias celdas en un SDR
 
 Varias celdas en un SDR y seguridad por celda: Yiannis Samouhos (ysamouhos). Página Celdas e interfaz de configuración: Sebastian, OE4SXM.
