@@ -4,6 +4,10 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## Not yet released — Lista de redes del diálogo de celda
+
+- **Diálogo de celda: la red de la propia celda ya no aparece como «sin usar».** La lista de redes de la pestaña *Red y área* solo contaba las otras celdas, así que una red usada solo por esta celda decía «— sin usar».
+
 ## Not yet released — Clase de seguridad junto a cada celda
 
 - **Inicio: clase de seguridad y algoritmo junto a cada celda.** La cabecera de la celda muestra «SC2 · TEA2» (o «SC1 · abierta») según los ajustes de esa celda, también con una sola celda. `GET /api/cells` incluye `security` por celda (`class` y, en una celda cifrada, `ksg` 1–4 = TEA1–TEA4).

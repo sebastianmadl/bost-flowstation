@@ -2,6 +2,10 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+## Not yet released — Cells dialog network list
+
+- **Cells dialog: the cell's own network is no longer marked "unused".** The network list in the *Network & area* tab only counted the other cells, so a network used by this cell alone read "— unused".
+
 ## Not yet released — Security class next to each cell
 
 - **Home: security class and algorithm next to each cell.** The cell header shows "SC2 · TEA2" (or "SC1 · open") from that cell's settings, also with a single cell. `GET /api/cells` carries `security` per cell (`class`, and `ksg` 1–4 = TEA1–TEA4 for an encrypted cell).
