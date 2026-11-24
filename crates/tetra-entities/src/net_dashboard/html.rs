@@ -6203,6 +6203,8 @@ label.cp-chk{display:flex;flex-direction:row;align-items:center;gap:8px;font-siz
                       <label class="field"><span data-i18n="cfg_brew_lip_issi">LIP destination ISSI (via Brew)</span><input type="number" id="vc-brew-lip-issi" class="form-input" min="1" max="16777215" placeholder="e.g. 2144485" data-i18n-placeholder="ui_e_g_2144485"></label>
                       <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-brew-rereg" onchange="toggleBrewReregFields()"> <span data-i18n="cfg_brew_rereg">Re-registration</span></label>
                       <label class="field"><span data-i18n="cfg_brew_rereg_min">Re-registration every (min, 10–600)</span><input type="number" id="vc-brew-rereg-min" class="form-input" min="10" max="600" value="30"></label>
+                      <label class="field"><span data-i18n="cfg_brew_livewait">Live change: wait for calls (s, 0–600)</span><input type="number" id="vc-brew-livewait" class="form-input" min="0" max="600" value="60"></label>
+                      <label class="field" style="cursor:pointer"><input type="checkbox" id="vc-brew-liveimm"> <span data-i18n="cfg_brew_liveimm">Live change: apply immediately, also during calls</span></label>
                     </div>
                   </details>
                   <div class="config-msg" id="vc-brew-msg"></div>
@@ -8690,7 +8692,7 @@ const LANGS={
     cfg_help_brew_tls:'Use TLS for Brew. Match what the Brew server expects.',
     cfg_help_brew_user:'Brew username / SSID (numeric ISSI-style id for this BTS on the core).',
     cfg_help_brew_pass:'Brew password. Leave masked (••••) to keep the current secret when saving.',
-    cfg_help_brew_reconnect:'Seconds to wait before reconnecting after Brew drops. Default 15.',cfg_brew_rereg:'Re-registration',cfg_brew_rereg_min:'Re-registration every (min, 10–600)',cfg_help_brew_rereg:'Send every radio\'s registration and groups to the Brew server again every N minutes (10 to 600), only while no call runs. Helps when the server stops sending a group\'s calls after a long quiet time. Off = only when a radio registers. Same setting as on the Infrastructure page.',
+    cfg_help_brew_reconnect:'Seconds to wait before reconnecting after Brew drops. Default 15.',cfg_brew_rereg:'Re-registration',cfg_brew_rereg_min:'Re-registration every (min, 10–600)',cfg_help_brew_rereg:'Send every radio\'s registration and groups to the Brew server again every N minutes (10 to 600), only while no call runs. Helps when the server stops sending a group\'s calls after a long quiet time. Off = only when a radio registers. Same setting as on the Infrastructure page.',cfg_brew_livewait:'Live change: wait for calls (s, 0–600)',cfg_brew_liveimm:'Live change: apply immediately, also during calls',cfg_help_brew_live:'A saved change of the Brew link (server, login, timers) is applied without a restart. While calls run over the link it waits until they are over, at most this many seconds (default 60), then reconnects anyway. With "apply immediately" it reconnects at once and running network calls drop.',
     cfg_help_brew_sds:'Forward SDS between air and Brew when enabled.',
     cfg_help_brew_rssi:'Export RSSI telemetry toward Brew (extra traffic). Off unless you need it.',
     cfg_help_brew_lip:'Re-forward every UL LIP report to Brew at the ISSI below, whatever destination the radio used.',
@@ -9430,7 +9432,7 @@ const LANGS={
     cfg_help_brew_tls:'Usar TLS con Brew. Debe coincidir con el servidor.',
     cfg_help_brew_user:'Usuario / SSID Brew (id numérico de esta BTS en el core).',
     cfg_help_brew_pass:'Contraseña Brew. Deja la máscara (••••) para no cambiar la actual al guardar.',
-    cfg_help_brew_reconnect:'Segundos de espera antes de reconectar tras una caída de Brew. Default 15.',cfg_brew_rereg:'Re-registro',cfg_brew_rereg_min:'Re-registro cada (min, 10–600)',cfg_help_brew_rereg:'Envía de nuevo el registro y los grupos de cada radio al servidor Brew cada N minutos (10 a 600), solo mientras no haya ninguna llamada. Ayuda cuando el servidor deja de enviar las llamadas de un grupo tras mucho tiempo en silencio. Apagado = solo cuando una radio se registra. Es el mismo ajuste que en la página Infrastructure.',
+    cfg_help_brew_reconnect:'Segundos de espera antes de reconectar tras una caída de Brew. Default 15.',cfg_brew_rereg:'Re-registro',cfg_brew_rereg_min:'Re-registro cada (min, 10–600)',cfg_help_brew_rereg:'Envía de nuevo el registro y los grupos de cada radio al servidor Brew cada N minutos (10 a 600), solo mientras no haya ninguna llamada. Ayuda cuando el servidor deja de enviar las llamadas de un grupo tras mucho tiempo en silencio. Apagado = solo cuando una radio se registra. Es el mismo ajuste que en la página Infrastructure.',cfg_brew_livewait:'Cambio en caliente: esperar a las llamadas (s, 0–600)',cfg_brew_liveimm:'Cambio en caliente: aplicar enseguida, también durante llamadas',cfg_help_brew_live:'Un cambio guardado del enlace Brew (servidor, acceso, temporizadores) se aplica sin reiniciar. Mientras haya llamadas por el enlace espera a que terminen, como mucho estos segundos (60 por defecto), y luego reconecta igualmente. Con «aplicar enseguida» reconecta al momento y las llamadas de red en curso se cortan.',
     cfg_help_brew_sds:'Reenvía SDS entre aire y Brew si está activo.',
     cfg_help_brew_rssi:'Exporta telemetría RSSI hacia Brew (más tráfico). Off salvo que lo necesites.',
     cfg_help_brew_lip:'Reenvía cada informe LIP UL a Brew hacia el ISSI de abajo, digan lo que digan las radios como destino.',
@@ -17110,7 +17112,7 @@ const CFG_HELP_BY_ID={
   'vc-syswide':'cfg_help_syswide','vc-late-entry':'cfg_help_late_entry','vc-voice':'cfg_help_voice','vc-recovery':'cfg_help_recovery','vc-local-ssi':'cfg_help_local_ssi',
   'vc-brew-enabled':'cfg_help_brew_enable','vc-brew-host':'cfg_help_brew_host','vc-brew-port':'cfg_help_brew_port',
   'vc-brew-tls':'cfg_help_brew_tls','vc-brew-user':'cfg_help_brew_user','vc-brew-pass':'cfg_help_brew_pass',
-  'vc-brew-reconnect':'cfg_help_brew_reconnect','vc-brew-rereg':'cfg_help_brew_rereg','vc-brew-rereg-min':'cfg_help_brew_rereg','vc-brew-sds':'cfg_help_brew_sds','vc-brew-rssi':'cfg_help_brew_rssi',
+  'vc-brew-reconnect':'cfg_help_brew_reconnect','vc-brew-rereg':'cfg_help_brew_rereg','vc-brew-rereg-min':'cfg_help_brew_rereg','vc-brew-livewait':'cfg_help_brew_live','vc-brew-liveimm':'cfg_help_brew_live','vc-brew-sds':'cfg_help_brew_sds','vc-brew-rssi':'cfg_help_brew_rssi',
   'vc-brew-lip':'cfg_help_brew_lip','vc-brew-lip-issi':'cfg_help_brew_lip_issi',
   'rm-fast-th':'roam_help_fast_th','rm-slow-th':'roam_help_slow_th','rm-fast-hy':'roam_help_fast_hy','rm-slow-hy':'roam_help_slow_hy',
   'rm-rxlev':'cfg_help_rxlev_min','rm-migration':'cfg_help_migration','rm-presence':'roam_help_presence',
@@ -17293,6 +17295,8 @@ function collectVisualConfig(){
     feature_lip_forward:!!document.getElementById('vc-brew-lip')?.checked,
     // 0 = off; on: 10..600 minutes (same as the Infrastructure page).
     reregister_minutes:document.getElementById('vc-brew-rereg')?.checked?Math.min(600,Math.max(10,vcNum('vc-brew-rereg-min')??30)):0,
+    live_wait_secs:Math.min(600,Math.max(0,vcNum('vc-brew-livewait')??60)),
+    live_apply_immediately:!!document.getElementById('vc-brew-liveimm')?.checked,
   };
   const lipIssi=vcNum('vc-brew-lip-issi');
   if(lipIssi&&lipIssi>0)brew.lip_forward_issi=lipIssi;
@@ -17364,6 +17368,8 @@ function fillVisualConfig(d,opts){
   vcSet('vc-brew-lip-issi',brew.lip_forward_issi||'');
   vcSet('vc-brew-rereg',(brew.reregister_minutes||0)>0);
   vcSet('vc-brew-rereg-min',(brew.reregister_minutes||0)>0?brew.reregister_minutes:30);
+  vcSet('vc-brew-livewait',brew.live_wait_secs??60);
+  vcSet('vc-brew-liveimm',!!brew.live_apply_immediately);
   toggleBrewFields();
   // Access control follows the payload:
   // - fromCell: always refresh (missing security = open list for that Cell)
