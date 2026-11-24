@@ -8310,11 +8310,21 @@ fn reload_saved_config(config_path: &str, shared: &Option<tetra_config::bluestat
         return serde_json::json!({"applied": false, "error": format!("config is invalid: {e}")});
     }
     new.add_sibling_neighbours();
+    let class3_required = shared.state_read().security_class3_required;
+    if let Some(e) = sc3_reload_refusal(class3_required, &new) {
+        return serde_json::json!({"applied": false, "error": e});
+    }
     match crate::config_reload::reload(shared, crate::net_site::extra_cells(), new) {
         Ok(r) if r.restart.is_empty() => serde_json::json!({"applied": true, "cells": r.cells}),
         Ok(r) => serde_json::json!({"applied": false, "restart": r.restart}),
         Err(e) => serde_json::json!({"applied": false, "error": e}),
     }
+}
+
+/// A station started with `--require-sc3` runs class 3 only; a reload must not take it below.
+fn sc3_reload_refusal(class3_required: bool, new: &tetra_config::bluestation::StackConfig) -> Option<String> {
+    let class = new.security.aie.as_ref().map_or(1, |a| a.security_class());
+    (class3_required && class != 3).then(|| format!("this station runs with --require-sc3; the new configuration is security class {class}"))
 }
 
 /// Dry-run validation of a posted `config.toml`: unmask any still-masked secrets against the live
@@ -11358,5 +11368,27 @@ enabled = true
         let resolved = unmask_config_secrets(posted, stored);
         assert!(resolved.contains("password = \"brandNewPw\""), "new password overwrites old");
         assert!(!resolved.contains("old-pw"), "old password gone once retyped");
+    }
+}
+
+#[cfg(test)]
+mod reload_sc3_tests {
+    use super::sc3_reload_refusal;
+
+    #[test]
+    fn require_sc3_refuses_a_lower_class() {
+        let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        assert!(sc3_reload_refusal(true, &cfg).is_some());
+        assert!(sc3_reload_refusal(false, &cfg).is_none());
+        cfg.security.aie = Some(tetra_config::bluestation::CfgAie {
+            class3: Some(tetra_config::bluestation::CfgClass3 { cck: tetra_config::bluestation::CipherKey([1; 10]), cck_id: 1 }),
+            enabled: true,
+            ksg: 1,
+            sckn: 0,
+            sck: tetra_config::bluestation::CipherKey([1; 10]),
+            sck_vn: 1,
+            clear_groups: Vec::new(),
+        });
+        assert!(sc3_reload_refusal(true, &cfg).is_none());
     }
 }

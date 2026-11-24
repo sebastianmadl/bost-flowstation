@@ -48,8 +48,34 @@ impl std::fmt::Display for SecretField {
 
 impl std::fmt::Debug for SecretField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if secrets_revealed() {
+            return f.debug_struct("SecretField").field("val", &self.val).finish();
+        }
         f.debug_struct("SecretField").field("val", &"********").finish()
     }
+}
+
+thread_local! {
+    static REVEAL_SECRETS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True only inside [`debug_with_secrets`] on this thread: the redacting `Debug` impls
+/// ([`SecretField`], `CipherKey`) then print their value.
+pub fn secrets_revealed() -> bool {
+    REVEAL_SECRETS.with(|r| r.get())
+}
+
+/// `format!("{v:?}")` with secrets included, for change detection only (a live reload must notice
+/// a changed password or key, which the redacted form hides). Never log the result.
+pub fn debug_with_secrets<T: std::fmt::Debug + ?Sized>(v: &T) -> String {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REVEAL_SECRETS.with(|r| r.set(self.0));
+        }
+    }
+    let _reset = Reset(REVEAL_SECRETS.with(|r| r.replace(true)));
+    format!("{v:?}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

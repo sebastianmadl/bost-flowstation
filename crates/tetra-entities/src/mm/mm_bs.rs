@@ -128,6 +128,12 @@ pub struct MmBs {
     registration_checks_rf_ready: bool,
     registration_command_last_frame: Option<i32>,
     registration_check_last_tick: Option<Instant>,
+    /// Live reload of the location area: config generation and LA last seen, the radios still
+    /// to be asked to register in the new LA, and the frame of the last such command.
+    la_generation: u64,
+    la_current: u16,
+    la_change_pending: VecDeque<u32>,
+    la_change_last_frame: Option<i32>,
     registration_probe_receipts: HashMap<u32, tetra_core::tx_receipt::TxReporter>,
 
     // ── Air-interface security (EN 300 392-7) ──────────────────────────────────────────────
@@ -224,6 +230,7 @@ impl MmBs {
                 );
             }
         }
+        let (la_generation, la_current) = (config.config_generation(), config.config().cell.location_area);
         Self {
             config,
             telemetry,
@@ -232,6 +239,10 @@ impl MmBs {
             registration_checks_rf_ready: false,
             registration_command_last_frame: None,
             registration_check_last_tick: None,
+            la_generation,
+            la_current,
+            la_change_pending: VecDeque::new(),
+            la_change_last_frame: None,
             registration_probe_receipts: HashMap::new(),
             auth_pending: HashMap::new(),
             auth_passed: HashMap::new(),
@@ -3386,6 +3397,46 @@ impl MmBs {
         }
     }
 
+    /// A live configuration reload moved this cell to another location area. The radios
+    /// registered here hold the old LA in their registered area and a radio that stays on the
+    /// cell has no reselection that would make it register (TS 100 392-2 clause 16.4.1.0), so the
+    /// SwMI asks each of them to register again with D-LOCATION UPDATE COMMAND (clause 16.4.3),
+    /// one radio per TDMA frame like the presence checks.
+    fn follow_location_area(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        let generation = self.config.config_generation();
+        if generation != self.la_generation {
+            self.la_generation = generation;
+            let la = self.config.config().cell.location_area;
+            if la != self.la_current {
+                let issis = self.client_mgr.all_known_issis();
+                tracing::info!(
+                    "MM: location area {} -> {} by a live reload: asking {} registered radio(s) to register again (D-LOCATION-UPDATE-COMMAND)",
+                    self.la_current,
+                    la,
+                    issis.len()
+                );
+                self.la_current = la;
+                self.la_change_pending = issis.into_iter().collect();
+            }
+        }
+        if self.la_change_pending.is_empty() {
+            return;
+        }
+        let frame = ts.to_int() / 4;
+        if self.la_change_last_frame == Some(frame) {
+            return;
+        }
+        while let Some(issi) = self.la_change_pending.pop_front() {
+            // A radio that left in the meantime is not asked.
+            if self.client_mgr.get_client_by_issi(issi).is_none() {
+                continue;
+            }
+            self.la_change_last_frame = Some(frame);
+            self.send_d_location_update_command(queue, issi, 0);
+            break;
+        }
+    }
+
     fn drive_registration_checks(&mut self, queue: &mut MessageQueue, ts: TdmaTime, now: Instant, rf_ready: bool) {
         let interval_secs = self.config.config().cell.periodic_registration_secs;
         let presence_secs = self.config.config().cell.presence_check_secs;
@@ -3568,6 +3619,7 @@ impl TetraEntityTrait for MmBs {
         let rf_ready = crate::rf_status::get_all()
             .into_iter()
             .any(|(cell, status)| cell == self.config.config().cell_id && status.state == crate::rf_status::RfState::Online);
+        self.follow_location_area(queue, ts);
         self.drive_registration_checks(queue, ts, Instant::now(), rf_ready);
 
         // Restart recovery: replay D-LOCATION-UPDATE-COMMANDs to cached terminals awaiting
@@ -4897,6 +4949,50 @@ mod presence_tests {
         assert_eq!(request.sdu.read_field(10, "ciphering_parameters").unwrap(),
             CipheringParameters::class2(2, 24).to_bits());
         assert!(!request.encryption_flag, "initial location command must still be clear");
+    }
+
+    #[test]
+    fn live_location_area_change_asks_every_registered_radio_to_register_again() {
+        let (mut mm, _) = station();
+        radio(&mut mm, 100);
+        radio(&mut mm, 101);
+        let mut queue = MessageQueue::new();
+        let lu_commands = |queue: &mut MessageQueue| {
+            let mut issis = Vec::new();
+            while let Some(m) = queue.pop_front() {
+                if let SapMsgInner::LmmMleUnitdataReq(mut r) = m.msg
+                    && r.sdu.read_field(4, "pdu_type").unwrap()
+                        == tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl::DLocationUpdateCommand.into_raw()
+                {
+                    issis.push(r.address.ssi);
+                }
+            }
+            issis
+        };
+        let ts = TdmaTime::default();
+        mm.follow_location_area(&mut queue, ts);
+        assert!(lu_commands(&mut queue).is_empty(), "no reload, no command");
+
+        // A reload that changes something else: nobody is asked.
+        let mut other = (*mm.config.config()).clone();
+        other.cell.presence_check_secs += 1;
+        mm.config.replace_config(other).unwrap();
+        mm.follow_location_area(&mut queue, ts);
+        assert!(lu_commands(&mut queue).is_empty());
+
+        let mut moved = (*mm.config.config()).clone();
+        moved.cell.location_area = (moved.cell.location_area + 1) & 0x3FFF;
+        mm.config.replace_config(moved).unwrap();
+        mm.follow_location_area(&mut queue, ts);
+        mm.follow_location_area(&mut queue, ts);
+        let mut asked = lu_commands(&mut queue);
+        assert_eq!(asked.len(), 1, "one radio per frame");
+        mm.follow_location_area(&mut queue, ts.add_timeslots(4));
+        asked.extend(lu_commands(&mut queue));
+        mm.follow_location_area(&mut queue, ts.add_timeslots(8));
+        asked.extend(lu_commands(&mut queue));
+        asked.sort();
+        assert_eq!(asked, vec![100, 101], "every registered radio is asked once");
     }
 
     #[test]

@@ -453,6 +453,10 @@ pub struct BrewWorker<T: NetworkTransport> {
     reregister_due: Option<Instant>,
     /// Last call signalling or voice over the link, either way.
     last_call_activity: Option<Instant>,
+    /// Config generation last checked for a changed cell announcement, and the BTS info last
+    /// sent on this connection.
+    cells_generation: u64,
+    cells_announced: Option<Vec<u8>>,
 }
 
 /// A re-registration waits until no call signalling or voice crossed the link for this long,
@@ -489,6 +493,7 @@ const MNI_MAX_CALLS: usize = 4096;
 impl<T: NetworkTransport> BrewWorker<T> {
     pub fn new(config: SharedConfig, event_sender: Sender<BrewEvent>, command_receiver: Receiver<BrewCommand>, transport: T) -> Self {
         let brew_config = config.config().brew.clone().unwrap(); // Never fails
+        let cells_generation = config.config_generation();
         Self {
             live: None,
             config,
@@ -506,6 +511,8 @@ impl<T: NetworkTransport> BrewWorker<T> {
             mni_local_calls: HashSet::new(),
             reregister_due: None,
             last_call_activity: None,
+            cells_generation,
+            cells_announced: None,
         }
     }
 
@@ -520,6 +527,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
     /// `run` reconnects. A removed section cannot be followed (there is nothing to connect to);
     /// the restart check of the reload keeps that case from getting here.
     fn follow_config(&mut self) -> Result<(), String> {
+        self.follow_cells();
         let Some(Some(transport)) = self.live.as_mut().and_then(|l| l.poll()) else { return Ok(()) };
         if let Some(brew) = self.config.config().brew.clone() {
             self.brew_config = brew;
@@ -832,6 +840,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
     /// Tell the server which cells this station serves, if it understands that (see
     /// [`bts_info_message`]).
     fn announce_cells(&mut self) {
+        self.cells_announced = None;
         let Some(msg) = bts_info_message(&self.config.config(), self.transport.server_brew_extensions()) else {
             return;
         };
@@ -839,6 +848,26 @@ impl<T: NetworkTransport> BrewWorker<T> {
             tracing::error!("BrewWorker: failed to send BTS info: {}", e);
         } else {
             tracing::info!("BrewWorker: announced cells to the server (BTS info)");
+            self.cells_announced = Some(msg);
+        }
+    }
+
+    /// A live reload that changes what the cells announce (location area, neighbours, broadcast
+    /// values): send the BTS info again on the same connection, so the server's radio locations
+    /// and cell directory follow without a reconnect. The server takes a repeated BTS info as the
+    /// station's new cell list.
+    fn follow_cells(&mut self) {
+        let generation = self.config.config_generation();
+        if generation == self.cells_generation {
+            return;
+        }
+        self.cells_generation = generation;
+        if self.cells_announced.is_none() {
+            return; // not announced on this connection (server without `bts-info`)
+        }
+        let msg = bts_info_message(&self.config.config(), self.transport.server_brew_extensions());
+        if msg.is_some() && msg != self.cells_announced {
+            self.announce_cells();
         }
     }
 
@@ -2423,6 +2452,34 @@ password = "x"
         let mut plain = worker(MockTransport::new());
         plain.transport.connect().unwrap();
         plain.announce_cells();
+        assert!(plain.transport.sent_payloads().is_empty(), "nothing new towards a plain Brew server");
+    }
+
+    #[test]
+    fn a_live_change_of_the_location_area_announces_the_cells_again() {
+        let mut w = worker(MockTransport::new().with_brew_extensions(&["bts-info"]));
+        w.transport.connect().unwrap();
+        w.announce_cells();
+        let mut same = (*w.config.config()).clone();
+        same.cell.presence_check_secs += 1;
+        w.config.replace_config(same).unwrap();
+        w.follow_cells();
+        assert_eq!(w.transport.sent_payloads().len(), 1, "nothing the server sees changed");
+        let mut moved = (*w.config.config()).clone();
+        moved.cell.location_area += 1;
+        let la = moved.cell.location_area;
+        w.config.replace_config(moved).unwrap();
+        w.follow_cells();
+        assert_eq!(w.transport.sent_payloads().len(), 2);
+        assert_eq!(json_of(&w.transport.sent_payloads()[1])["cells"][0]["location_area"], la);
+
+        let mut plain = worker(MockTransport::new());
+        plain.transport.connect().unwrap();
+        plain.announce_cells();
+        let mut moved = (*plain.config.config()).clone();
+        moved.cell.location_area += 1;
+        plain.config.replace_config(moved).unwrap();
+        plain.follow_cells();
         assert!(plain.transport.sent_payloads().is_empty(), "nothing new towards a plain Brew server");
     }
 

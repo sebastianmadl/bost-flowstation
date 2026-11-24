@@ -134,6 +134,9 @@ pub struct CipherKey(pub [u8; 10]);
 
 impl std::fmt::Debug for CipherKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if super::config::secrets_revealed() {
+            return write!(f, "CipherKey({:02x?})", self.0);
+        }
         f.write_str("CipherKey(<redacted>)")
     }
 }

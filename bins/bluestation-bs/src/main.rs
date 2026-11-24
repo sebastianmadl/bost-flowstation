@@ -193,7 +193,7 @@ fn idle_transport() -> WebSocketTransport {
 fn start_telemetry_worker(cfg: SharedConfig, telemetry_source: TelemetrySource) -> thread::JoinHandle<()> {
     let first = telemetry_transport(&cfg.config());
     let enabled = first.is_some();
-    let live = LiveLink::new(cfg, |c| format!("{:?}", c.telemetry), Box::new(telemetry_transport));
+    let live = LiveLink::new(cfg, |c| tetra_config::bluestation::debug_with_secrets(&c.telemetry), Box::new(telemetry_transport));
     thread::spawn(move || {
         let transport = first.unwrap_or_else(idle_transport);
         let mut worker = TelemetryWorker::new(telemetry_source, transport).with_live(live, enabled);
@@ -204,7 +204,7 @@ fn start_telemetry_worker(cfg: SharedConfig, telemetry_source: TelemetrySource) 
 fn start_control_worker(cfg: SharedConfig, command_dispatchers: HashMap<TetraEntity, CommandDispatcher>) -> thread::JoinHandle<()> {
     let first = control_transport(&cfg.config());
     let enabled = first.is_some();
-    let live = LiveLink::new(cfg.clone(), |c| format!("{:?}", c.control), Box::new(control_transport));
+    let live = LiveLink::new(cfg.clone(), |c| tetra_config::bluestation::debug_with_secrets(&c.control), Box::new(control_transport));
     thread::spawn(move || {
         let transport = first.unwrap_or_else(idle_transport);
         let mut worker = ControlWorker::new(command_dispatchers, transport).with_shared(cfg).with_live(live, enabled);

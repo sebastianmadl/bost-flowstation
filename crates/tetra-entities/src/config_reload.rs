@@ -9,7 +9,7 @@
 //! (all or nothing), so the running station never ends up half on the old file and half on the
 //! new one; the caller then restarts as before.
 
-use tetra_config::bluestation::{SharedConfig, StackConfig};
+use tetra_config::bluestation::{debug_with_secrets, SharedConfig, StackConfig};
 use tetra_core::CellId;
 
 /// Set by the start-up code when the Asterisk entity exists. With it, Asterisk settings (including
@@ -30,8 +30,9 @@ pub struct ReloadReport {
     pub restart: Vec<String>,
 }
 
+/// Compares the full values, secrets included (a changed password or key is a change).
 fn differs<T: std::fmt::Debug>(a: &T, b: &T) -> bool {
-    format!("{a:?}") != format!("{b:?}")
+    debug_with_secrets(a) != debug_with_secrets(b)
 }
 
 /// Why `new` cannot replace `old` without a restart (empty = it can).
@@ -64,6 +65,41 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
             .collect::<Vec<_>>()
     };
     check(differs(&rf(old), &rf(new)), "cell carrier or frequency plan (retunes the SDR)");
+    // The cell's identity on air. MCC/MNC are the network code of D-MLE-SYNC (TS 100 392-2 clause
+    // 18.4.2.1) and the colour code form the extended colour code that seeds the scrambling (clauses 8.2.5.2 and 23.2.1): a change makes
+    // every camped radio lose the cell, and a radio that finds it again sees another network and
+    // must register anew (clause 16.4.1.0). Registrations, group attachments and the Brew sessions
+    // of the running station would all be stale, so this is a restart, not a live change.
+    let identity = |c: &StackConfig| {
+        let cells = c
+            .cells()
+            .iter()
+            .map(|(id, cell, _)| {
+                let net = c.network_of_cell(*id).net;
+                (*id, cell.colour_code, net.mcc, net.mnc)
+            })
+            .collect::<Vec<_>>();
+        // `net` is what the primary cell sends; the networks list names it for the other cells.
+        ((c.net.mcc, c.net.mnc), cells)
+    };
+    check(differs(&identity(old), &identity(new)), "colour code or network code MCC/MNC (the cell's identity on air)");
+    // Air interface encryption. Changing the security class or the cell's keys while radios are
+    // registered needs the change to be announced to them first with D-CK CHANGE DEMAND at an
+    // agreed slot, with SYSINFO changing in step (EN 300 392-7 clauses 4.5.5.6 and 4.5.6); a
+    // silent switch leaves registered radios on the old class and key. Until that procedure is
+    // driven from a reload, these settings restart the station (every radio registers again).
+    // Who may register (whitelist, limits) and the subscriber keys K stay live: K is only used at
+    // the next authentication (clause 4.4).
+    let air = |sec: &tetra_config::bluestation::CfgSecurity| {
+        sec.aie.as_ref().map(|a| (a.security_class(), a.ksg, a.sckn, a.sck_vn, a.sck.clone(), a.class3.as_ref().map(|c| (c.cck_id, c.cck.clone()))))
+    };
+    let cell_air = |c: &StackConfig| {
+        (
+            air(&c.security),
+            c.extra_cells.iter().map(|x| (x.id, x.security.as_ref().map(air))).collect::<Vec<_>>(),
+        )
+    };
+    check(differs(&cell_air(old), &cell_air(new)), "air interface encryption: security class or cipher keys");
     check(
         differs(
             &old.extra_cells.iter().map(|c| (c.id, c.soapysdr.clone())).collect::<Vec<_>>(),
@@ -108,6 +144,18 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
 /// and to every additional cell. Returns the settings that block a live reload without applying
 /// anything, or the number of cells swapped.
 pub fn reload(primary: &SharedConfig, extra: &[(CellId, SharedConfig)], new: StackConfig) -> Result<ReloadReport, String> {
+    reload_with(primary, extra, new, &|_| {})
+}
+
+/// [`reload`] with a hook that completes each additional cell's derived config before it is
+/// validated and swapped (key management gives every cell the server key of its own LA, the
+/// same as at start-up).
+pub fn reload_with(
+    primary: &SharedConfig,
+    extra: &[(CellId, SharedConfig)],
+    new: StackConfig,
+    prepare_cell: &dyn Fn(&mut StackConfig),
+) -> Result<ReloadReport, String> {
     let old = primary.config();
     let single_cell = old.extra_cells.is_empty() && new.extra_cells.is_empty();
     let restart = restart_reasons(&old, &new);
@@ -117,13 +165,14 @@ pub fn reload(primary: &SharedConfig, extra: &[(CellId, SharedConfig)], new: Sta
     // Build every cell's config first so a bad one fails before anything is swapped.
     let mut derived = Vec::new();
     for (id, shared) in extra {
-        let cell = new.for_extra_cell(*id).ok_or_else(|| format!("cell {id:?} is not in the new configuration"))?;
+        let mut cell = new.for_extra_cell(*id).ok_or_else(|| format!("cell {id:?} is not in the new configuration"))?;
+        prepare_cell(&mut cell);
         cell.validate()?;
         derived.push((shared, cell));
     }
     new.validate()?;
     if differs(&old.security, &new.security) || differs(&old.extra_cells.iter().map(|c| &c.security).collect::<Vec<_>>(), &new.extra_cells.iter().map(|c| &c.security).collect::<Vec<_>>()) {
-        tracing::warn!("Security settings changed live: radios that are already registered keep their old keys until they register again");
+        tracing::info!("Registration rules or subscriber keys changed live; they apply from each radio's next registration");
     }
     let (log_changed, name_changed) = (differs(&old.debug_log, &new.debug_log), differs(&old.service_name, &new.service_name));
     let (log_file, service_name) = (new.debug_log.clone(), new.service_name.clone());
@@ -187,10 +236,60 @@ mod tests {
         assert_eq!(shared.config_generation(), 0);
     }
 
+    fn aie(class: u8, key: u8) -> tetra_config::bluestation::CfgAie {
+        tetra_config::bluestation::CfgAie {
+            class3: (class == 3).then(|| tetra_config::bluestation::CfgClass3 { cck: tetra_config::bluestation::CipherKey([key; 10]), cck_id: 1 }),
+            enabled: class >= 2,
+            ksg: 1,
+            sckn: 0,
+            sck: tetra_config::bluestation::CipherKey([key; 10]),
+            sck_vn: 1,
+            clear_groups: Vec::new(),
+        }
+    }
+
     #[test]
-    fn colour_code_and_services_apply_live() {
+    fn colour_code_and_network_code_need_a_restart() {
+        let mut cc = base();
+        cc.cell.colour_code = (cc.cell.colour_code + 1) % 64;
+        assert!(!restart_reasons(&base(), &cc).is_empty(), "colour code is part of the extended colour code");
+        let mut mcc = base();
+        mcc.net.mcc = (mcc.net.mcc + 1) & 0x3FF;
+        assert!(!restart_reasons(&base(), &mcc).is_empty(), "another MCC is another network");
+        let mut mnc = base();
+        mnc.net.mnc = (mnc.net.mnc + 1) & 0x3FFF;
+        let shared = SharedConfig::from_parts(base(), None);
+        let report = reload(&shared, &[], mnc).unwrap();
+        assert!(!report.restart.is_empty());
+        assert_eq!(shared.config_generation(), 0, "nothing applied");
+    }
+
+    #[test]
+    fn security_class_and_cipher_keys_need_a_restart_registration_rules_do_not() {
+        let mut old = base();
+        old.security.aie = Some(aie(2, 1));
+        for (what, new_aie) in [("class 2 -> 3", Some(aie(3, 1))), ("class 2 -> 1", None), ("new SCK", Some(aie(2, 2)))] {
+            let mut new = old.clone();
+            new.security.aie = new_aie;
+            assert!(!restart_reasons(&old, &new).is_empty(), "{what} must not switch silently");
+        }
+        let mut rules = old.clone();
+        rules.security.issi_whitelist.push(1234567);
+        rules.security.max_registered_clients += 1;
+        assert!(restart_reasons(&old, &rules).is_empty(), "{:?}", restart_reasons(&old, &rules));
+    }
+
+    #[test]
+    fn a_changed_password_is_a_change() {
         let mut new = base();
-        new.cell.colour_code = (new.cell.colour_code + 1) % 64;
+        new.asterisk.password = tetra_config::bluestation::SecretField::from("other".to_string());
+        assert!(differs(&base().asterisk, &new.asterisk), "the redacted Debug form hides the password");
+        assert!(!format!("{:?}", new.asterisk).contains("other"), "plain Debug still redacts");
+    }
+
+    #[test]
+    fn services_apply_live() {
+        let mut new = base();
         new.telemetry = None;
         new.control = None;
         new.telegram = None;
