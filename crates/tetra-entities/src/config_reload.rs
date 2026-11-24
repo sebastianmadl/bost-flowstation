@@ -35,6 +35,32 @@ fn differs<T: std::fmt::Debug>(a: &T, b: &T) -> bool {
     debug_with_secrets(a) != debug_with_secrets(b)
 }
 
+/// The SDR settings that cannot change live: everything but the gains, the antennas (while
+/// set) and the ppm correction.
+fn soapy_fixed(s: &tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr) -> String {
+    let mut s = s.clone();
+    s.rx_gains.clear();
+    s.tx_gains.clear();
+    s.rx_ant = s.rx_ant.as_ref().map(|_| String::new());
+    s.tx_ant = s.tx_ant.as_ref().map(|_| String::new());
+    s.ppm_err = 0.0;
+    debug_with_secrets(&s)
+}
+
+/// A gain that is no longer set would go back to a device default the station does not know.
+fn gain_removed(old: Option<&tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr>, new: Option<&tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr>) -> bool {
+    match (old, new) {
+        (Some(o), Some(n)) => o.rx_gains.keys().any(|k| !n.rx_gains.contains_key(k)) || o.tx_gains.keys().any(|k| !n.tx_gains.contains_key(k)),
+        _ => false,
+    }
+}
+
+fn sdr_fixed(p: &tetra_config::bluestation::CfgPhyIo) -> String {
+    let mut p = p.clone();
+    let soapy = p.soapysdr.take();
+    format!("{} {:?}", debug_with_secrets(&p), soapy.as_ref().map(soapy_fixed))
+}
+
 /// Why `new` cannot replace `old` without a restart (empty = it can).
 pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
     let mut r = Vec::new();
@@ -43,8 +69,13 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
             r.push(what.to_string());
         }
     };
-    // The SDR and its settings.
-    check(differs(&old.phy_io, &new.phy_io), "SDR / hardware (phy_io)");
+    // The SDR and its settings. Gains, antennas and the ppm correction follow live on the
+    // running SDR (`RxTxDevSoapySdr::follow_config`); a gain or antenna that is removed would go
+    // back to a device default the station does not know, so that restarts.
+    check(differs(&sdr_fixed(&old.phy_io), &sdr_fixed(&new.phy_io)), "SDR / hardware (phy_io)");
+    let removed = gain_removed(old.phy_io.soapysdr.as_ref(), new.phy_io.soapysdr.as_ref())
+        || old.extra_cells.iter().any(|o| gain_removed(o.soapysdr.as_ref(), new.extra_cells.iter().find(|n| n.id == o.id).and_then(|n| n.soapysdr.as_ref())));
+    check(removed, "an SDR gain removed (back to the device default)");
     check(differs(&old.stack_mode, &new.stack_mode), "stack_mode");
     // Radio parameters of every cell that retune the SDR or seed the scrambling code.
     let rf = |c: &StackConfig| {
@@ -102,8 +133,8 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
     check(differs(&cell_air(old), &cell_air(new)), "air interface encryption: security class or cipher keys");
     check(
         differs(
-            &old.extra_cells.iter().map(|c| (c.id, c.soapysdr.clone())).collect::<Vec<_>>(),
-            &new.extra_cells.iter().map(|c| (c.id, c.soapysdr.clone())).collect::<Vec<_>>(),
+            &old.extra_cells.iter().map(|c| (c.id, c.soapysdr.as_ref().map(soapy_fixed))).collect::<Vec<_>>(),
+            &new.extra_cells.iter().map(|c| (c.id, c.soapysdr.as_ref().map(soapy_fixed))).collect::<Vec<_>>(),
         ),
         "additional cells or their SDRs",
     );
@@ -277,6 +308,32 @@ mod tests {
         rules.security.issi_whitelist.push(1234567);
         rules.security.max_registered_clients += 1;
         assert!(restart_reasons(&old, &rules).is_empty(), "{:?}", restart_reasons(&old, &rules));
+    }
+
+    #[test]
+    fn gains_antennas_and_ppm_apply_live_other_sdr_settings_restart() {
+        let mut old = base();
+        let soapy = old.phy_io.soapysdr.get_or_insert_with(|| panic!("example config has an SDR"));
+        soapy.rx_gains.insert("LNA".into(), 20.0);
+        soapy.rx_ant = Some("LNAL".into());
+        let mut live = old.clone();
+        {
+            let s = live.phy_io.soapysdr.as_mut().unwrap();
+            s.rx_gains.insert("LNA".into(), 30.0);
+            s.tx_gains.insert("PAD".into(), 40.0);
+            s.rx_ant = Some("LNAW".into());
+            s.ppm_err += 1.5;
+        }
+        assert!(restart_reasons(&old, &live).is_empty(), "{:?}", restart_reasons(&old, &live));
+        let mut removed = old.clone();
+        removed.phy_io.soapysdr.as_mut().unwrap().rx_ant = None;
+        assert!(!restart_reasons(&old, &removed).is_empty(), "back to an unknown device default");
+        let mut gone = old.clone();
+        gone.phy_io.soapysdr.as_mut().unwrap().rx_gains.clear();
+        assert!(!restart_reasons(&old, &gone).is_empty());
+        let mut device = old.clone();
+        device.phy_io.soapysdr.as_mut().unwrap().device = Some("driver=other".into());
+        assert!(!restart_reasons(&old, &device).is_empty());
     }
 
     #[test]
