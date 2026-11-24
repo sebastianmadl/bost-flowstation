@@ -4538,7 +4538,7 @@ fn handle_connection(
         }
     } else if req_line.contains("POST /api/roaming") {
         let (inner, body_str) = read_post_body(stream);
-        serve_roaming_save(inner, &config_path, &body_str);
+        serve_roaming_save(inner, &config_path, &shared_config, &body_str);
     } else if is_fleet_banner_request(&req_line) {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -4591,16 +4591,16 @@ fn handle_connection(
         }
     } else if req_line.contains("POST /api/sdrs") {
         let (inner, body_str) = read_post_body(stream);
-        serve_sdrs_save(inner, &config_path, &body_str);
+        serve_sdrs_save(inner, &config_path, &shared_config, &body_str);
     } else if req_line.contains("POST /api/cells/add") {
         let (inner, body_str) = read_post_body(stream);
-        serve_cells_add(inner, &config_path, &body_str);
+        serve_cells_add(inner, &config_path, &shared_config, &body_str);
     } else if req_line.contains("POST /api/cells/update") {
         let (inner, body_str) = read_post_body(stream);
-        serve_cells_update(inner, &config_path, &body_str);
+        serve_cells_update(inner, &config_path, &shared_config, &body_str);
     } else if req_line.contains("POST /api/cells/remove") {
         let (inner, body_str) = read_post_body(stream);
-        serve_cells_remove(inner, &config_path, &body_str);
+        serve_cells_remove(inner, &config_path, &shared_config, &body_str);
     } else if req_line.contains("GET /api/dualcarrier") {
         let mut s = stream;
         drain_http_headers(&mut s);
@@ -6261,11 +6261,23 @@ fn serve_bts_info(mut stream: PrefixedConn, shared_config: &Option<tetra_config:
 }
 
 /// Write a config produced by the cells editor and restart to apply it.
-fn apply_cells_config(stream: PrefixedConn, config_path: &str, text: &str, what: String) {
+fn apply_cells_config(stream: PrefixedConn, config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>, text: &str, what: String) {
     let backup = format!("{config_path}.cells.bak");
     let _ = std::fs::copy(config_path, &backup);
     if let Err(e) = atomic_write(config_path, text) {
         return http_response(stream, 500, &format!("failed to write config: {e}"));
+    }
+    // Live configuration: only what cannot change at run time restarts the station.
+    if shared.is_some() {
+        let result = reload_saved_config(config_path, shared);
+        if result["applied"] == true {
+            tracing::info!("Dashboard: {what}; applied live");
+            return http_response(stream, 200, &format!("{what}; applied without a restart."));
+        }
+        if let Some(reasons) = result["restart"].as_array() {
+            let reasons: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
+            tracing::info!("Dashboard: {what}; needs a restart: {}", reasons.join(", "));
+        }
     }
     tracing::info!("Dashboard: {what}; scheduling restart");
     crate::service_control::schedule_service_action(
@@ -6311,7 +6323,7 @@ fn serve_fleet_control(stream: PrefixedConn, config_path: &str, shared: Option<&
 }
 
 /// POST /api/roaming — see `roaming::apply_roaming`; writes the config and restarts.
-fn serve_roaming_save(stream: PrefixedConn, config_path: &str, body: &str) {
+fn serve_roaming_save(stream: PrefixedConn, config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>, body: &str) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
@@ -6321,13 +6333,13 @@ fn serve_roaming_save(stream: PrefixedConn, config_path: &str, body: &str) {
         Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
     };
     match crate::net_dashboard::roaming::apply_roaming(&original, &req) {
-        Ok(text) => apply_cells_config(stream, config_path, &text, "Infrastructure settings saved".to_string()),
+        Ok(text) => apply_cells_config(stream, config_path, shared, &text, "Infrastructure settings saved".to_string()),
         Err(e) => http_response(stream, 400, &e),
     }
 }
 
 /// POST /api/sdrs — the Cells page (`sdrs::apply_sdrs`); writes the config and restarts.
-fn serve_sdrs_save(stream: PrefixedConn, config_path: &str, body: &str) {
+fn serve_sdrs_save(stream: PrefixedConn, config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>, body: &str) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
@@ -6337,13 +6349,13 @@ fn serve_sdrs_save(stream: PrefixedConn, config_path: &str, body: &str) {
         Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
     };
     match crate::net_dashboard::sdrs::apply_sdrs(&original, &req) {
-        Ok(text) => apply_cells_config(stream, config_path, &text, "SDRs and cells saved".to_string()),
+        Ok(text) => apply_cells_config(stream, config_path, shared, &text, "SDRs and cells saved".to_string()),
         Err(e) => http_response(stream, 400, &e),
     }
 }
 
 /// POST /api/cells/add — `{"device": "...", "main_carrier": N, "colour_code": N?, "location_area": N?}`.
-fn serve_cells_add(stream: PrefixedConn, config_path: &str, body: &str) {
+fn serve_cells_add(stream: PrefixedConn, config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>, body: &str) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
@@ -6365,13 +6377,13 @@ fn serve_cells_add(stream: PrefixedConn, config_path: &str, body: &str) {
         Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
     };
     match crate::net_dashboard::cells::add_cell_toml(&original, device, main_carrier as u16, colour_code, location_area) {
-        Ok((text, id)) => apply_cells_config(stream, config_path, &text, format!("cell {id} added (carrier {main_carrier})")),
+        Ok((text, id)) => apply_cells_config(stream, config_path, shared, &text, format!("cell {id} added (carrier {main_carrier})")),
         Err(e) => http_response(stream, 400, &e),
     }
 }
 
 /// POST /api/cells/update — a cell's settings and security (`cells::update_cell_toml`).
-fn serve_cells_update(stream: PrefixedConn, config_path: &str, body: &str) {
+fn serve_cells_update(stream: PrefixedConn, config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>, body: &str) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
@@ -6383,14 +6395,14 @@ fn serve_cells_update(stream: PrefixedConn, config_path: &str, body: &str) {
     match crate::net_dashboard::cells::update_cell_toml(&original, &req) {
         Ok(text) => {
             let id = req.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-            apply_cells_config(stream, config_path, &text, format!("cell {id} settings saved"))
+            apply_cells_config(stream, config_path, shared, &text, format!("cell {id} settings saved"))
         }
         Err(e) => http_response(stream, 400, &e),
     }
 }
 
 /// POST /api/cells/remove — `{"id": N}`.
-fn serve_cells_remove(stream: PrefixedConn, config_path: &str, body: &str) {
+fn serve_cells_remove(stream: PrefixedConn, config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>, body: &str) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return http_response(stream, 400, &format!("invalid JSON: {e}")),
@@ -6403,7 +6415,7 @@ fn serve_cells_remove(stream: PrefixedConn, config_path: &str, body: &str) {
         Err(e) => return http_response(stream, 500, &format!("cannot read config: {e}")),
     };
     match crate::net_dashboard::cells::remove_cell_toml(&original, id) {
-        Ok(text) => apply_cells_config(stream, config_path, &text, format!("cell {id} removed")),
+        Ok(text) => apply_cells_config(stream, config_path, shared, &text, format!("cell {id} removed")),
         Err(e) => http_response(stream, 400, &e),
     }
 }

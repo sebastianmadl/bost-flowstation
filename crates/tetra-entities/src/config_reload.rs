@@ -36,9 +36,16 @@ fn differs<T: std::fmt::Debug>(a: &T, b: &T) -> bool {
 }
 
 /// The SDR settings that cannot change live: everything but the gains, the antennas (while
-/// set) and the ppm correction.
-fn soapy_fixed(s: &tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr) -> String {
+/// set) and the ppm correction; on an SDR of its own (`own`) also the frequencies, which follow
+/// the cell's carrier.
+fn soapy_fixed_for(s: &tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr, own: bool) -> String {
     let mut s = s.clone();
+    if own {
+        s.ul_freq = 0.0;
+        s.dl_freq = 0.0;
+        s.rx_center_freq = None;
+        s.tx_center_freq = None;
+    }
     s.rx_gains.clear();
     s.tx_gains.clear();
     s.rx_ant = s.rx_ant.as_ref().map(|_| String::new());
@@ -55,10 +62,30 @@ fn gain_removed(old: Option<&tetra_config::bluestation::sec_phy_soapy::CfgSoapyS
     }
 }
 
-fn sdr_fixed(p: &tetra_config::bluestation::CfgPhyIo) -> String {
+fn soapy_fixed(s: &tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr) -> String {
+    soapy_fixed_for(s, false)
+}
+
+fn sdr_fixed(p: &tetra_config::bluestation::CfgPhyIo, own: bool) -> String {
     let mut p = p.clone();
     let soapy = p.soapysdr.take();
-    format!("{} {:?}", debug_with_secrets(&p), soapy.as_ref().map(soapy_fixed))
+    format!("{} {:?}", debug_with_secrets(&p), soapy.as_ref().map(|s| soapy_fixed_for(s, own)))
+}
+
+/// Cells that share their SDR with another cell (same `device`), as `open_shared_sdrs` groups
+/// them at start-up.
+fn shared_sdr_cells(c: &StackConfig) -> std::collections::HashSet<CellId> {
+    let device = |s: Option<&tetra_config::bluestation::sec_phy_soapy::CfgSoapySdr>| {
+        s.and_then(|s| s.device.as_deref()).map(|d| d.trim().to_string()).filter(|d| !d.is_empty())
+    };
+    let cells: Vec<(CellId, Option<String>)> = std::iter::once((CellId::PRIMARY, device(c.phy_io.soapysdr.as_ref())))
+        .chain(c.extra_cells.iter().map(|x| (x.id, device(x.soapysdr.as_ref()))))
+        .collect();
+    cells
+        .iter()
+        .filter(|(id, d)| d.is_some() && cells.iter().any(|(o, od)| o != id && od == d))
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 /// Why `new` cannot replace `old` without a restart (empty = it can).
@@ -72,7 +99,15 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
     // The SDR and its settings. Gains, antennas and the ppm correction follow live on the
     // running SDR (`RxTxDevSoapySdr::follow_config`); a gain or antenna that is removed would go
     // back to a device default the station does not know, so that restarts.
-    check(differs(&sdr_fixed(&old.phy_io), &sdr_fixed(&new.phy_io)), "SDR / hardware (phy_io)");
+    // A cell on an SDR of its own may also move to another carrier (the SDR retunes, the cell
+    // rebuilds as for a new colour code); cells sharing an SDR keep theirs.
+    let shared = {
+        let mut s = shared_sdr_cells(old);
+        s.extend(shared_sdr_cells(new));
+        s
+    };
+    let own = |id: CellId| !shared.contains(&id);
+    check(differs(&sdr_fixed(&old.phy_io, own(CellId::PRIMARY)), &sdr_fixed(&new.phy_io, own(CellId::PRIMARY))), "SDR / hardware (phy_io)");
     let removed = gain_removed(old.phy_io.soapysdr.as_ref(), new.phy_io.soapysdr.as_ref())
         || old.extra_cells.iter().any(|o| gain_removed(o.soapysdr.as_ref(), new.extra_cells.iter().find(|n| n.id == o.id).and_then(|n| n.soapysdr.as_ref())));
     check(removed, "an SDR gain removed (back to the device default)");
@@ -82,38 +117,31 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
         c.cells()
             .iter()
             .map(|(id, cell, _)| {
-                (
-                    *id,
-                    cell.main_carrier,
-                    cell.secondary_carrier,
-                    cell.freq_band,
-                    cell.freq_offset_hz,
-                    cell.duplex_spacing_id,
-                    cell.custom_duplex_spacing,
-                    cell.reverse_operation,
+                if own(*id) {
+                    // Retuned live: only whether there is a second carrier must stay.
+                    return format!("{id:?} own SDR, secondary {}", cell.secondary_carrier.is_some());
+                }
+                format!(
+                    "{:?}",
+                    (
+                        *id,
+                        cell.main_carrier,
+                        cell.secondary_carrier,
+                        cell.freq_band,
+                        cell.freq_offset_hz,
+                        cell.duplex_spacing_id,
+                        cell.custom_duplex_spacing,
+                        cell.reverse_operation,
+                    )
                 )
             })
             .collect::<Vec<_>>()
     };
-    check(differs(&rf(old), &rf(new)), "cell carrier or frequency plan (retunes the SDR)");
-    // The cell's identity on air. MCC/MNC are the network code of D-MLE-SYNC (TS 100 392-2 clause
-    // 18.4.2.1) and the colour code form the extended colour code that seeds the scrambling (clauses 8.2.5.2 and 23.2.1): a change makes
-    // every camped radio lose the cell, and a radio that finds it again sees another network and
-    // must register anew (clause 16.4.1.0). Registrations, group attachments and the Brew sessions
-    // of the running station would all be stale, so this is a restart, not a live change.
-    let identity = |c: &StackConfig| {
-        let cells = c
-            .cells()
-            .iter()
-            .map(|(id, cell, _)| {
-                let net = c.network_of_cell(*id).net;
-                (*id, cell.colour_code, net.mcc, net.mnc)
-            })
-            .collect::<Vec<_>>();
-        // `net` is what the primary cell sends; the networks list names it for the other cells.
-        ((c.net.mcc, c.net.mnc), cells)
-    };
-    check(differs(&identity(old), &identity(new)), "colour code or network code MCC/MNC (the cell's identity on air)");
+    check(differs(&rf(old), &rf(new)), "carrier or frequency plan of a cell on a shared SDR, or a second carrier added or removed");
+    // The cell's identity on air (colour code, MCC/MNC) follows live: every radio loses the
+    // cell and registers anew (TS 100 392-2 clauses 8.2.5.2, 16.4.1.0), so each cell rebuilds its
+    // registrations and calls in place (MM `reset_registrations`, CMCE `follow_cell_identity`)
+    // while the other cells and the station keep running.
     // Air interface encryption. Changing the security class or the cell's keys while radios are
     // registered needs the change to be announced to them first with D-CK CHANGE DEMAND at an
     // agreed slot, with SYSINFO changing in step (EN 300 392-7 clauses 4.5.5.6 and 4.5.6); a
@@ -133,8 +161,8 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
     check(differs(&cell_air(old), &cell_air(new)), "air interface encryption: security class or cipher keys");
     check(
         differs(
-            &old.extra_cells.iter().map(|c| (c.id, c.soapysdr.as_ref().map(soapy_fixed))).collect::<Vec<_>>(),
-            &new.extra_cells.iter().map(|c| (c.id, c.soapysdr.as_ref().map(soapy_fixed))).collect::<Vec<_>>(),
+            &old.extra_cells.iter().map(|c| (c.id, c.soapysdr.as_ref().map(|s| soapy_fixed_for(s, own(c.id))))).collect::<Vec<_>>(),
+            &new.extra_cells.iter().map(|c| (c.id, c.soapysdr.as_ref().map(|s| soapy_fixed_for(s, own(c.id))))).collect::<Vec<_>>(),
         ),
         "additional cells or their SDRs",
     );
@@ -258,13 +286,28 @@ mod tests {
     }
 
     #[test]
-    fn rf_change_needs_restart_and_is_not_applied() {
+    fn rf_change_that_cannot_retune_needs_restart_and_is_not_applied() {
         let shared = SharedConfig::from_parts(base(), None);
         let mut new = base();
-        new.cell.main_carrier += 1;
+        new.cell.secondary_carrier = Some(new.cell.main_carrier + 2);
         let report = reload(&shared, &[], new).unwrap();
-        assert!(!report.restart.is_empty());
+        assert!(!report.restart.is_empty(), "a second carrier needs another channelizer");
         assert_eq!(shared.config_generation(), 0);
+        let mut fs = base();
+        fs.phy_io.soapysdr.as_mut().unwrap().fs = Some(2_000_000.0);
+        assert!(!restart_reasons(&base(), &fs).is_empty(), "sample rate");
+    }
+
+    #[test]
+    fn a_cell_on_its_own_sdr_moves_to_another_carrier_live() {
+        let mut new = base();
+        new.cell.main_carrier += 2;
+        let (_, dl, ul) = new.bs_phase_mod_carriers().unwrap()[0];
+        let s = new.phy_io.soapysdr.as_mut().unwrap();
+        s.dl_freq = dl as f64;
+        s.ul_freq = ul as f64;
+        new.validate().unwrap();
+        assert!(restart_reasons(&base(), &new).is_empty(), "{:?}", restart_reasons(&base(), &new));
     }
 
     fn aie(class: u8, key: u8) -> tetra_config::bluestation::CfgAie {
@@ -280,19 +323,19 @@ mod tests {
     }
 
     #[test]
-    fn colour_code_and_network_code_need_a_restart() {
+    fn colour_code_and_network_code_apply_live_as_a_cell_rebuild() {
         let mut cc = base();
         cc.cell.colour_code = (cc.cell.colour_code + 1) % 64;
-        assert!(!restart_reasons(&base(), &cc).is_empty(), "colour code is part of the extended colour code");
+        assert!(restart_reasons(&base(), &cc).is_empty(), "{:?}", restart_reasons(&base(), &cc));
         let mut mcc = base();
         mcc.net.mcc = (mcc.net.mcc + 1) & 0x3FF;
-        assert!(!restart_reasons(&base(), &mcc).is_empty(), "another MCC is another network");
+        assert!(restart_reasons(&base(), &mcc).is_empty());
         let mut mnc = base();
         mnc.net.mnc = (mnc.net.mnc + 1) & 0x3FFF;
         let shared = SharedConfig::from_parts(base(), None);
         let report = reload(&shared, &[], mnc).unwrap();
-        assert!(!report.restart.is_empty());
-        assert_eq!(shared.config_generation(), 0, "nothing applied");
+        assert!(report.restart.is_empty());
+        assert_eq!(shared.config().net.mnc, (base().net.mnc + 1) & 0x3FFF);
     }
 
     #[test]

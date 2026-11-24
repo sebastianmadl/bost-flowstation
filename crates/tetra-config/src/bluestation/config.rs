@@ -226,7 +226,17 @@ pub fn carrier_band_plan(cell: &CfgCellInfo) -> Option<u16> {
 /// cells, so an SC3 cell cannot share its network with another cell (or roam between stations).
 pub const SC3_SINGLE_CELL: &str = "security class 3 (SC3) runs on a cell that is alone in its network: put it on its own network ([networks]) or choose security class 1 or 2";
 
+/// See [`StackConfig::cell_identity`].
+pub type CellIdentity = (u8, u16, u16, u16, Option<u16>);
+
 impl StackConfig {
+    /// The cell's identity on air: colour code, MCC and MNC (together the extended colour code
+    /// of the scrambling, TS 100 392-2 clauses 8.2.5.2 and 23.2.1) and its carriers (main,
+    /// secondary). Radios that camp on the cell lose it when any of these changes.
+    pub fn cell_identity(&self) -> CellIdentity {
+        (self.cell.colour_code, self.net.mcc, self.net.mnc, self.cell.main_carrier, self.cell.secondary_carrier)
+    }
+
     /// Return BS phase-modulated carrier numbers and their DL/UL frequencies.
     pub fn bs_phase_mod_carriers(&self) -> Result<Vec<(u16, u32, u32)>, String> {
         Self::cell_phase_mod_carriers(&self.cell)

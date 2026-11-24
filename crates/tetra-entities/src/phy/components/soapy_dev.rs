@@ -74,6 +74,8 @@ struct LiveSdr {
     applied: Option<CfgSoapySdr>,
     /// Carriers of the other cells on a shared SDR (see `with_shared_carriers`).
     extra_carriers: Vec<(u16, u32, u32)>,
+    /// This cell's carriers (number, DL Hz, UL Hz) the SDR is tuned for.
+    carriers: Vec<(u16, u32, u32)>,
     telemetry: Option<TelemetrySink>,
 }
 
@@ -240,6 +242,7 @@ impl RxTxDevSoapySdr {
             generation: cfg.config_generation(),
             applied: Some(soapy_cfg.clone()),
             extra_carriers: extra_carriers.to_vec(),
+            carriers: config_guard.bs_phase_mod_carriers().unwrap_or_default(),
             telemetry: telemetry.clone(),
         };
 
@@ -310,7 +313,21 @@ impl RxTxDevSoapySdr {
         let config = self.live.cfg.config();
         let Some(new) = config.phy_io.soapysdr.clone() else { return };
         let Some(old) = self.live.applied.replace(new.clone()) else { return };
-        let changes = sdr_changes(&old, &new);
+        let mut changes = sdr_changes(&old, &new);
+        // A cell on its own SDR may move to another carrier (same number of carriers): retune
+        // like a ppm change. On a shared SDR the reload restarts instead.
+        let carriers = config.bs_phase_mod_carriers().unwrap_or_default();
+        let moved = carriers != self.live.carriers;
+        if moved {
+            if self.live.extra_carriers.is_empty() && carriers.len() == self.live.carriers.len() {
+                tracing::info!("PHY: carriers {:?} -> {:?} (live configuration), retuning", self.live.carriers.iter().map(|c| c.0).collect::<Vec<_>>(), carriers.iter().map(|c| c.0).collect::<Vec<_>>());
+                self.live.carriers = carriers;
+            } else {
+                tracing::warn!("PHY: carrier change on a shared SDR or with another number of carriers cannot apply live; restart the station");
+            }
+        }
+        let retune = changes.ppm || (moved && self.live.carriers == config.bs_phase_mod_carriers().unwrap_or_default());
+        changes.ppm = retune;
         if changes == SdrChanges::default() {
             return;
         }
@@ -342,7 +359,7 @@ impl RxTxDevSoapySdr {
         }
         if changes.ppm {
             if let Err(e) = sdr.retune(&new, config.stack_mode) {
-                tracing::warn!("PHY: live configuration: ppm {} not applied: {e}", new.ppm_err);
+                tracing::warn!("PHY: live configuration: retune not applied: {e}");
                 return;
             }
             let (numbers, dl, ul) = carrier_frequencies(&config, &new, &self.live.extra_carriers);
@@ -364,7 +381,7 @@ impl RxTxDevSoapySdr {
                 tx.continue_from(old_tx);
                 self.tx_dsp = Some(tx);
             }
-            tracing::info!("PHY: ppm correction {} -> {} applied live (retuned)", old.ppm_err, new.ppm_err);
+            tracing::info!("PHY: retuned live (ppm {} -> {})", old.ppm_err, new.ppm_err);
         }
     }
 

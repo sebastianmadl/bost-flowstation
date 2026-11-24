@@ -134,6 +134,8 @@ pub struct MmBs {
     la_current: u16,
     la_change_pending: VecDeque<u32>,
     la_change_last_frame: Option<i32>,
+    /// The cell identity (colour code, MCC, MNC) the registrations belong to.
+    cell_identity: tetra_config::bluestation::CellIdentity,
     registration_probe_receipts: HashMap<u32, tetra_core::tx_receipt::TxReporter>,
 
     // ── Air-interface security (EN 300 392-7) ──────────────────────────────────────────────
@@ -231,6 +233,7 @@ impl MmBs {
             }
         }
         let (la_generation, la_current) = (config.config_generation(), config.config().cell.location_area);
+        let cell_identity = config.config().cell_identity();
         Self {
             config,
             telemetry,
@@ -241,6 +244,7 @@ impl MmBs {
             registration_check_last_tick: None,
             la_generation,
             la_current,
+            cell_identity,
             la_change_pending: VecDeque::new(),
             la_change_last_frame: None,
             registration_probe_receipts: HashMap::new(),
@@ -3406,6 +3410,14 @@ impl MmBs {
         let generation = self.config.config_generation();
         if generation != self.la_generation {
             self.la_generation = generation;
+            let identity = self.config.config().cell_identity();
+            if identity != self.cell_identity {
+                // A new identity takes the LA along: everything registered is gone.
+                self.cell_identity = identity;
+                self.la_current = self.config.config().cell.location_area;
+                self.reset_registrations(queue, identity);
+                return;
+            }
             let la = self.config.config().cell.location_area;
             if la != self.la_current {
                 let issis = self.client_mgr.all_known_issis();
@@ -3435,6 +3447,43 @@ impl MmBs {
             self.send_d_location_update_command(queue, issi, 0);
             break;
         }
+    }
+
+    /// A live reload gave the cell another colour code, network code or carrier. Every radio on it
+    /// loses the cell (the scrambling or the frequency changes) and, finding it again, sees another network and must
+    /// register anew (TS 100 392-2 clause 16.4.1.0). The cell is rebuilt in place: each radio is
+    /// deregistered towards the network first (groups, then the registration, as for a radio that
+    /// left), and the registry, authentication and key state of the old identity are dropped.
+    fn reset_registrations(&mut self, queue: &mut MessageQueue, identity: tetra_config::bluestation::CellIdentity) {
+        let issis = self.client_mgr.all_known_issis();
+        tracing::warn!(
+            "MM: cell identity changed by a live reload (colour code {}, MCC {}, MNC {}, carrier {}): {} radio(s) deregistered, they register again on the new identity",
+            identity.0,
+            identity.1,
+            identity.2,
+            identity.3,
+            issis.len()
+        );
+        for issi in issis {
+            let groups = self
+                .client_mgr
+                .get_client_by_issi(issi)
+                .map(|client| client.groups.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            if !groups.is_empty() {
+                self.emit_subscriber_update(queue, issi, groups, BrewSubscriberAction::Deaffiliate);
+            }
+            self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
+            self.config.state_write().subscribers.deregister(issi);
+            self.client_mgr.remove_client(issi);
+        }
+        self.la_change_pending.clear();
+        self.registration_probe_receipts.clear();
+        self.auth_pending.clear();
+        self.auth_passed.clear();
+        self.registration_authenticated.clear();
+        self.dck.clear();
+        self.recovery_mark_dirty();
     }
 
     fn drive_registration_checks(&mut self, queue: &mut MessageQueue, ts: TdmaTime, now: Instant, rf_ready: bool) {
@@ -4993,6 +5042,35 @@ mod presence_tests {
         asked.extend(lu_commands(&mut queue));
         asked.sort();
         assert_eq!(asked, vec![100, 101], "every registered radio is asked once");
+    }
+
+    #[test]
+    fn a_new_cell_identity_deregisters_every_radio_instead_of_commanding_it() {
+        let (mut mm, _) = station();
+        radio(&mut mm, 100);
+        radio(&mut mm, 101);
+        let mut queue = MessageQueue::new();
+        let mut moved = (*mm.config.config()).clone();
+        moved.cell.colour_code = (moved.cell.colour_code + 1) % 64;
+        moved.cell.location_area = (moved.cell.location_area + 1) & 0x3FFF;
+        mm.config.replace_config(moved).unwrap();
+        mm.follow_location_area(&mut queue, TdmaTime::default());
+        let mut deregistered = Vec::new();
+        let mut commands = 0;
+        while let Some(m) = queue.pop_front() {
+            match m.msg {
+                SapMsgInner::MmSubscriberUpdate(u) if u.action == BrewSubscriberAction::Deregister && m.dest == TetraEntity::Cmce => deregistered.push(u.issi),
+                SapMsgInner::LmmMleUnitdataReq(_) => commands += 1,
+                _ => {}
+            }
+        }
+        deregistered.sort();
+        assert_eq!(deregistered, vec![100, 101]);
+        assert_eq!(commands, 0, "radios lost the cell: nothing to command");
+        assert!(mm.client_mgr.all_known_issis().is_empty());
+        assert!(!mm.config.state_read().subscribers.is_registered(100));
+        mm.follow_location_area(&mut queue, TdmaTime::default().add_timeslots(4));
+        assert!(queue.pop_front().is_none(), "once");
     }
 
     #[test]

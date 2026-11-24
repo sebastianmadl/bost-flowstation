@@ -161,8 +161,8 @@ impl UmacBs {
     }
 
     /// Rebuild what was derived from the configuration at start-up (broadcast PDUs, scrambling
-    /// code, cipher) after a live reload. Carriers and frequencies are restart-only (they retune
-    /// the SDR).
+    /// code, cipher, the secondary carrier's number) after a live reload. The PHY retunes the SDR
+    /// for a carrier change.
     fn refresh_config(&mut self) {
         let generation = self.config.config_generation();
         if generation == self.config_generation {
@@ -177,6 +177,11 @@ impl UmacBs {
         for sched in &mut self.secondary_channel_schedulers {
             sched.set_precomps(precomps.clone());
             sched.set_scrambling_code(scrambling_code);
+            // A live carrier change keeps whether there is a secondary carrier (the reload restarts
+            // otherwise), only its number may move.
+            if let Some(secondary) = c.cell.secondary_carrier {
+                sched.set_carrier_num(secondary);
+            }
         }
         let cipher = crate::aie::effective(&c).map(|aie| {
             let carriers: Vec<u16> = [Some(c.cell.main_carrier), c.cell.secondary_carrier].into_iter().flatten().collect();
@@ -2787,4 +2792,36 @@ fn pack_ul_acelp_bits(bits: &[u8]) -> Option<Vec<u8>> {
         out.push(byte);
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod live_carrier_tests {
+    use super::*;
+
+    /// A live carrier change: the secondary carrier's scheduler sends on the new number, the main
+    /// carrier comes with the rebuilt broadcast PDUs.
+    #[test]
+    fn the_secondary_scheduler_follows_a_live_carrier_change() {
+        let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+        let dual = |cfg: &mut tetra_config::bluestation::StackConfig, main: u16| {
+            cfg.cell.main_carrier = main;
+            cfg.cell.secondary_carrier = Some(main + 1);
+            let carriers = cfg.bs_phase_mod_carriers().unwrap();
+            let s = cfg.phy_io.soapysdr.as_mut().unwrap();
+            s.fs = Some(1_000_000.0);
+            s.dl_freq = carriers[0].1 as f64;
+            s.ul_freq = carriers[0].2 as f64;
+            s.tx_center_freq = Some((carriers[0].1 as f64 + carriers[1].1 as f64) / 2.0);
+            s.rx_center_freq = Some((carriers[0].2 as f64 + carriers[1].2 as f64) / 2.0);
+        };
+        let main = cfg.cell.main_carrier;
+        dual(&mut cfg, main);
+        let shared = SharedConfig::from_parts(cfg.clone(), None);
+        let mut umac = UmacBs::new(shared.clone(), None);
+        dual(&mut cfg, main + 4);
+        shared.replace_config(cfg.clone()).unwrap();
+        umac.refresh_config();
+        assert_eq!(umac.secondary_channel_schedulers[0].carrier_num(), cfg.cell.main_carrier + 1);
+        assert_eq!(umac.main_carrier(), cfg.cell.main_carrier);
+    }
 }

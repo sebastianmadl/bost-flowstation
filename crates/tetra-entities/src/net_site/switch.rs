@@ -405,6 +405,8 @@ pub struct SiteSwitch {
     extra: Vec<(CellId, SharedConfig)>,
     all_cells: Vec<CellId>,
     carrier_cell: HashMap<u16, CellId>,
+    /// Config generations `carrier_cell` was built from (primary, then `extra`).
+    carrier_generations: Vec<u64>,
     ports: SitePorts,
     directory: SharedDirectory,
     sessions: HashMap<Uuid, GroupSession>,
@@ -453,6 +455,7 @@ impl SiteSwitch {
     ) -> Self {
         let host = primary.config().cell_id;
         let carrier_cell = carrier_map(&primary, &extra);
+        let carrier_generations = config_generations(&primary, &extra);
         let mut all_cells = vec![host];
         all_cells.extend(extra.iter().map(|(id, _)| *id));
         Self {
@@ -462,6 +465,7 @@ impl SiteSwitch {
             extra,
             all_cells,
             carrier_cell,
+            carrier_generations,
             ports,
             directory,
             sessions: HashMap::new(),
@@ -1673,6 +1677,12 @@ impl TetraEntityTrait for SiteSwitch {
     }
 
     fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        // A live reload may move a cell to another carrier: route by the new numbers.
+        let generations = config_generations(&self.primary, &self.extra);
+        if generations != self.carrier_generations {
+            self.carrier_generations = generations;
+            self.carrier_cell = carrier_map(&self.primary, &self.extra);
+        }
         self.mirror_link_state();
         self.purge_idle();
         self.expire_handovers(queue);
@@ -1694,6 +1704,10 @@ impl TetraEntityTrait for SiteSwitch {
 }
 
 /// Carrier number → cell, for every cell (carriers are unique per cell).
+fn config_generations(primary: &SharedConfig, extra: &[(CellId, SharedConfig)]) -> Vec<u64> {
+    std::iter::once(primary).chain(extra.iter().map(|(_, c)| c)).map(|c| c.config_generation()).collect()
+}
+
 pub(super) fn carrier_map(primary: &SharedConfig, extra: &[(CellId, SharedConfig)]) -> HashMap<u16, CellId> {
     let cells = std::iter::once((primary.config().cell_id, primary)).chain(extra.iter().map(|(id, c)| (*id, c)));
     let mut map = HashMap::new();
@@ -1942,6 +1956,19 @@ main_carrier = 1525
 
     fn cc(c: CallControl) -> SapMsgInner {
         SapMsgInner::CmceCallControl(c)
+    }
+
+    #[test]
+    fn a_live_carrier_change_moves_the_routing_to_the_new_carrier() {
+        let mut site = Site::new();
+        let old = site.cell1.config().cell.main_carrier;
+        assert_eq!(site.switch.cell_of_carrier(old), CellId(1));
+        let mut moved = (*site.cell1.config()).clone();
+        moved.cell.main_carrier = old + 40;
+        site.cell1.replace_config(moved).unwrap();
+        site.tick();
+        assert_eq!(site.switch.cell_of_carrier(old + 40), CellId(1), "the new carrier is cell 1");
+        assert_eq!(site.switch.cell_of_carrier(old), site.switch.host, "the old one is no longer known");
     }
 
     fn start_uuid(msgs: &[SapMsgInner]) -> Option<Uuid> {

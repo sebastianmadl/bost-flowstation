@@ -5026,3 +5026,20 @@ fn test_group_access_tx_demand_from_listener_is_not_granted() {
     let (mut sdu, _) = find_lcmc_req(&test.dump_sinks(), LISTENER, CmcePduTypeDl::DTxGranted).expect("D-TX GRANTED");
     assert_eq!(DTxGranted::from_bitbuf(&mut sdu).unwrap().transmission_grant, TransmissionGrant::Granted.into_raw() as u8);
 }
+
+/// A live reload that gives the cell another colour code: the radios lost the cell, so the call
+/// is released (D-RELEASE to both parties), once.
+#[test]
+fn test_new_cell_identity_releases_the_calls_of_the_old_one() {
+    let (mut test, _call_id, _) = connected_simplex_individual_call(TEST_ISSI, TEST_ISSI + 1);
+    let mut moved = (*test.config.config()).clone();
+    moved.cell.colour_code = (moved.cell.colour_code + 1) % 64;
+    test.config.replace_config(moved).unwrap();
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(find_lcmc_req(&msgs, TEST_ISSI, CmcePduTypeDl::DRelease).is_some(), "calling party released");
+    assert!(find_lcmc_req(&msgs, TEST_ISSI + 1, CmcePduTypeDl::DRelease).is_some(), "called party released");
+    test.run_stack(Some(2));
+    let again = test.dump_sinks();
+    assert!(find_lcmc_req(&again, TEST_ISSI, CmcePduTypeDl::DRelease).is_none(), "only once");
+}
