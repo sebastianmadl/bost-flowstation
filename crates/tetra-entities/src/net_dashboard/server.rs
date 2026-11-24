@@ -8310,7 +8310,7 @@ fn write_config_validated(config_path: &str, body: &str) -> Result<(), (u16, Str
 }
 
 /// Parse the saved config file and swap it into the running cells (`POST /api/config/reload`).
-fn reload_saved_config(config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>) -> serde_json::Value {
+pub(crate) fn reload_saved_config(config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>) -> serde_json::Value {
     let Some(shared) = shared else {
         return serde_json::json!({"applied": false, "restart": ["configuration not available to the dashboard"]});
     };
