@@ -5043,3 +5043,14 @@ fn test_new_cell_identity_releases_the_calls_of_the_old_one() {
     let again = test.dump_sinks();
     assert!(find_lcmc_req(&again, TEST_ISSI, CmcePduTypeDl::DRelease).is_none(), "only once");
 }
+
+/// A cell a live reload removes ends its calls before it leaves the air.
+#[test]
+fn test_retired_cell_releases_its_calls() {
+    let (mut test, _call_id, _) = connected_simplex_individual_call(TEST_ISSI, TEST_ISSI + 1);
+    test.config.retire(tetra_config::bluestation::Retirement::KeepRegistrations);
+    test.run_stack(Some(1));
+    let msgs = test.dump_sinks();
+    assert!(find_lcmc_req(&msgs, TEST_ISSI, CmcePduTypeDl::DRelease).is_some(), "calling party released");
+    assert!(find_lcmc_req(&msgs, TEST_ISSI + 1, CmcePduTypeDl::DRelease).is_some(), "called party released");
+}

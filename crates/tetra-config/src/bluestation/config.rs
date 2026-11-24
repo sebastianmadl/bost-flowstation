@@ -856,8 +856,21 @@ pub struct SharedConfig {
     /// Counts live reloads. Entities that cache values derived from the config compare it with
     /// the generation they last saw and rebuild on a change.
     generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Set when the cell is being taken off the air by a live reload ([`Self::retire`]).
+    retired: Arc<std::sync::atomic::AtomicU8>,
     /// Mutable state guarded with RwLock (write by the stack, read by others).
     state: Arc<RwLock<StackState>>,
+}
+
+/// How a cell that a live reload removes leaves the air ([`SharedConfig::retire`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retirement {
+    /// Another cell of the same network serves the cell's location area: its radios reselect
+    /// to it without registering (TS 100 392-2 clause 16.4.1.0), so their registrations stay.
+    KeepRegistrations,
+    /// No other cell serves the location area: the radios register anew wherever they go, so
+    /// the cell drops its registrations first.
+    DropRegistrations,
 }
 
 impl SharedConfig {
@@ -879,6 +892,7 @@ impl SharedConfig {
         Ok(Self {
             cfg: Arc::new(RwLock::new(Arc::new(cfg))),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            retired: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             state: Arc::new(RwLock::new(state)),
         })
     }
@@ -919,6 +933,34 @@ impl SharedConfig {
     /// Number of live reloads so far (0 = the configuration the station started with).
     pub fn config_generation(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Take the cell off the air (a live reload removed it): its entities release their calls
+    /// and, per `how`, drop their registrations on the next tick, before the cell stops.
+    pub fn retire(&self, how: Retirement) {
+        let v = match how {
+            Retirement::KeepRegistrations => 1,
+            Retirement::DropRegistrations => 2,
+        };
+        self.retired.store(v, std::sync::atomic::Ordering::Release);
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// See [`Self::retire`]; `None` while the cell is in service.
+    pub fn retirement(&self) -> Option<Retirement> {
+        match self.retired.load(std::sync::atomic::Ordering::Acquire) {
+            1 => Some(Retirement::KeepRegistrations),
+            2 => Some(Retirement::DropRegistrations),
+            _ => None,
+        }
+    }
+
+    /// The cell's identity on air ([`StackConfig::cell_identity`]), `None` once it is retired.
+    pub fn live_identity(&self) -> Option<CellIdentity> {
+        if self.retirement().is_some() {
+            return None;
+        }
+        Some(self.config().cell_identity())
     }
 
     /// Read guard for mutable state.

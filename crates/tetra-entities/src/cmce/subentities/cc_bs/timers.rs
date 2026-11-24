@@ -30,7 +30,8 @@ impl CcBsSubentity {
             return;
         }
         self.identity_generation = generation;
-        let identity = self.config.config().cell_identity();
+        // A new identity, or the cell retired: its calls cannot go on.
+        let identity = self.config.live_identity();
         if identity == self.cell_identity {
             return;
         }

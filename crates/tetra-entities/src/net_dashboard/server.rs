@@ -8326,7 +8326,7 @@ fn reload_saved_config(config_path: &str, shared: &Option<tetra_config::bluestat
     if let Some(e) = sc3_reload_refusal(class3_required, &new) {
         return serde_json::json!({"applied": false, "error": e});
     }
-    match crate::config_reload::reload(shared, crate::net_site::extra_cells(), new) {
+    match crate::config_reload::reload(shared, &crate::net_site::extra_cells(), new) {
         Ok(r) if r.restart.is_empty() => serde_json::json!({"applied": true, "cells": r.cells}),
         Ok(r) => serde_json::json!({"applied": false, "restart": r.restart}),
         Err(e) => serde_json::json!({"applied": false, "error": e}),

@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -149,6 +150,47 @@ pub struct SitePorts {
     to_cells: HashMap<CellId, Sender<LinkMsg>>,
     from_cells: Receiver<(CellId, SapMsg)>,
     from_cells_asterisk: Option<Receiver<(CellId, SapMsg)>>,
+    handle: SiteHandle,
+}
+
+/// A cell joining or leaving the switch at run time (live reload).
+enum SiteChange {
+    Add(CellId, SharedConfig, Sender<LinkMsg>),
+    Remove(CellId),
+}
+
+/// Adds and removes cells of a running switch (live reload): links a new cell to the switch,
+/// or detaches a stopped one. The switch takes the change at the start of its next tick.
+#[derive(Clone)]
+pub struct SiteHandle {
+    to_switch: Sender<(CellId, SapMsg)>,
+    to_asterisk: Sender<(CellId, SapMsg)>,
+    changes: Arc<Mutex<Vec<SiteChange>>>,
+}
+
+impl SiteHandle {
+    /// Join cell `id` to the switch; the returned link goes into the cell's Brew slot.
+    pub fn add_cell(&self, id: CellId, cfg: SharedConfig) -> CellLink {
+        let (tx, rx) = unbounded();
+        self.changes.lock().unwrap_or_else(|e| e.into_inner()).push(SiteChange::Add(id, cfg, tx));
+        CellLink {
+            id,
+            slot: TetraEntity::Brew,
+            to_switch: self.to_switch.clone(),
+            to_asterisk: self.to_asterisk.clone(),
+            from_switch: Some(rx),
+            playout: VoicePlayout::default(),
+        }
+    }
+
+    /// Detach cell `id` (its stack has stopped).
+    pub fn remove_cell(&self, id: CellId) {
+        self.changes.lock().unwrap_or_else(|e| e.into_inner()).push(SiteChange::Remove(id));
+    }
+
+    fn take(&self) -> Vec<SiteChange> {
+        std::mem::take(&mut *self.changes.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 /// Asterisk relay's ends: what the cells' Asterisk-slot links send, and the way back to them.
@@ -164,6 +206,11 @@ impl SitePorts {
             to_cells: self.to_cells.clone(),
             from_cells: self.from_cells_asterisk.take()?,
         })
+    }
+
+    /// The handle to add or remove cells while the switch runs.
+    pub fn handle(&self) -> SiteHandle {
+        self.handle.clone()
     }
 }
 
@@ -192,6 +239,11 @@ pub fn site_links(extra_cells: &[CellId]) -> (SitePorts, HashMap<CellId, CellLin
         to_cells,
         from_cells,
         from_cells_asterisk: Some(from_cells_asterisk),
+        handle: SiteHandle {
+            to_switch,
+            to_asterisk,
+            changes: Arc::default(),
+        },
     };
     (ports, links)
 }
@@ -484,6 +536,52 @@ impl SiteSwitch {
             station_forwards: HashMap::new(),
             area_sent: HashMap::new(),
             sibling_handoffs: HashMap::new(),
+        }
+    }
+
+    // ── Cells joining and leaving (live reload) ─────────────────────────────────────────────
+
+    fn apply_site_changes(&mut self, queue: &mut MessageQueue) {
+        for change in self.ports.handle.take() {
+            match change {
+                SiteChange::Add(id, cfg, tx) => {
+                    tracing::info!("Site switch: {id} joins");
+                    self.ports.to_cells.insert(id, tx);
+                    self.extra.retain(|(c, _)| *c != id);
+                    self.extra.push((id, cfg));
+                    if !self.all_cells.contains(&id) {
+                        self.all_cells.push(id);
+                    }
+                }
+                SiteChange::Remove(id) => self.remove_cell(queue, id),
+            }
+            self.carrier_generations = config_generations(&self.primary, &self.extra);
+            self.carrier_cell = carrier_map(&self.primary, &self.extra);
+        }
+    }
+
+    /// A cell left: its radios move to a cell of the same location area (they reselect there
+    /// without registering, TS 100 392-2 clause 16.4.1.0), else the switch forgets them (the
+    /// cell deregistered them towards the network before it stopped).
+    fn remove_cell(&mut self, queue: &mut MessageQueue, id: CellId) {
+        let sibling = self.area_siblings(id).into_iter().next();
+        self.ports.to_cells.remove(&id);
+        self.extra.retain(|(c, _)| *c != id);
+        self.all_cells.retain(|c| *c != id);
+        let moved = self.directory.write().expect("site directory").rehome(id, sibling);
+        tracing::info!("Site switch: {id} left; {} radio(s) {}", moved.len(), match sibling {
+            Some(s) => format!("now counted on {s}"),
+            None => "forgotten".to_string(),
+        });
+        self.handovers.retain(|(_, c, _)| *c != id);
+        self.forwards.retain(|_, c| *c != id);
+        self.station_asks.retain(|_, (c, _)| *c != id);
+        self.station_forwards.retain(|_, (c, _)| *c != id);
+        self.area_sent.retain(|(c, _), _| *c != id);
+        self.sibling_handoffs.retain(|(c, _), (a, _, _)| *c != id && *a != id);
+        self.restore_requests.retain(|_, c| *c != id);
+        for issi in moved {
+            self.refresh_area_members(queue, issi);
         }
     }
 
@@ -1677,6 +1775,7 @@ impl TetraEntityTrait for SiteSwitch {
     }
 
     fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        self.apply_site_changes(queue);
         // A live reload may move a cell to another carrier: route by the new numbers.
         let generations = config_generations(&self.primary, &self.extra);
         if generations != self.carrier_generations {
@@ -1969,6 +2068,46 @@ main_carrier = 1525
         site.tick();
         assert_eq!(site.switch.cell_of_carrier(old + 40), CellId(1), "the new carrier is cell 1");
         assert_eq!(site.switch.cell_of_carrier(old), site.switch.host, "the old one is no longer known");
+    }
+
+    #[test]
+    fn cells_join_and_leave_a_running_switch() {
+        let mut site = Site::new();
+        let handle = site.switch.ports.handle();
+        site.from_cell(1, register(100));
+        site.tick();
+        assert_eq!(site.switch.location(100), Some(CellId(1)));
+
+        // Cell 1 leaves: the primary serves the same location area, so the radio counts there.
+        handle.remove_cell(CellId(1));
+        site.tick();
+        assert_eq!(site.switch.location(100), Some(CellId(0)), "moved to the area sibling");
+        assert_eq!(site.switch.cell_of_carrier(1525), site.switch.host, "cell 1's carrier is gone");
+        assert!(!site.switch.ports.to_cells.contains_key(&CellId(1)));
+        assert_eq!(site.switch.all_cells, vec![CellId(0)]);
+
+        // Cell 2 joins on another carrier and is routed like a cell from boot.
+        let mut cfg2 = (*site.cell1.config()).clone();
+        cfg2.cell_id = CellId(2);
+        cfg2.cell.main_carrier = 1530;
+        let mut link2 = handle.add_cell(CellId(2), SharedConfig::from_parts(cfg2, None));
+        site.tick();
+        assert_eq!(site.switch.cell_of_carrier(1530), CellId(2));
+        let mut q2 = MessageQueue::new();
+        link2.rx_prim(&mut q2, SapMsg::new(Sap::Control, TetraEntity::Cmce, TetraEntity::Brew, register(200)));
+        site.tick();
+        assert_eq!(site.switch.location(200), Some(CellId(2)));
+    }
+
+    #[test]
+    fn a_leaving_cell_alone_in_its_location_area_forgets_its_radios() {
+        let mut site = Site::own_location_areas();
+        let handle = site.switch.ports.handle();
+        site.from_cell(1, register(100));
+        site.tick();
+        handle.remove_cell(CellId(1));
+        site.tick();
+        assert_eq!(site.switch.location(100), None);
     }
 
     fn start_uuid(msgs: &[SapMsgInner]) -> Option<Uuid> {

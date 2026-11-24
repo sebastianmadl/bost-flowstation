@@ -135,7 +135,8 @@ pub struct MmBs {
     la_change_pending: VecDeque<u32>,
     la_change_last_frame: Option<i32>,
     /// The cell identity (colour code, MCC, MNC) the registrations belong to.
-    cell_identity: tetra_config::bluestation::CellIdentity,
+    /// `None` once the cell is retired by a live reload.
+    cell_identity: Option<tetra_config::bluestation::CellIdentity>,
     registration_probe_receipts: HashMap<u32, tetra_core::tx_receipt::TxReporter>,
 
     // ── Air-interface security (EN 300 392-7) ──────────────────────────────────────────────
@@ -233,7 +234,7 @@ impl MmBs {
             }
         }
         let (la_generation, la_current) = (config.config_generation(), config.config().cell.location_area);
-        let cell_identity = config.config().cell_identity();
+        let cell_identity = config.live_identity();
         Self {
             config,
             telemetry,
@@ -3410,12 +3411,24 @@ impl MmBs {
         let generation = self.config.config_generation();
         if generation != self.la_generation {
             self.la_generation = generation;
-            let identity = self.config.config().cell_identity();
+            let identity = self.config.live_identity();
             if identity != self.cell_identity {
-                // A new identity takes the LA along: everything registered is gone.
                 self.cell_identity = identity;
                 self.la_current = self.config.config().cell.location_area;
-                self.reset_registrations(queue, identity);
+                match identity {
+                    // A new identity takes the LA along: everything registered is gone.
+                    Some(identity) => self.reset_registrations(queue, Some(identity)),
+                    None => match self.config.retirement() {
+                        Some(tetra_config::bluestation::Retirement::DropRegistrations) => self.reset_registrations(queue, None),
+                        _ => {
+                            // Another cell serves the location area: the radios reselect to it
+                            // without registering (TS 100 392-2 clause 16.4.1.0) and the site
+                            // switch moves their registrations there.
+                            tracing::info!("MM: cell retired by a live reload; its radios stay registered in the location area");
+                            self.la_change_pending.clear();
+                        }
+                    },
+                }
                 return;
             }
             let la = self.config.config().cell.location_area;
@@ -3454,16 +3467,21 @@ impl MmBs {
     /// register anew (TS 100 392-2 clause 16.4.1.0). The cell is rebuilt in place: each radio is
     /// deregistered towards the network first (groups, then the registration, as for a radio that
     /// left), and the registry, authentication and key state of the old identity are dropped.
-    fn reset_registrations(&mut self, queue: &mut MessageQueue, identity: tetra_config::bluestation::CellIdentity) {
+    /// `identity` is `None` when the cell is retired: no cell serves its location area any more,
+    /// so its radios register anew wherever they reselect to.
+    fn reset_registrations(&mut self, queue: &mut MessageQueue, identity: Option<tetra_config::bluestation::CellIdentity>) {
         let issis = self.client_mgr.all_known_issis();
-        tracing::warn!(
-            "MM: cell identity changed by a live reload (colour code {}, MCC {}, MNC {}, carrier {}): {} radio(s) deregistered, they register again on the new identity",
-            identity.0,
-            identity.1,
-            identity.2,
-            identity.3,
-            issis.len()
-        );
+        match identity {
+            Some(identity) => tracing::warn!(
+                "MM: cell identity changed by a live reload (colour code {}, MCC {}, MNC {}, carrier {}): {} radio(s) deregistered, they register again on the new identity",
+                identity.0,
+                identity.1,
+                identity.2,
+                identity.3,
+                issis.len()
+            ),
+            None => tracing::warn!("MM: cell retired by a live reload: {} radio(s) deregistered, they register again on another cell", issis.len()),
+        }
         for issi in issis {
             let groups = self
                 .client_mgr
@@ -5071,6 +5089,35 @@ mod presence_tests {
         assert!(!mm.config.state_read().subscribers.is_registered(100));
         mm.follow_location_area(&mut queue, TdmaTime::default().add_timeslots(4));
         assert!(queue.pop_front().is_none(), "once");
+    }
+
+    #[test]
+    fn a_retired_cell_drops_its_registrations_only_when_no_other_cell_serves_its_area() {
+        let deregistered = |mm: &mut MmBs| {
+            let mut queue = MessageQueue::new();
+            mm.follow_location_area(&mut queue, TdmaTime::default());
+            let mut issis = Vec::new();
+            while let Some(m) = queue.pop_front() {
+                match m.msg {
+                    SapMsgInner::MmSubscriberUpdate(u) if u.action == BrewSubscriberAction::Deregister => issis.push(u.issi),
+                    SapMsgInner::LmmMleUnitdataReq(_) => panic!("nothing goes on air for a cell that leaves"),
+                    _ => {}
+                }
+            }
+            issis.sort();
+            issis
+        };
+        let (mut kept, _) = station();
+        radio(&mut kept, 100);
+        kept.config.retire(tetra_config::bluestation::Retirement::KeepRegistrations);
+        assert!(deregistered(&mut kept).is_empty(), "radios reselect within the location area");
+
+        let (mut dropped, _) = station();
+        radio(&mut dropped, 100);
+        radio(&mut dropped, 101);
+        dropped.config.retire(tetra_config::bluestation::Retirement::DropRegistrations);
+        assert_eq!(deregistered(&mut dropped), vec![100, 101]);
+        assert!(dropped.client_mgr.all_known_issis().is_empty());
     }
 
     #[test]
