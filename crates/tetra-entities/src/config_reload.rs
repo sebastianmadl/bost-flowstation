@@ -9,7 +9,7 @@
 //! (all or nothing), so the running station never ends up half on the old file and half on the
 //! new one; the caller then restarts as before.
 
-use tetra_config::bluestation::{debug_with_secrets, Retirement, SharedConfig, StackConfig};
+use tetra_config::bluestation::{debug_with_secrets, AirChange, Retirement, SharedConfig, StackConfig};
 use tetra_core::CellId;
 
 /// Set by the start-up code when the Asterisk entity exists. With it, Asterisk settings (including
@@ -185,23 +185,26 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
     // cell and registers anew (TS 100 392-2 clauses 8.2.5.2, 16.4.1.0), so each cell rebuilds its
     // registrations and calls in place (MM `reset_registrations`, CMCE `follow_cell_identity`)
     // while the other cells and the station keep running.
-    // Air interface encryption. Changing the security class or the cell's keys while radios are
-    // registered needs the change to be announced to them first with D-CK CHANGE DEMAND at an
-    // agreed slot, with SYSINFO changing in step (EN 300 392-7 clauses 4.5.5.6 and 4.5.6); a
-    // silent switch leaves registered radios on the old class and key. Until that procedure is
-    // driven from a reload, these settings restart the station (every radio registers again).
+    // Air interface encryption. A change of the security class or of the cell's cipher key is
+    // announced to the registered radios with D-CK CHANGE DEMAND and takes effect on one slot,
+    // with SYSINFO changing on the same slot (EN 300 392-7 clauses 4.5.5.6 and 4.5.6; see
+    // `reload_with` and `AirChange`). The key stream generator of a cell that stays encrypted
+    // is not part of that procedure and restarts.
     // Who may register (whitelist, limits) and the subscriber keys K stay live: K is only used at
     // the next authentication (clause 4.4).
-    let air = |sec: &tetra_config::bluestation::CfgSecurity| {
-        sec.aie.as_ref().map(|a| (a.security_class(), a.ksg, a.sckn, a.sck_vn, a.sck.clone(), a.class3.as_ref().map(|c| (c.cck_id, c.cck.clone()))))
+    let ksg = |c: &StackConfig| {
+        c.cells()
+            .iter()
+            .filter(|(id, _, _)| common(*id))
+            .map(|(id, _, _)| {
+                let sec = c.extra_cells.iter().find(|x| x.id == *id).and_then(|x| x.security.as_ref()).unwrap_or(&c.security);
+                (*id, crate::aie::running(sec.aie.as_ref()).map(|a| a.ksg))
+            })
+            .collect::<Vec<_>>()
     };
-    let cell_air = |c: &StackConfig| {
-        (
-            air(&c.security),
-            c.extra_cells.iter().filter(|x| common(x.id)).map(|x| (x.id, x.security.as_ref().map(air))).collect::<Vec<_>>(),
-        )
-    };
-    check(differs(&cell_air(old), &cell_air(new)), "air interface encryption: security class or cipher keys");
+    let (old_ksg, new_ksg) = (ksg(old), ksg(new));
+    let ksg_changed = old_ksg.iter().any(|(id, o)| new_ksg.iter().any(|(n_id, n)| n_id == id && o.is_some() && n.is_some() && o != n));
+    check(ksg_changed, "air interface encryption: key stream generator (TEA) of an encrypted cell");
     check(
         differs(
             &old.extra_cells.iter().filter(|c| common(c.id)).map(|c| (c.id, c.soapysdr.as_ref().map(|s| soapy_fixed_for(s, own(c.id))))).collect::<Vec<_>>(),
@@ -242,6 +245,65 @@ pub fn restart_reasons(old: &StackConfig, new: &StackConfig) -> Vec<String> {
     r
 }
 
+/// What a reload does with a cell's air interface encryption.
+enum AirHold {
+    /// Nothing to announce: `[security.aie]` swaps with the rest.
+    None,
+    /// Announce this change; the cell keeps the encryption in use until it takes effect.
+    Set(AirChange),
+    /// The same change is already announced: keep it.
+    Keep,
+    /// A change not yet announced is withdrawn (the file is back to what runs).
+    Cancel,
+}
+
+/// A change of the security class or of the cell's cipher key cannot simply be swapped in: the
+/// registered radios are told first with D-CK CHANGE DEMAND, and the change takes effect on the
+/// slot named there, SYSINFO changing on the same slot (EN 300 392-7 clauses 4.5.5.6, 4.5.6).
+/// So `new` keeps the encryption in use and MM announces and commits the change. A different
+/// change while one is announced is refused (the radios were already told).
+fn hold_air_change(shared: &SharedConfig, old: &StackConfig, new: &mut StackConfig) -> Result<AirHold, String> {
+    let current = crate::aie::on_air(old.security.aie.as_ref());
+    let wanted = crate::aie::on_air(new.security.aie.as_ref());
+    let pending = shared.state_read().air_change.clone();
+    let announced = pending.as_ref().filter(|p| p.at.is_some());
+    if !differs(&current, &wanted) {
+        return match (announced, pending.is_some()) {
+            (Some(_), _) => Err("a security class or key change is already announced to the radios; save again once it is in effect".into()),
+            (None, true) => Ok(AirHold::Cancel),
+            (None, false) => Ok(AirHold::None),
+        };
+    }
+    let target = new.security.aie.clone();
+    new.security.aie = old.security.aie.clone();
+    if let Some(p) = announced {
+        if differs(&crate::aie::on_air(p.target.as_ref()), &wanted) {
+            return Err("another security class or key change is already announced to the radios; save again once it is in effect".into());
+        }
+        return Ok(AirHold::Keep);
+    }
+    Ok(AirHold::Set(AirChange { target, lead_secs: new.security.change_lead_secs, at: None }))
+}
+
+fn apply_air_hold(shared: &SharedConfig, hold: AirHold) {
+    let id = shared.config().cell_id;
+    match hold {
+        AirHold::Set(change) => {
+            tracing::info!(
+                "Live reload: {id:?} changes to security class {} — announcing it to the registered radios {} s ahead (D-CK CHANGE DEMAND)",
+                crate::aie::on_air(change.target.as_ref()).map_or(1, |a| a.0),
+                change.lead_secs
+            );
+            shared.state_write().air_change = Some(change);
+        }
+        AirHold::Cancel => {
+            tracing::info!("Live reload: {id:?} security change withdrawn before it was announced");
+            shared.state_write().air_change = None;
+        }
+        AirHold::None | AirHold::Keep => {}
+    }
+}
+
 /// How a removed cell leaves: its radios keep their registrations when another cell of the
 /// linked network serves the same location area (they reselect there without registering, TS
 /// 100 392-2 clause 16.4.1.0, and the site switch counts them there), else they are dropped.
@@ -267,7 +329,7 @@ pub fn reload(primary: &SharedConfig, extra: &[(CellId, SharedConfig)], new: Sta
 pub fn reload_with(
     primary: &SharedConfig,
     extra: &[(CellId, SharedConfig)],
-    new: StackConfig,
+    mut new: StackConfig,
     prepare_cell: &dyn Fn(&mut StackConfig),
 ) -> Result<ReloadReport, String> {
     let old = primary.config();
@@ -286,7 +348,8 @@ pub fn reload_with(
         let mut cell = new.for_extra_cell(*id).ok_or_else(|| format!("cell {id:?} is not in the new configuration"))?;
         prepare_cell(&mut cell);
         cell.validate()?;
-        derived.push((shared, cell));
+        let hold = hold_air_change(shared, &shared.config(), &mut cell)?;
+        derived.push((shared, cell, hold));
     }
     let mut started = Vec::new();
     for id in &added {
@@ -295,6 +358,7 @@ pub fn reload_with(
         started.push((*id, SharedConfig::try_from_parts(cell, None)?));
     }
     let stopped: Vec<(CellId, Retirement)> = removed.iter().map(|id| (*id, retirement(&old, &new, *id))).collect();
+    let primary_hold = hold_air_change(primary, &old, &mut new)?;
     new.validate()?;
     if differs(&old.security, &new.security) || differs(&old.extra_cells.iter().map(|c| &c.security).collect::<Vec<_>>(), &new.extra_cells.iter().map(|c| &c.security).collect::<Vec<_>>()) {
         tracing::info!("Registration rules or subscriber keys changed live; they apply from each radio's next registration");
@@ -304,6 +368,7 @@ pub fn reload_with(
     let dashboard = new.dashboard.clone();
     let link = (old.brew.is_some(), new.brew.is_some());
     primary.replace_config(new)?;
+    apply_air_hold(primary, primary_hold);
     match link {
         (false, true) if single_cell => {
             tracing::info!("Core link gained: starting the Brew entity");
@@ -330,8 +395,9 @@ pub fn reload_with(
         }
     }
     let cells = 1 + derived.len();
-    for (shared, cell) in derived {
+    for (shared, cell, hold) in derived {
         shared.replace_config(cell)?;
+        apply_air_hold(shared, hold);
     }
     for (id, how) in stopped {
         tracing::info!("Live reload: cell {id:?} removed, taking it off the air ({how:?})");
@@ -510,18 +576,58 @@ mod tests {
     }
 
     #[test]
-    fn security_class_and_cipher_keys_need_a_restart_registration_rules_do_not() {
+    fn security_class_and_cipher_keys_are_announced_tea_restarts() {
         let mut old = base();
         old.security.aie = Some(aie(2, 1));
         for (what, new_aie) in [("class 2 -> 3", Some(aie(3, 1))), ("class 2 -> 1", None), ("new SCK", Some(aie(2, 2)))] {
             let mut new = old.clone();
             new.security.aie = new_aie;
-            assert!(!restart_reasons(&old, &new).is_empty(), "{what} must not switch silently");
+            assert!(restart_reasons(&old, &new).is_empty(), "{what}: {:?}", restart_reasons(&old, &new));
         }
+        let mut tea = old.clone();
+        tea.security.aie.as_mut().unwrap().ksg = 2;
+        assert!(restart_reasons(&old, &tea).iter().any(|r| r.contains("TEA")), "{:?}", restart_reasons(&old, &tea));
+        let mut from_clear = base();
+        from_clear.security.aie = None;
+        assert!(restart_reasons(&from_clear, &tea).is_empty(), "a cell going encrypted picks its TEA");
         let mut rules = old.clone();
         rules.security.issi_whitelist.push(1234567);
         rules.security.max_registered_clients += 1;
         assert!(restart_reasons(&old, &rules).is_empty(), "{:?}", restart_reasons(&old, &rules));
+    }
+
+    #[test]
+    fn a_security_change_is_held_for_its_announcement() {
+        let mut old = base();
+        old.security.aie = Some(aie(2, 1));
+        let shared = SharedConfig::from_parts(old.clone(), None);
+        let mut new = old.clone();
+        new.security.aie = Some(aie(2, 2));
+        new.security.issi_whitelist.push(1234567);
+        new.security.change_lead_secs = 45;
+        reload(&shared, &[], new.clone()).unwrap();
+        let running = shared.config();
+        assert!(!differs(&running.security.aie, &old.security.aie), "the SCK in use stays until the change takes effect");
+        assert_eq!(running.security.issi_whitelist, vec![1234567], "the rest applies at once");
+        let change = shared.state_read().air_change.clone().expect("change held");
+        assert!(!differs(&change.target, &new.security.aie));
+        assert_eq!((change.lead_secs, change.at), (45, None));
+
+        // Saved again before the announcement: the same change stays held; back to what runs: withdrawn.
+        reload(&shared, &[], new.clone()).unwrap();
+        assert!(shared.state_read().air_change.is_some());
+        reload(&shared, &[], old.clone()).unwrap();
+        assert!(shared.state_read().air_change.is_none(), "withdrawn");
+
+        // Once announced, the same change is kept and another one is refused.
+        reload(&shared, &[], new.clone()).unwrap();
+        shared.state_write().air_change.as_mut().unwrap().at = Some(tetra_core::TdmaTime { t: 1, f: 1, m: 4, h: 1 });
+        reload(&shared, &[], new.clone()).unwrap();
+        assert!(shared.state_read().air_change.as_ref().unwrap().at.is_some());
+        let mut other = new.clone();
+        other.security.aie = None;
+        assert!(reload(&shared, &[], other).is_err(), "the radios were told about another change");
+        assert!(reload(&shared, &[], old).is_err(), "nor can it be taken back");
     }
 
     #[test]

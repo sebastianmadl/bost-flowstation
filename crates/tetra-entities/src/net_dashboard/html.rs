@@ -5835,9 +5835,10 @@ label.cp-chk{display:flex;flex-direction:row;align-items:center;gap:8px;font-siz
             <div><div class="help-text" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase" data-i18n="secp_saved">Saved in config</div><div id="secp-saved" style="font-family:var(--mono);font-size:13px;margin-top:4px">—</div></div>
           </div>
           <div id="secp-restart" style="display:none;margin-top:12px;padding:10px 12px;border:1px solid rgba(255,178,36,0.4);background:rgba(255,178,36,0.08);border-radius:6px;font-size:13px">
-            <span data-i18n="secp_restart_needed">The saved settings differ from what is running. Restart the station to apply them.</span>
-            <button class="btn btn-sm" style="margin-left:10px" onclick="restartForSecurity()"><span class="btn-icon" data-icon="restart"></span><span data-i18n="secp_restart">Restart station</span></button>
+            <span data-i18n="secp_restart_needed">The saved settings differ from what is running. Apply them: live where possible (a class or key change is announced to the radios first), otherwise the station restarts.</span>
+            <button class="btn btn-sm" style="margin-left:10px" onclick="restartForSecurity()"><span class="btn-icon" data-icon="restart"></span><span data-i18n="secp_restart">Apply</span></button>
           </div>
+          <div id="secp-air" style="display:none;margin-top:12px;padding:10px 12px;border:1px solid rgba(80,160,255,0.4);background:rgba(80,160,255,0.08);border-radius:6px;font-size:13px"></div>
           <div id="secp-parse-error" style="display:none;margin-top:12px;color:var(--danger);font-size:13px"></div>
           <div class="config-msg" id="secp-msg"></div>
         </div>
@@ -5949,6 +5950,11 @@ label.cp-chk{display:flex;flex-direction:row;align-items:center;gap:8px;font-siz
                 <input type="number" id="secp-cckid" class="form-input" min="0" max="65535" value="1" style="width:160px" oninput="secpDirty()">
               </div>
               <div class="help-text" data-i18n="secp_dck_help"></div>
+            </div>
+            <div class="form-row">
+              <label class="help-text" for="secp-lead" style="display:block;margin-bottom:4px" data-i18n="secp_lead">Announce a class or key change ahead (seconds, 5–300)</label>
+              <input type="number" id="secp-lead" class="form-input" min="5" max="300" value="30" style="width:160px" oninput="secpDirty()">
+              <div class="help-text" data-i18n="secp_lead_help"></div>
             </div>
           </div>
         </div>
@@ -8531,7 +8537,7 @@ const LANGS={
     sec_cell_hint_clear:'Security class 1: no air-interface encryption on this cell',sec_cell_hint_enc:'Security class 2: all signalling and speech on this cell are encrypted with SCK {sckn} (version {vn}) using {ksg}',
     sec_cell_hint_err:'AIE configuration rejected: {err}',sec_subs:'{n} subscriber key(s) loaded',
     secp_section:'Air-interface security',secp_status_title:'Status',secp_running:'Running now',secp_saved:'Saved in config',
-    secp_restart_needed:'The saved settings differ from what is running. Restart the station to apply them.',secp_restart:'Restart station',
+    secp_restart_needed:'The saved settings differ from what is running. Apply them: live where possible (a class or key change is announced to the radios first), otherwise the station restarts.',secp_restart:'Apply',
     secp_restarting:'Restarting… the page will reconnect in a few seconds.',secp_parse_error:'config.toml does not parse — fix it on the Config page first: ',
     secp_auth_title:'Authentication (TAA1)',secp_auth_help:'Challenge radios with their 128-bit authentication key K when they register (EN 300 392-7 clause 4). Only radios whose K is listed below can pass. Authentication is an access-control handshake and is fine on amateur allocations.',
     secp_auth_mode:'Mode',secp_auth_off:'Off — any radio may register',secp_auth_optional:'Optional — challenge radios with a key on file, let others in',secp_auth_required:'Required — reject radios that fail or have no key',
@@ -8539,6 +8545,10 @@ const LANGS={
     secp_th_issi:'ISSI',secp_th_k:'Key K',secp_no_keys:'No subscriber keys',secp_add:'Add',secp_generate:'Generate',secp_remove:'Remove',secp_k_placeholder:'32 hex digits',secp_issi_placeholder:'ISSI',
     secp_aie_title:'Air-interface encryption (class 2)',secp_aie_help:'Encrypt all signalling and speech on this cell with a static cipher key (SCK) shared by every radio. Radios without the key cannot register or hear traffic. Air-interface encryption is not permitted under amateur licences — enable it only on a licensed private network.',
     secp_groups:'Clear talkgroups (GSSI, comma separated) for radios without encryption',
+    secp_lead:'Announce a class or key change ahead (seconds, 5–300)',
+    secp_lead_help:'A changed security class or cipher key is sent to every registered radio with D-CK CHANGE DEMAND (EN 300 392-7 clauses 4.5.5.6, 4.5.6) and takes effect at the start of the next multiframe after this time, without a restart. Radios that registered in clear register again when the cell turns encrypted; radios without the new key register again to fetch it. The TEA algorithm of an encrypted cell still restarts the station.',
+    secp_air_pending:'Security change to class {class} saved: it is announced to the radios {s} s ahead and then applied live.',
+    secp_air_announced:'Security change to class {class} announced to the radios: it takes effect live about {s} s after saving.',
     secp_aie_enable:'Encrypt the cell (class 2)',secp_aie_staging:'Leave this off while you distribute the key: with it off the SCK below is only used for over-the-air delivery and the cell stays in clear. Switch it on once every radio reports the key as accepted.',
     secp_staged:'(staged for OTAR)',secp_otar_label:'OTAR',secp_otar_send:'Send SCK',secp_otar_send_all:'Send SCK to all online radios',secp_otar_hint:'Deliver the SCK over the air, sealed under this radio\'s K (needs the radio registered and its K on file)',
     secp_otar_none:'No online radio with a saved key',secp_otar_confirm_all:'Send the SCK to {n} radio(s)?',secp_save_first:'Save your changes first',secp_offline:'offline',secp_ksg:'Algorithm (KSG)',secp_sck:'Static cipher key (SCK)',secp_sck_placeholder:'20 hex digits',secp_sckn:'SCK number (0-31)',secp_sckvn:'SCK version',
@@ -9337,7 +9347,7 @@ const LANGS={
     sec_cell_hint_clear:'Clase de seguridad 1: sin cifrado del interfaz aire en esta celda',sec_cell_hint_enc:'Clase de seguridad 2: la señalización y la voz de esta celda se cifran con la SCK {sckn} (versión {vn}) usando {ksg}',
     sec_cell_hint_err:'Configuración AIE rechazada: {err}',sec_subs:'{n} clave(s) de abonado cargada(s)',
     secp_section:'Seguridad del interfaz aire',secp_status_title:'Estado',secp_running:'En ejecución',secp_saved:'Guardado en la configuración',
-    secp_restart_needed:'La configuración guardada difiere de la que está en ejecución. Reinicia la estación para aplicarla.',secp_restart:'Reiniciar estación',
+    secp_restart_needed:'La configuración guardada difiere de la que está en ejecución. Aplícala: en vivo cuando se puede (un cambio de clase o de clave se anuncia antes a las radios), si no la estación se reinicia.',secp_restart:'Aplicar',
     secp_restarting:'Reiniciando… la página se reconectará en unos segundos.',secp_parse_error:'config.toml no se puede analizar; corrígelo primero en la página Config: ',
     secp_auth_title:'Autenticación (TAA1)',secp_auth_help:'Desafía a las radios con su clave de autenticación K de 128 bits al registrarse (EN 300 392-7 cláusula 4). Solo pasan las radios cuya K figura abajo. La autenticación es un control de acceso y es admisible en bandas de aficionados.',
     secp_auth_mode:'Modo',secp_auth_off:'Desactivada: cualquier radio puede registrarse',secp_auth_optional:'Opcional: se desafía a las radios con clave y se admite al resto',secp_auth_required:'Obligatoria: se rechazan las radios sin clave o que fallan',
@@ -9348,6 +9358,10 @@ const LANGS={
     secp_staged:'(preparada para OTAR)',secp_otar_label:'OTAR',secp_otar_send:'Enviar SCK',secp_otar_send_all:'Enviar SCK a todas las radios conectadas',secp_otar_hint:'Entrega la SCK por el aire, sellada con la K de esta radio (la radio debe estar registrada y su K guardada)',
     secp_otar_none:'Ninguna radio conectada con clave guardada',secp_otar_confirm_all:'¿Enviar la SCK a {n} radio(s)?',secp_save_first:'Guarda los cambios primero',secp_offline:'desconectada',
     secp_ksg:'Algoritmo (KSG)',secp_sck:'Clave estática (SCK)',secp_sck_placeholder:'20 dígitos hex',secp_sckn:'Número de SCK (0-31)',secp_sckvn:'Versión de SCK',secp_groups:'Grupos en claro (GSSI, separados por comas) para radios sin cifrado',
+    secp_lead:'Anunciar un cambio de clase o clave con antelación (segundos, 5–300)',
+    secp_lead_help:'Un cambio de clase de seguridad o de clave de cifrado se envía a cada radio registrada con D-CK CHANGE DEMAND (EN 300 392-7 cláusulas 4.5.5.6, 4.5.6) y entra en vigor al inicio de la siguiente multitrama tras este tiempo, sin reiniciar. Las radios registradas en claro se registran de nuevo cuando la celda pasa a cifrado; las radios sin la clave nueva se registran de nuevo para obtenerla. El algoritmo TEA de una celda cifrada sigue reiniciando la estación.',
+    secp_air_pending:'Cambio de seguridad a clase {class} guardado: se anuncia a las radios {s} s antes y luego se aplica en vivo.',
+    secp_air_announced:'Cambio de seguridad a clase {class} anunciado a las radios: entra en vigor en vivo unos {s} s después de guardar.',
     secp_tea1_warn:'TEA1 está roto: conserva solo 32 de sus 80 bits de clave y la clave se recupera con unos segundos de tráfico. Úsalo para investigación o para hablar con radios que solo tengan TEA1, nunca como protección.',
     secp_keep:'sin cambios',secp_saved_ok:'Guardado. Reinicia la estación para aplicarlo.',secp_invalid_keys:'Claves guardadas que no se pudieron leer (ISSI): ',
     secp_algo_title:'Algoritmos de esta compilación',secp_th_algo:'Algoritmo',secp_th_status:'Estado',secp_th_note:'Notas',secp_available:'Disponible',secp_unavailable:'No disponible',secp_weak:'Débil: solo investigación',
@@ -18195,6 +18209,13 @@ function secpFill(d){
   document.getElementById('secp-running').innerHTML=secpPosture(d.running);
   document.getElementById('secp-saved').innerHTML=d.saved?secpPosture(d.saved):'—';
   document.getElementById('secp-restart').style.display=d.restart_required?'':'none';
+  const ac=(d.runtime||{}).air_change,acEl=document.getElementById('secp-air');
+  if(ac){
+    const key=ac.class===1?'':(ac.class===3?' · CCK-id '+ac.vn:' · SCK '+ac.sckn+' v'+ac.vn);
+    acEl.textContent=t(ac.announced?'secp_air_announced':'secp_air_pending').replace('{class}',ac.class+key).replace('{s}',ac.lead_secs);
+    acEl.style.display='';
+  }else{acEl.style.display='none';}
+  document.getElementById('secp-lead').value=(d.saved||d.running).change_lead_secs||30;
   const pe=document.getElementById('secp-parse-error');
   if(d.parse_error){pe.style.display='';pe.textContent=t('secp_parse_error')+d.parse_error;}else{pe.style.display='none';}
   const s=d.saved||d.running;
@@ -18253,6 +18274,9 @@ async function saveSecurity(){
   const body={authentication:cls===3?'required':document.getElementById('secp-auth').value,
     mutual_authentication:cls===3||document.getElementById('secp-mutual').checked,
     subscribers:secpSubs.map(s=>({issi:s.issi,k:s.k})),aie};
+  const lead=number('secp-lead',5,300);
+  if(lead===null){secpMsg(t('secp_lead'),false);return;}
+  body.change_lead_secs=lead;
   try{
     const r=await fetch('/api/security',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){secpMsg(await r.text(),false);return;}

@@ -3061,7 +3061,8 @@ fn serve_security_get(stream: PrefixedConn, shared_config: &Option<tetra_config:
     http_json_response(stream, 200, &security::page_json(&running, security::load_saved(config_path), security::runtime_json(shared_config)));
 }
 
-/// POST /api/security — validate and write the settings; they apply on the next restart.
+/// POST /api/security — validate and write the settings; the page then applies them (live
+/// reload, a class or key change announced to the radios first) or restarts.
 fn serve_security_post(stream: PrefixedConn, shared_config: &Option<tetra_config::bluestation::SharedConfig>, config_path: &str, body: &str) {
     use crate::net_dashboard::security;
     let current = match security::load_saved(config_path) {
@@ -3087,7 +3088,7 @@ fn serve_security_post(stream: PrefixedConn, shared_config: &Option<tetra_config
         return;
     }
     tracing::info!(
-        "Dashboard: security settings saved (authentication {:?}, {} subscriber key(s), encryption {}) — restart to apply",
+        "Dashboard: security settings saved (authentication {:?}, {} subscriber key(s), encryption {}) — apply from the Security page",
         edit.authentication,
         edit.subscribers.len(),
         edit.aie.as_ref().map(|a| match &a.class3 {
