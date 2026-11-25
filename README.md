@@ -39,7 +39,10 @@ Based on FlowStation by **Razvan Zeces / YO6RZV** (itself built on [tetra-bluest
 | **Multi-cell roaming** and **Infrastructure** page *(new in v0.5.6, first called Roaming / Cells)* | Calls follow the radio between the cells of a station, cells can share a location area, multi-cell stations roam with other stations; one dashboard page for cells, neighbours and reselection |
 | **Group access from the Brew server** *(new in v0.5.6)* | Allow / block list and RX only per group, set on the brew-server and enforced on air: refused attachment, no floor for listeners, emergency always passes |
 | **Multi Network** *(new in v0.5.6)* | One network per cell, migration (ETSI 16.4.1.1 b) and radios of other networks through the Brew server; the cell a radio uses decides the network it talks in (e.g. own Brew network or TetraPack / Brandmeister); switch on the **Infrastructure** page (off removes the extra networks again; with several networks the Brew profile select shows "Multi Network active") |
-| **Fleet Control** *(new in v0.5.11)* | Manage many stations from the Brew server: software and state at a glance, remote and live update, maintenance banner and restart, read and change the config, graphs and alarms; each station opts in |
+| **Fleet Control** *(new in v0.5.11)* | Manage many stations from the Brew server: software and state at a glance, remote and live update, maintenance banner and restart, read and change the config (applied live where possible), RF kill switch, graphs and alarms; each station opts in |
+| **Cells page** and **several cells on one SDR** *(new in v0.6.7)* | One page for every SDR and the cells it carries; cells that name the same SDR share it (modes one cell, multi-carrier, multi-cell) |
+| **Live configuration** *(new in v0.6.9)* | A save applies at once where it can: Brew link (waits for running network calls), SDR gains / antennas / ppm, cells added or removed, colour code / MCC-MNC / carrier (rebuilds only that cell), security class and keys (announced to the radios); a restart only when a setting needs one |
+| **SDR On/Off switch** *(unreleased)* | Take an additional SDR off the air and back on from the Cells page, live, with its settings kept in `config.toml` |
 | **Ambience Listening (SS-AL)** *(new in v0.5.4)* | Dispatcher-invoked receive-only call: a supporting radio connects and keys its mic on its own (indicated on the radio, not covert) |
 | **Request for Location (LIP)** *(new in v0.5.4)* | Dispatcher asks a radio for its position (once or polled); the LIP report reaches the console that requested it |
 
@@ -172,6 +175,8 @@ Expand **Live settings** to edit the running station (RF, network, Brew, ISSI wh
 
 **Apply & Restart** writes those forms into `/etc/flowstation/config.toml` only — it does **not** update a Cell/Brew profile JSON.
 
+Since **v0.6.9** the saved file is applied **live** when every changed setting can be (`POST /api/config/reload`; the same for raw TOML, profiles, the Cells page and Fleet Control): Brew, LST, telemetry, control, Telegram, Asterisk and dashboard login; SDR gains, antennas and ppm correction; cells added or removed; colour code, MCC/MNC and carrier as a rebuild of that cell only (its radios register again); security class and cipher keys at a slot announced to the radios with D-CK CHANGE DEMAND (EN 300 392-7 clauses 4.5.5.6, 4.5.6). A Brew link change waits until no network call has run for 5 s (`[brew] live_wait_secs`, default 60). Only a setting that cannot apply live (e.g. sample rate, SDR device) restarts the station, and the page says which one.
+
 Under **Hardware RF** (collapsed by default): the SDR **device** string is read-only (set in Setup); PPM, antennas and gain stages follow that driver. Enter numbers with comma or dot; empty gain/antenna fields omit the keys so the device defaults apply. Saving rejects gain stages that do not belong to the selected family (e.g. Lime `pad` on SXceiver).
 
 <p align="center">
@@ -254,7 +259,7 @@ The multi-cell engine for this (`SdrHub`, shared SDR opening, per-cell security 
 
 ### Setting it up
 
-- **Dashboard:** the **Cells** page (menu *Cells*, since v0.6.7) shows every cell grouped by the SDR that carries it and adds, edits and removes cells: SDR and mode, carriers, colour code, location area (empty = the primary's), network, encryption and neighbours; saving checks the whole config and restarts the station. The **Cells** card on the **Infrastructure** page lists the cells with a link to it.
+- **Dashboard:** the **Cells** page (menu *Cells*, since v0.6.7) shows every cell grouped by the SDR that carries it and adds, edits and removes cells: SDR and mode, carriers, colour code, location area (empty = the primary's), network, encryption and neighbours; saving checks the whole config and applies it live where it can (a cell on an SDR of its own that serves the primary's network starts or stops without a restart), otherwise restarts the station. The **Cells** card on the **Infrastructure** page lists the cells with a link to it.
 - **By hand:** add a `[[cells]]` entry per extra SDR. It inherits everything from `[cell_info]` except what you override:
 
   ```toml
@@ -275,6 +280,14 @@ The multi-cell engine for this (`SdrHub`, shared SDR opening, per-cell security 
   ```
 
   Rules: up to 8 cells (ids 1-7 plus the primary), every carrier unique, same `freq_band` and `custom_duplex_spacing`, and every cell (the primary too) names its own SDR `device`. See the commented example at the end of [`example_config/config.toml`](example_config/config.toml).
+
+### Switching an SDR off and on *(unreleased)*
+
+Every SDR that does not carry the primary cell has an **On/Off** switch on the Cells page. **Off** takes its cell(s) off the air and closes only that SDR; the station, its other cells, the dashboard and the network links keep running. **On** opens only that SDR again. No restart, no driver reload.
+
+- Off writes `enabled = false` into the cell's `[[cells]]` entry; every other setting stays, so the state survives a restart. A config without the key behaves as before (on).
+- The cell is retired like a cell removed live: its calls are released, radios reselect to the remaining cells (TS 100 392-2 clause 18.3.4.7) and register or restore there. A switched-off cell still counts for the site link, so switching it never changes how the station is wired.
+- An SDR with several cells switches as a whole. Switched-off SDRs are listed in their own "Switched off" section. When a change cannot apply live (e.g. the Asterisk bridge serves several cells), the page asks before restarting. API: `POST /api/cells/enable`.
 
 ### What linking gives you
 
@@ -399,7 +412,8 @@ What the server can do once it is on (each item is announced as a capability, so
 - **Overview** — the station reports its software version, cells, RF state and health (`StationHello`); the server lists every managed station with its state.
 - **Remote update** (`update-v1`) — the server asks for the newest version on the station's update source and starts an update; the station runs the same installer as the OTA and reports each step. **Live update** (`update-live-v1`) builds while the radio stays on and restarts at the end, if wanted only when no call is running.
 - **Maintenance and restart** (`maintenance-v1`, `restart-v1`) — a maintenance banner on the dashboard (also without a login) and a restart of the service from the server.
-- **Station config** (`config-v1`) — the server reads the config and changes it in steps (cells, neighbours, reselection values, Brew, telemetry, update source, single values of the config file); never passwords or keys. Templates, bulk changes and neighbour suggestions are on the server side.
+- **Station config** (`config-v1`) — the server reads the config and changes it in steps (cells, neighbours, reselection values, Brew, telemetry, update source, single values of the config file); never passwords or keys. Templates, bulk changes and neighbour suggestions are on the server side. Since v0.6.9 a change the station can take without a restart is applied live (`config-live-v1`, answer `applied_live`).
+- **RF kill switch** (`rf-standby-v1`) — the server switches the transmitter off with the station's Suspend and on again with a service restart.
 - **Graphs and alarms** (`metrics-v1`) — once a minute CPU load, temperatures, RF state, radios and calls for the server's 24 h graphs and alarms.
 
 The existing control commands (kick, DGNA, SDS, emergency clear, ambience listening, service restart / shutdown) do not depend on the switch. Neither does `dgna-report`: with a server that offers it, the station reports every DGNA assign and remove (also those made on its own dashboard) over the control channel, so the server knows the groups and can take them back. Station side in [`Docs/fleet-control.md`](Docs/fleet-control.md); protocol and server side in brew-server `docs/Fleet-Control.md`.
@@ -549,7 +563,7 @@ For Asterisk, DAPNET, Snom, GeoAlarm and deep protocol notes, use the upstream d
 - **Aitor, EA4HBL** — this fork (install, Setup, visual config, OTA UX, Spanish UI).
 - **Yiannis Samouhos, ysamouhos** — Multi-cell support with multiple SDR and AIE; the multi-cell engine for several cells on one SDR (`SdrHub`, one SDR opened for a group of cells) and per-cell security settings.
 - **David Harcus, MM7FDM** — TETRA authentication (TAA1), TEA2/TEA3, SCK OTAR, the Security dashboard page, USRP B210 support, the WAP packet-data (SNDCP) gateway with its live status page, end-to-end encryption (E2EE) of SDS, and individual call handover between the cells of a multi-cell station (PR #30).
-- **Sebastian, OE4SXM** ([sebastianmadl](https://github.com/sebastianmadl)) — roaming between stations over Brew (group and individual calls across stations, announced and unannounced cell reselection), multi-cell roaming (individual calls with the network follow the radio between cells, built on David's PR #30; cells sharing a location area; multi-cell stations roaming with other stations), the Infrastructure dashboard page (formerly Roaming / Cells) with the Brew server's cell list, configurable minimum access level and migration flag, group access and RX only from the Brew server, Multi Network, Fleet Control (station side), several cells on one SDR: the implementation in the dashboard (Cells page) and the rework of the configuration (SDR modes one cell / multi-carrier / multi-cell, computed centre frequencies, sample rate field, networks without a cell), English changelog.
+- **Sebastian, OE4SXM** ([sebastianmadl](https://github.com/sebastianmadl)) — roaming between stations over Brew (group and individual calls across stations, announced and unannounced cell reselection), multi-cell roaming (individual calls with the network follow the radio between cells, built on David's PR #30; cells sharing a location area; multi-cell stations roaming with other stations), the Infrastructure dashboard page (formerly Roaming / Cells) with the Brew server's cell list, configurable minimum access level and migration flag, group access and RX only from the Brew server, Multi Network, Fleet Control (station side), several cells on one SDR: the implementation in the dashboard (Cells page) and the rework of the configuration (SDR modes one cell / multi-carrier / multi-cell, computed centre frequencies, sample rate field, networks without a cell), live configuration beyond the first reload (ETSI review, live SDR gains and ppm, cell rebuild on an identity change, cells added and removed live, announced security changes, Brew waiting for calls, Fleet Control applied live), the SDR On/Off switch, the Fleet Control RF kill switch, English changelog.
 - **Chris, DN9CHO** ([dn9cho](https://github.com/dn9cho)) — APRS weather station reports from aprs.fi on the radio (`APRSWX` SDS command, on request or as a periodic send, configurable live in the WX card of the dashboard), plus fixes for group calls cut off after six minutes and for radios scanning more than 12 groups.
 
 ---
