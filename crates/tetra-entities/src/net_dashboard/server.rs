@@ -380,6 +380,21 @@ type SharedSessionStore = Arc<Mutex<SessionStore>>;
 /// without restarting the service.
 type SharedAuth = Arc<RwLock<Option<(String, String)>>>;
 
+/// The running dashboard's credentials, so a live configuration reload can change the login.
+static LIVE_AUTH: OnceLock<SharedAuth> = OnceLock::new();
+
+/// Apply `[dashboard]` username/password from a reloaded configuration to the running dashboard.
+/// Existing sessions stay valid until they expire (a password change in the System tab behaves the
+/// same way).
+pub fn apply_live_credentials(dashboard: Option<&tetra_config::bluestation::CfgDashboard>) {
+    let Some(auth) = LIVE_AUTH.get() else { return };
+    let creds = dashboard.and_then(|d| match (&d.username, &d.password) {
+        (Some(u), Some(p)) => Some((u.clone(), p.clone())),
+        _ => None,
+    });
+    *auth.write().unwrap_or_else(|e| e.into_inner()) = creds;
+}
+
 /// Only the socket's direct peer participates in private HTTP admission. Forwarded headers are
 /// intentionally irrelevant: the operator explicitly trusts these source networks, not a proxy.
 fn private_http_configured(shared_config: &Option<tetra_config::bluestation::SharedConfig>) -> bool {
@@ -2226,6 +2241,7 @@ impl DashboardServer {
         let update_state = Arc::clone(&self.update_state);
         let source_dir_override = self.source_dir_override.clone();
         let auth: SharedAuth = Arc::clone(&self.auth);
+        let _ = LIVE_AUTH.set(Arc::clone(&self.auth));
         let public_overview = self.public_overview;
         let shared_config = self.shared_config.clone();
         let sessions = Arc::clone(&self.sessions);
@@ -3434,6 +3450,12 @@ fn handle_connection(
     // permanently occupy a DASH_MAX_CONN slot (that starved polls and wedged the Pi UI).
     mut conn_guard: Option<DashConnGuard>,
 ) {
+    // The public overview follows the configuration (live reload); the value the listener was
+    // started with applies when no configuration is attached.
+    let public_overview = shared_config
+        .as_ref()
+        .and_then(|c| c.config().dashboard.as_ref().map(|d| d.public_overview))
+        .unwrap_or(public_overview);
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
     // Captured before the stream is wrapped — the login throttle keys on it.
     let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
@@ -4082,6 +4104,13 @@ fn handle_connection(
         };
         // Always 200 — the validation verdict is in the body, not the HTTP status.
         http_json_response(inner, 200, &json)
+    } else if req_line.contains("POST /api/config/reload") {
+        // Apply the saved config.toml to the running station without a restart. Answers
+        // {"applied":true,"cells":n} or {"applied":false,"restart":[reasons]} (nothing applied).
+        let mut s = stream;
+        drain_http_headers(&mut s);
+        let json = reload_saved_config(&config_path, &shared_config);
+        http_json_response(s, 200, &json.to_string());
     } else if req_line.contains("POST /api/config") {
         let mut buf = BufReader::new(stream);
         let mut content_length = 0usize;
@@ -8266,6 +8295,26 @@ fn write_config_validated(config_path: &str, body: &str) -> Result<(), (u16, Str
         tracing::warn!("Dashboard: failed to write config backup: {}", e);
     }
     atomic_write(config_path, body).map_err(|e| (500, e.to_string()))
+}
+
+/// Parse the saved config file and swap it into the running cells (`POST /api/config/reload`).
+fn reload_saved_config(config_path: &str, shared: &Option<tetra_config::bluestation::SharedConfig>) -> serde_json::Value {
+    let Some(shared) = shared else {
+        return serde_json::json!({"applied": false, "restart": ["configuration not available to the dashboard"]});
+    };
+    let mut new = match tetra_config::bluestation::parsing::from_file(config_path) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({"applied": false, "error": format!("config does not parse: {e}")}),
+    };
+    if let Err(e) = new.validate() {
+        return serde_json::json!({"applied": false, "error": format!("config is invalid: {e}")});
+    }
+    new.add_sibling_neighbours();
+    match crate::config_reload::reload(shared, crate::net_site::extra_cells(), new) {
+        Ok(r) if r.restart.is_empty() => serde_json::json!({"applied": true, "cells": r.cells}),
+        Ok(r) => serde_json::json!({"applied": false, "restart": r.restart}),
+        Err(e) => serde_json::json!({"applied": false, "error": e}),
+    }
 }
 
 /// Dry-run validation of a posted `config.toml`: unmask any still-masked secrets against the live

@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
 pub mod aie;
+pub mod live_link;
+pub mod config_reload;
+pub mod network_swap;
 pub mod cmce;
 pub mod entity_trait;
 pub mod llc;
@@ -42,4 +45,4 @@ pub mod wireguard;
 
 // Re-export commonly used items from router
 pub use entity_trait::TetraEntityTrait;
-pub use messagerouter::{MessagePrio, MessageQueue, MessageRouter};
+pub use messagerouter::{MessagePrio, MessageQueue, MessageRouter, RouterCommand, RouterMailbox};

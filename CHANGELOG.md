@@ -4,6 +4,15 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## v0.6.9 — Configuración en caliente
+
+- **Los cambios de configuración se aplican sin reiniciar.** "Aplicar y reiniciar" (ajustes en vivo, TOML en bruto, perfiles Cell/Brew) ahora llama primero a `POST /api/config/reload`: lee el `config.toml` guardado y, si solo cambia algo que se puede aplicar en caliente, lo carga en todas las celdas y no reinicia (UMAC reconstruye SYSINFO y el cifrado; el resto de entidades ya leía la configuración en cada uso). También se aplican en caliente: el enlace de telemetría y el de control (Fleet Control) se reconectan con los nuevos datos o se cierran si se quita la sección, el monitor de salud y el watchdog, las alertas de Telegram, el puente Asterisk (reabre el socket SIP y se registra de nuevo cuando no hay llamadas; si arrancó apagado, encenderlo pide reinicio), la seguridad SC1/SC2/SC3 (UMAC reconstruye el cifrado; las radios ya registradas conservan sus claves hasta volver a registrarse) y el colour code y MCC/MNC (código de scrambling). El flujo de telemetría ahora siempre existe, aunque no haya consumidores. Brew: el enlace de cada red se reconecta con el nuevo servidor, credenciales y temporizadores. LST: encender/apagar la consola y cambiar el ISSI del operador (si arrancó apagado, encenderlo pide reinicio). `debug_log` abre, cambia o cierra el fichero de log. `service_name` se cambia. Dashboard: usuario, contraseña y vista pública. Si el cambio toca algo que no se puede aplicar en caliente no se aplica nada y se reinicia como antes, indicando el motivo: SDR y hardware (`phy_io`), `stack_mode`, portadora y plan de frecuencias (reajustan el SDR), celdas adicionales y sus SDR, con varias celdas, cualquier cambio en las redes (añadir, quitar, qué celda sirve a cuál, ganar o perder el enlace Brew), y la escucha del dashboard (dirección, puertos, `source_dir`: un puerto mal puesto dejaría sin acceso a la gestión). No probado en el aire.
+- **Red de una sola celda: ganar o perder el enlace Brew en caliente.** El router acepta cambios de entidades entre dos ticks (`RouterMailbox`): al añadir `[brew]` se crea la entidad Brew y se conecta; al quitarlo se retira. Las redes que ninguna celda sirve son solo configuración. No se aplica si LST ocupa el mismo hueco.
+
+## v0.6.8 — Versión de mantenimiento
+
+- **Sin cambios funcionales.** Solo sube el número de versión.
+
 ## v0.6.7 — Página Celdas y varias celdas en un SDR
 
 Varias celdas en un SDR: el motor multicelda (`SdrHub`) y la seguridad por celda los construyó Yiannis Samouhos (ysamouhos); la implementación en el dashboard (página Celdas) y la reestructuración de la configuración son de Sebastian, OE4SXM.
