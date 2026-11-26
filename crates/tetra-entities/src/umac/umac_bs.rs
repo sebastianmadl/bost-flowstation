@@ -1101,14 +1101,16 @@ impl UmacBs {
             }
         }
 
-        // A capacity request in a subslot of an active traffic timeslot that was not reserved for
-        // this radio is a random access on the assigned channel (clause 23.5.1). The radio repeats
-        // it until a MAC-RESOURCE with the random access flag answers it (clause 23.5.1.4.8); a
-        // listener sending an SDS in a call otherwise retried until it gave up and left the call.
-        // The flag goes only into the MAC-RESOURCE that carries the grant (see above for why it
-        // must not land on later in-call signalling).
-        let ra_on_assigned_channel = pdu.reservation_req.is_some()
-            && self.scheduler_for(carrier_num).circuit_is_active(Direction::Dl, msg_dltime.t)
+        // A MAC-ACCESS in a subslot of an active traffic timeslot that was not reserved for this
+        // radio is a random access on the assigned channel (clauses 23.5.1.4.12 and 23.5.1). The
+        // radio repeats it until a MAC-RESOURCE with the random access flag answers it (clause
+        // 23.5.1.4.8); a listener sending an SDS in a call otherwise retried until it gave up and
+        // left the call. This holds with or without a capacity request: a listener that only
+        // acknowledges a downlink message (a stand-alone BL-ACK) repeated it five times. The flag
+        // goes only into the MAC-RESOURCE that carries the grant, or into its own MAC-RESOURCE
+        // when there is no grant, and is dropped with it (see above for why it must not land on
+        // later in-call signalling). Reserved access (clause 23.5.2) is not acknowledged.
+        let ra_on_assigned_channel = self.scheduler_for(carrier_num).circuit_is_active(Direction::Dl, msg_dltime.t)
             && self.scheduler_for(carrier_num).ul_get_slot_owner(msg_dltime, prim.block_num) != Some(addr.ssi);
 
         // Handle reservation if present
@@ -1126,6 +1128,9 @@ impl UmacBs {
             } else {
                 tracing::warn!("rx_mac_access: No grant for reservation request {:?}", res_req);
             }
+        } else if ra_on_assigned_channel {
+            self.scheduler_for_mut(carrier_num)
+                .dl_enqueue_grant_random_access_ack(msg_dltime.t, addr);
         };
 
         // tracing::debug!("rx_mac_access: {}", prim.pdu.dump_bin_full(true));
@@ -2345,16 +2350,27 @@ impl UmacBs {
             // A close deferred by the previous call on this timeslot must not reach the circuit
             // we are about to create: the tick would tear the new one down and every DL voice
             // frame after that is dropped as "inactive circuit" for the rest of the call.
-            self.cancel_pending_circuit_close(carrier_num, ts, d);
+            let close_was_deferred = self.cancel_pending_circuit_close(carrier_num, ts, d);
 
             // See if pre-existing circuit somehow needs to be closed
             if self.scheduler_for(carrier_num).circuit_is_active(d, ts) {
-                tracing::warn!(
-                    "rx_control_circuit_open: Circuit already exists for {:?} carrier={} ts={}, closing first",
-                    d,
-                    carrier_num,
-                    ts
-                );
+                if close_was_deferred {
+                    // The previous call on this timeslot ended and its close was still waiting for
+                    // queued FACCH/STCH to drain: the new call takes the slot over, as intended.
+                    tracing::debug!(
+                        "rx_control_circuit_open: replacing the ended call's circuit for {:?} carrier={} ts={}",
+                        d,
+                        carrier_num,
+                        ts
+                    );
+                } else {
+                    tracing::warn!(
+                        "rx_control_circuit_open: Circuit already exists for {:?} carrier={} ts={}, closing first",
+                        d,
+                        carrier_num,
+                        ts
+                    );
+                }
                 self.scheduler_for_mut(carrier_num).close_circuit(d, ts);
             }
 
@@ -2431,14 +2447,15 @@ impl UmacBs {
     /// Drop a deferred close queued for an earlier incarnation of this carrier/timeslot.
     /// Only the direction being reopened is cleared -- a close still pending for the other
     /// direction refers to a circuit nobody recreated and must still run.
-    fn cancel_pending_circuit_close(&mut self, carrier_num: u16, ts: u8, dir: Direction) {
+    /// Cancels a deferred close of this circuit direction. Returns whether one was pending.
+    fn cancel_pending_circuit_close(&mut self, carrier_num: u16, ts: u8, dir: Direction) -> bool {
         let Some(pending) = self.pending_circuit_closes.get_mut(&(carrier_num, ts)) else {
-            return;
+            return false;
         };
         let was_pending = match dir {
             Direction::Dl => std::mem::take(&mut pending.dl),
             Direction::Ul => std::mem::take(&mut pending.ul),
-            _ => return,
+            _ => return false,
         };
         let drained = !pending.dl && !pending.ul;
         if drained {
@@ -2452,6 +2469,7 @@ impl UmacBs {
                 ts
             );
         }
+        was_pending
     }
 
     fn close_circuit_now(&mut self, dir: Direction, carrier_num: u16, ts: u8) {

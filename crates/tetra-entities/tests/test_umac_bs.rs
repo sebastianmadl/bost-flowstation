@@ -2355,3 +2355,92 @@ fn test_capacity_request_in_own_reserved_slot_is_not_flagged() {
         "an access in a subslot reserved for the radio is reserved access, not random access"
     );
 }
+
+// Field case 2026-11-26: in hangtime a listener acknowledged a downlink message with a stand-alone
+// BL-ACK in a MAC-ACCESS without a capacity request. Only accesses with a capacity request were
+// acknowledged on an assigned channel, so the radio repeated the access five times (clause
+// 23.5.1.4.8) and every copy was logged as an unexpected ACK.
+
+/// MAC-ACCESS as the radio sent it: a stand-alone BL-ACK (N(R) = 1), no capacity request.
+fn listener_bl_ack_access() -> SapMsg {
+    let mut uplink = BitBuffer::new_autoexpand(92);
+    MacAccess {
+        fill_bits: true,
+        encrypted: false,
+        addr: Some(listener_addr()),
+        event_label: None,
+        length_ind: Some(6),
+        frag_flag: None,
+        reservation_req: None,
+    }
+    .to_bitbuf(&mut uplink);
+    // BL-ACK without FCS, N(R) = 1, then fill bits up to the 6-octet length.
+    let sdu = BitBuffer::from_bitstr("00111100");
+    for i in 0..sdu.get_len() {
+        uplink.write_bits(sdu.peek_bits_startoffset(i, 1).unwrap(), 1);
+    }
+    uplink.seek(0);
+
+    SapMsg {
+        sap: Sap::TmvSap,
+        src: TetraEntity::Lmac,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmvUnitdataInd(TmvUnitdataInd {
+            carrier_num: MAIN_CARRIER,
+            pdu: uplink,
+            block_num: PhyBlockNum::Block1,
+            logical_channel: LogicalChannel::SchHu,
+            crc_pass: true,
+            scrambling_code: 864282631,
+            rssi_dbfs: f32::NEG_INFINITY,
+        }),
+    }
+}
+
+#[test]
+fn test_listener_access_without_capacity_request_in_hangtime_is_acknowledged() {
+    debug::setup_logging_verbose();
+    let mut test = call_in_hangtime();
+
+    test.submit_message(listener_bl_ack_access());
+    test.run_stack(Some(12));
+    let slots = downlink_slots(test.dump_sinks());
+    let resources = resources_for_listener(&slots, 2);
+
+    assert!(
+        resources.iter().any(|pdu| pdu.random_access_flag),
+        "a random access on the assigned channel must be answered with the random access flag \
+         even without a capacity request (clauses 23.5.1.4.8, 23.5.1.4.12), otherwise the radio repeats it"
+    );
+    assert!(
+        resources.iter().all(|pdu| pdu.slot_granting_element.is_none()),
+        "no capacity was asked for, so nothing is granted"
+    );
+}
+
+#[test]
+fn test_access_without_capacity_request_in_own_reserved_slot_is_not_flagged() {
+    // Reserved access (clause 23.5.2) is not a random access: no acknowledgement flag.
+    debug::setup_logging_verbose();
+    let mut test = call_in_hangtime();
+
+    {
+        let umac = umac_of(&mut test);
+        let mut t = TdmaTime { h: 0, m: 1, f: 1, t: 2 };
+        for _ in 0..(18 * 60) {
+            if umac.channel_scheduler.ul_get_slot_owner(t, PhyBlockNum::Block1).is_none() {
+                umac.channel_scheduler.ul_reserve_grant(LISTENER_ISSI, vec![t], true, None);
+            }
+            t = t.add_timeslots(4);
+        }
+    }
+
+    test.submit_message(listener_bl_ack_access());
+    test.run_stack(Some(12));
+    let slots = downlink_slots(test.dump_sinks());
+    let resources = resources_for_listener(&slots, 2);
+    assert!(
+        resources.iter().all(|pdu| !pdu.random_access_flag),
+        "an access in a subslot reserved for the radio is reserved access, not random access"
+    );
+}
