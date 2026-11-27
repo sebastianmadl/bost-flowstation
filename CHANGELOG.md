@@ -4,6 +4,10 @@ Notas para operadores. El dashboard OTA muestra las secciones posteriores a tu v
 
 English version: [`CHANGELOG_en.md`](CHANGELOG_en.md).
 
+## Sin publicar
+
+- **Nivel de una radio que habla.** El nivel con el que se recibe una radio solo se medía en su acceso aleatorio, es decir, una vez al pulsar el PTT; mientras hablaba no había lectura. La estación promedia ahora también las tramas de voz decodificadas de la radio que tiene la palabra y comunica la media una vez por segundo (17 tramas), igual que la lectura del PTT: a la lista de abonados, al enlace de telemetría y, con `[brew] feature_rssi_export`, al servidor Brew. La exportación Brew envía como máximo una lectura por radio cada 2 s (antes 5 s). Un servidor que promedia las lecturas de una llamada (brew-server 1.22.16: media de los primeros 10 s en el registro de llamadas) recibe unas cinco en lugar de una. Las tramas con CRC erróneo no se cuentan.
+
 ## v0.6.10 — Cambio de estación en escucha
 
 - **Página Celdas: «Escanear» muestra lo que ha encontrado.** El botón Escanear solo escribía «n SDR encontrados» en letra pequeña y ponía los dispositivos en la lista de sugerencias del campo de dispositivo, que los móviles no muestran, así que en un móvil parecía que no pasaba nada. Los SDR encontrados se listan ahora bajo los botones con su nombre y su cadena de dispositivo. «Añadir como SDR nuevo» crea una tarjeta de SDR con ese dispositivo y abre la ventana de edición de su celda; «Usar para SDR n» sustituye el dispositivo de un SDR existente; un dispositivo ya configurado muestra «En uso: SDR n». No se guarda nada hasta «Guardar y aplicar». El botón queda desactivado mientras dura el escaneo, y un resultado vacío dice qué comprobar.

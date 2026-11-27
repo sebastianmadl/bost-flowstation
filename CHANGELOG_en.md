@@ -2,6 +2,10 @@
 
 Operator notes. English version of [`CHANGELOG.md`](CHANGELOG.md) (Spanish), which the dashboard OTA reads and shows the sections after your current version from. Both files carry the same entries.
 
+## Unreleased
+
+- **Level of a talking radio.** The level a radio is received at was measured only at its random access, that is once at the PTT press; while it talked there was no reading. The station now also averages the decoded speech frames of the radio that has the floor and reports the mean once a second (17 frames), the same way as the PTT reading: to the subscriber list, to the telemetry link and, with `[brew] feature_rssi_export`, to the Brew server. The Brew export sends at most one reading per radio every 2 s (was 5 s). A server that averages the readings of a call (brew-server 1.22.16: mean of the first 10 s in the call log) gets about five instead of one. Frames that fail their CRC are not counted.
+
 ## v0.6.10 — Station change while listening
 
 - **Cells page: "Scan" shows what it found.** The Scan button only wrote "n SDR(s) found" in small print and put the devices into the suggestion list of the device field, which phones do not show, so on a phone nothing seemed to happen. The found SDRs are now listed under the buttons with their name and device string. "Add as new SDR" creates an SDR card with that device and opens the edit window of its cell; "Use for SDR n" replaces the device of an existing SDR; a device already configured shows "In use: SDR n". Nothing is saved until "Save and apply". The button is disabled while the scan runs, and an empty result says what to check.
