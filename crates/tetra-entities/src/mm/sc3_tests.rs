@@ -98,9 +98,11 @@ fn r2_group_report_cannot_register_unknown_radio_without_authentication() {
         assert!(!mm.client_mgr.client_is_known(MS));
         assert!(!mm.config.state_read().subscribers.is_registered(MS));
         assert!(mm.config.state_read().sc3_dcks.is_empty());
-        let SapMsgInner::LmmMleUnitdataReq(mut p) = q.pop_front().unwrap().msg else { panic!("reject") };
-        let ack = DAttachDetachGroupIdentityAcknowledgement::from_bitbuf(&mut p.sdu).unwrap();
-        assert_eq!(ack.group_identity_accept_reject, 1);
+        // Not acknowledged: the radio is asked to register and report its groups (clause 16.4.3).
+        let SapMsgInner::LmmMleUnitdataReq(mut p) = q.pop_front().unwrap().msg else { panic!("command") };
+        assert_eq!(p.sdu.read_field(4, "pdu_type").unwrap(), tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl::DLocationUpdateCommand.into_raw());
+        assert_eq!(p.sdu.read_field(1, "group_report").unwrap(), 1);
+        assert!(q.pop_front().is_none());
     }
 }
 
