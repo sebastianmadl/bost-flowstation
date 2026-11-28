@@ -2618,7 +2618,10 @@ impl UmacBs {
                     .is_some_and(|t| t.age(self.dltime) > ul_inactivity_timeslots);
 
                 if timed_out {
-                    tracing::warn!(
+                    // Not a warning here: a stray uplink frame decoded during a network talker's
+                    // over ends up here too, and CMCE ignores it. CMCE warns when a local talker
+                    // is really gone and it acts on it.
+                    tracing::debug!(
                         "UL inactivity timeout on carrier={} ts={}, sending notification to CMCE",
                         carrier_num,
                         ts
