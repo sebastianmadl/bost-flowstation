@@ -106,7 +106,12 @@ const TALKER_RSSI_FRAMES: u32 = 17;
 struct PendingCircuitClose {
     dl: bool,
     ul: bool,
+    /// Timeslots this close has waited for signalling queued on the channel to go out.
+    waited: u8,
 }
+
+/// Longest a deferred circuit close waits for signalling queued on the channel: four TDMA frames.
+const CIRCUIT_CLOSE_MAX_WAIT_TIMESLOTS: u8 = 16;
 
 struct PendingStch {
     addr: TetraAddress,
@@ -1926,6 +1931,39 @@ impl UmacBs {
             };
 
             if let Some(ts) = traffic_ts {
+                // A channel that is being released out of hangtime is in signalling mode (TS 100
+                // 392-2 clause 19.4.4): the D-TX CEASED switched it there and nothing switched it
+                // back. Stealing only exists in traffic mode (clause 19.4.3.2), so the PDU goes
+                // out on the assigned channel as ordinary signalling (SCH/F). Sending it stolen
+                // put one traffic mode frame on a channel whose radios were in signalling mode;
+                // a Motorola MTH700 lost the network on it.
+                if !cell_change && self.releasing_in_signalling_mode(requested_carrier, ts) {
+                    let encryption_mode = prim.air_interface_encryption.map(|v| (v != 0) as u8).unwrap_or_else(|| self.dl_encryption_mode(prim.main_address));
+                    let mut pdu = MacResource {
+                        fill_bits: false,
+                        pos_of_grant: 0,
+                        encryption_mode,
+                        random_access_flag: false,
+                        length_ind: 0,
+                        addr: Some(prim.main_address),
+                        event_label: None,
+                        usage_marker: None,
+                        power_control_element: None,
+                        slot_granting_element: None,
+                        chan_alloc_element: None,
+                    };
+                    sdu.seek(0);
+                    pdu.update_len_and_fill_ind(sdu.get_len());
+                    tracing::info!(
+                        "rx_ul_tma_unitdata_req: carrier={} ts {} is released in signalling mode, PDU for {} goes out as signalling",
+                        requested_carrier,
+                        ts,
+                        prim.main_address
+                    );
+                    self.scheduler_for_mut(requested_carrier)
+                        .dl_enqueue_tma_on_assigned_channel(ts, pdu, sdu, prim.tx_reporter);
+                    return;
+                }
                 if self.scheduler_for(requested_carrier).circuit_is_active(Direction::Dl, ts) {
                     let has_pending_ra = self
                         .scheduler_for_mut(requested_carrier)
@@ -2575,10 +2613,30 @@ impl UmacBs {
         }
     }
 
+    /// The downlink of this traffic channel is waiting to be closed and is still in signalling
+    /// mode, i.e. the call is released out of its hangtime.
+    fn releasing_in_signalling_mode(&self, carrier_num: u16, ts: u8) -> bool {
+        (2..=4).contains(&ts)
+            && self.pending_circuit_closes.get(&(carrier_num, ts)).is_some_and(|pending| pending.dl)
+            && self.scheduler_for(carrier_num).in_signalling_mode(ts)
+    }
+
     fn process_pending_circuit_closes(&mut self) {
         for (carrier_num, ts) in self.pending_circuit_closes.keys().copied().collect::<Vec<_>>() {
             let pending = self.pending_circuit_closes[&(carrier_num, ts)];
             if !pending.dl && !pending.ul {
+                continue;
+            }
+
+            // Signalling queued for a channel released in signalling mode (the D-RELEASE) goes
+            // out before the channel is closed.
+            if self.scheduler_for(carrier_num).in_signalling_mode(ts)
+                && self.scheduler_for(carrier_num).has_pending_signalling(ts)
+                && pending.waited < CIRCUIT_CLOSE_MAX_WAIT_TIMESLOTS
+            {
+                if let Some(pending) = self.pending_circuit_closes.get_mut(&(carrier_num, ts)) {
+                    pending.waited += 1;
+                }
                 continue;
             }
 
@@ -2772,7 +2830,13 @@ impl UmacBs {
                 self.hangtime_ul_watch.remove(&(carrier_num, ts));
             }
             CallControl::CallEnded { carrier_num, ts, .. } => {
-                self.scheduler_for_mut(carrier_num).set_hangtime(ts, false);
+                // A call released out of its hangtime keeps the channel in signalling mode until
+                // the deferred close has run: the D-RELEASE still has to go out on it, and a
+                // return to traffic mode needs a CC message (TS 100 392-2 clause 19.4.4). Closing
+                // the circuit ends the hangtime.
+                if !self.releasing_in_signalling_mode(carrier_num, ts) {
+                    self.scheduler_for_mut(carrier_num).set_hangtime(ts, false);
+                }
                 self.scheduler_for_mut(carrier_num).set_force_ul_traffic_decode(ts, false);
                 self.last_ul_voice.remove(&(carrier_num, ts));
                 self.ul_signal_owner.remove(&(carrier_num, ts));

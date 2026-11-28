@@ -2616,3 +2616,100 @@ fn test_talking_radio_level_is_reported_once_a_second() {
     test.submit_message(ul_speech_frame(2, -50.0));
     assert_eq!(talker_rssi_reports(&mut test), vec![(1000001, -50.0)]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Group call released out of its hangtime. Field case 2026-11-28: a Motorola MTH700 lost the
+// network whenever the D-RELEASE was sent stolen on the traffic slot after the hangtime. By then
+// the D-TX CEASED had put the channel in signalling mode (TS 100 392-2 clause 19.4.4), and
+// stealing only exists in traffic mode (clause 19.4.3.2).
+// ---------------------------------------------------------------------------------------------
+
+fn released_group() -> TetraAddress {
+    TetraAddress {
+        ssi: 9,
+        ssi_type: SsiType::Gssi,
+    }
+}
+
+fn call_ended(ts: u8) -> SapMsg {
+    SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Cmce,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::CmceCallControl(CallControl::CallEnded {
+            call_id: 1,
+            carrier_num: MAIN_CARRIER,
+            ts,
+        }),
+    }
+}
+
+/// The CMCE's release of a group call on `ts`: close the circuit, end the call, and the copy of
+/// the D-RELEASE for the radios on the traffic channel.
+fn release_group_call(test: &mut ComponentTest, ts: u8) {
+    test.submit_message(close_shared_voice_circuit(ts));
+    test.submit_message(call_ended(ts));
+    test.submit_message(stealing_req(released_group(), &sdu_bits(40), Some((MAIN_CARRIER, ts)), None, None));
+}
+
+fn resources_for_group(slots: &[tetra_saps::tmv::TmvUnitdataReqSlot], ts: u8) -> Vec<(LogicalChannel, MacResource)> {
+    let mut out = Vec::new();
+    for slot in slots.iter().filter(|s| s.ts.t == ts) {
+        for blk in [&slot.blk1, &slot.blk2] {
+            if let Some(pdu) = block_mac_resource_for(blk, released_group()) {
+                out.push((blk.as_ref().unwrap().logical_channel, pdu));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn test_release_in_hangtime_goes_out_as_signalling_not_stolen() {
+    debug::setup_logging_verbose();
+    let mut test = call_in_hangtime();
+
+    release_group_call(&mut test, 2);
+    test.run_stack(Some(1));
+    assert!(
+        umac_of(&mut test).channel_scheduler.circuit_is_active(Direction::Dl, 2),
+        "the channel stays up until the D-RELEASE has gone out on it"
+    );
+    test.run_stack(Some(23));
+
+    let slots = downlink_slots(test.dump_sinks());
+    assert!(
+        slots
+            .iter()
+            .filter(|s| s.ts.t == 2)
+            .all(|s| s.blk1.as_ref().is_none_or(|b| b.logical_channel != LogicalChannel::Stch)),
+        "a channel in signalling mode must not get a stolen (traffic mode) slot, clause 19.4.3.2"
+    );
+    let resources = resources_for_group(&slots, 2);
+    assert_eq!(resources.len(), 1, "the D-RELEASE goes out once on the assigned channel");
+    assert_eq!(resources[0].0, LogicalChannel::SchF, "as ordinary signalling");
+    assert!(resources[0].1.usage_marker.is_none() && resources[0].1.chan_alloc_element.is_none());
+
+    let umac = umac_of(&mut test);
+    assert!(!umac.channel_scheduler.circuit_is_active(Direction::Dl, 2), "the channel is closed afterwards");
+    assert!(!umac.channel_scheduler.circuit_is_active(Direction::Ul, 2));
+    assert!(!umac.channel_scheduler.in_signalling_mode(2), "and a later call starts without hangtime");
+}
+
+#[test]
+fn test_release_in_traffic_mode_is_still_stolen() {
+    debug::setup_logging_verbose();
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 4 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac, TetraEntity::Cmce]);
+    test.submit_message(open_shared_voice_circuit(2));
+    test.run_stack(Some(4));
+    test.dump_sinks();
+
+    release_group_call(&mut test, 2);
+    test.run_stack(Some(24));
+
+    let msgs = test.dump_sinks();
+    assert_eq!(stch_slots(msgs, 2).len(), 1, "a channel in traffic mode gets the D-RELEASE on a stolen slot");
+    assert!(!umac_of(&mut test).channel_scheduler.circuit_is_active(Direction::Dl, 2));
+}

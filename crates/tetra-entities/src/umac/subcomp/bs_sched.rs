@@ -632,6 +632,26 @@ impl BsChannelScheduler {
         !self.has_pending_stealing(ts)
     }
 
+    /// The assigned channel on `ts` is in signalling mode: its call is in hangtime (TS 100 392-2
+    /// clause 19.4.4).
+    pub fn in_signalling_mode(&self, ts: u8) -> bool {
+        (1..=4).contains(&ts) && self.hangtime[ts as usize - 1]
+    }
+
+    /// A MAC-RESOURCE, or the rest of a fragmented one, is still queued for `ts`.
+    pub fn has_pending_signalling(&self, ts: u8) -> bool {
+        self.dltx_queues
+            .get(ts as usize - 1)
+            .map(|q| q.iter().any(|e| matches!(e, DlSchedElem::Resource(..) | DlSchedElem::FragBuf(..))))
+            .unwrap_or(false)
+    }
+
+    /// Queues signalling for the radios on the assigned channel `ts` while it is in signalling
+    /// mode.
+    pub fn dl_enqueue_tma_on_assigned_channel(&mut self, ts: u8, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) {
+        self.dl_enqueue_tma_on_timeslots([ts, 0, 0, 0], pdu, sdu, tx_reporter);
+    }
+
     pub fn has_pending_stealing(&self, ts: u8) -> bool {
         let slot = ts as usize - 1;
         self.dltx_queues
