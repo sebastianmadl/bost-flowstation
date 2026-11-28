@@ -200,15 +200,54 @@ fn find_location_update_command(msgs: &[SapMsg]) -> Option<u32> {
     None
 }
 
-/// Feed MM an uplink RSSI sample for `issi`, as UMAC does on every random-access/PTT burst.
-fn submit_uplink_rssi(test: &mut ComponentTest, issi: u32) {
+/// Feed MM an uplink RSSI sample for `issi`, as UMAC does on every random-access/PTT burst,
+/// and let `timeslots` pass.
+fn submit_uplink_rssi_and_wait(test: &mut ComponentTest, issi: u32, timeslots: usize) {
     test.submit_message(SapMsg {
         sap: Sap::Control,
         src: TetraEntity::Umac,
         dest: TetraEntity::Mm,
         msg: SapMsgInner::MsRssiUpdate { issi, rssi_dbfs: -31.0 },
     });
-    test.run_stack(Some(2));
+    test.run_stack(Some(timeslots));
+}
+
+/// An uplink RSSI sample, and the four frames reactive recovery waits for the rest of the
+/// radio's message.
+fn submit_uplink_rssi(test: &mut ComponentTest, issi: u32) {
+    submit_uplink_rssi_and_wait(test, issi, 20);
+}
+
+/// The burst that makes MM notice an unknown radio is usually the radio's own registration, or
+/// its first fragment. No D-LOCATION UPDATE COMMAND may go out on that burst: the radio abandons
+/// the registration it has started, begins again and reports its groups twice.
+#[test]
+fn test_reactive_recovery_waits_for_the_rest_of_the_message() {
+    const RADIO: u32 = 2260302;
+    let mut test = ComponentTest::new(StackMode::Bs, Some(TdmaTime::default()));
+    test.populate_entities(vec![], vec![TetraEntity::Mle]);
+    let mm = MmBs::new(test.get_shared_config(), None, None);
+    test.register_entity(mm);
+
+    // First fragment received; the second one arrives in the slot granted for the next frame.
+    submit_uplink_rssi_and_wait(&mut test, RADIO, 4);
+    assert_eq!(find_location_update_command(&test.dump_sinks()), None, "no command on the burst itself");
+
+    submit_location_update(&mut test, RADIO, 9, LocationUpdateType::ItsiAttach);
+    assert!(test.config.state_read().subscribers.is_registered(RADIO));
+    test.run_stack(Some(40));
+    assert_eq!(
+        find_location_update_command(&test.dump_sinks()),
+        None,
+        "a radio that registered by itself is not commanded to register"
+    );
+
+    // A radio that sent something else is still commanded, four frames later.
+    const GHOST: u32 = 2260303;
+    submit_uplink_rssi_and_wait(&mut test, GHOST, 12);
+    assert_eq!(find_location_update_command(&test.dump_sinks()), None);
+    test.run_stack(Some(8));
+    assert_eq!(find_location_update_command(&test.dump_sinks()), Some(GHOST));
 }
 
 /// Reactive restart recovery: an *unknown* (unregistered) ISSI seen transmitting on the uplink

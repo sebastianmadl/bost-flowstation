@@ -194,6 +194,9 @@ pub struct MmBs {
     /// ghost while it re-registers (see `maybe_reactive_recovery`). Independent of `recovery`
     /// above â€” populated even when the proactive cache is disabled.
     reactive_recovery_cooldown: HashMap<u32, std::time::Instant>,
+    /// Radios seen on the uplink without a current registration, and the timeslots left until
+    /// reactive recovery looks at them (see `note_unregistered_uplink`).
+    reactive_recovery_settling: HashMap<u32, u8>,
     /// Per-ISSI timestamp of the last SwMI-initiated group report request (ETSI EN 300 392-2
     /// §16.8.3) after a U-ATTACH overflowed the single-PDU ACK cap. Prevents re-request loops
     /// while the MS is expected to multipacket (detach-all + amendments). Cleared on
@@ -201,6 +204,10 @@ pub struct MmBs {
     group_report_requested_at: HashMap<u32, std::time::Instant>,
     /// Group reports that must finish before a negotiated ciphering transition is committed.
     group_report_in_flight: HashMap<u32, Instant>,
+    /// Radios that sent a group change while they had no current registration. The registration
+    /// the station asks for overrides that request (TS 100 392-2 clause 16.8.6), so the groups
+    /// are fetched once it has completed, see `request_registration_for_group_update`.
+    group_change_owed: HashMap<u32, Instant>,
     /// Groups discarded by the ACK-size cap, kept until the MS finishes multipacket attach or
     /// we fall back to a SwMI D-ATTACH of the remainder (MXP600 often re-sends the full list
     /// in a PDU that exceeds the uplink and fails to parse).
@@ -224,6 +231,14 @@ enum Migration {
 /// Safety cap on `reactive_recovery_cooldown` so a churn of distinct unknown ISSIs can't grow it
 /// without bound; lapsed entries are pruned once this many are held.
 const REACTIVE_RECOVERY_COOLDOWN_CAP: usize = 4096;
+/// Timeslots between an uplink burst from a radio without a current registration and the
+/// reactive D-LOCATION UPDATE COMMAND: four TDMA frames. The burst is usually the radio's own
+/// registration, or the first fragment of it, and the rest arrives in the slot granted for the
+/// next frame; the command is only for a radio that sent something else.
+const REACTIVE_RECOVERY_SETTLE_TIMESLOTS: u8 = 16;
+/// How long a group change that arrived from a radio without a current registration stays
+/// owed: its registration has to complete within this time for the groups to be fetched.
+const GROUP_CHANGE_OWED_WINDOW: Duration = Duration::from_secs(60);
 
 /// Do not re-issue a SwMI group report request for the same ISSI within this window while a
 /// multipacket attach cycle may still be in flight.
@@ -283,8 +298,10 @@ impl MmBs {
             recovery_attempts: HashMap::new(),
             recovery_last_frame: None,
             reactive_recovery_cooldown: HashMap::new(),
+            reactive_recovery_settling: HashMap::new(),
             group_report_requested_at: HashMap::new(),
             group_report_in_flight: HashMap::new(),
+            group_change_owed: HashMap::new(),
             attach_overflow_remainder: HashMap::new(),
             visitors: Visitors::new(cell_id),
         }
@@ -568,6 +585,42 @@ impl MmBs {
     /// and so covers the cases the cache misses (radio absent from the cache, or the sweep already
     /// gave up on it). Rate-limited per ISSI; gated by the access whitelist and the optional
     /// `[recovery] issi_allowlist`; on by default (`[recovery] reactive_enabled`).
+    /// An uplink burst from `issi` was received. A radio without a current registration is
+    /// looked at by reactive recovery once its message has had time to arrive in full: a radio
+    /// that is switching on sends its registration in two fragments, and a D-LOCATION UPDATE
+    /// COMMAND sent on the first one made it abandon the registration, start it again and report
+    /// its groups a second time.
+    fn note_unregistered_uplink(&mut self, issi: u32) {
+        if self.client_mgr.client_is_known(issi) && self.config.state_read().subscribers.is_registered(issi) {
+            return;
+        }
+        if self.reactive_recovery_settling.len() >= REACTIVE_RECOVERY_COOLDOWN_CAP {
+            return;
+        }
+        self.reactive_recovery_settling.entry(issi).or_insert(REACTIVE_RECOVERY_SETTLE_TIMESLOTS);
+    }
+
+    /// Once per timeslot: run reactive recovery for the radios whose settle time is over. A radio
+    /// that has registered meanwhile, or whose registration is being authenticated, is left alone
+    /// by `maybe_reactive_recovery`.
+    fn drive_reactive_recovery(&mut self, queue: &mut MessageQueue) {
+        if self.reactive_recovery_settling.is_empty() {
+            return;
+        }
+        let mut due = Vec::new();
+        self.reactive_recovery_settling.retain(|&issi, left| {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                due.push(issi);
+            }
+            *left != 0
+        });
+        due.sort_unstable();
+        for issi in due {
+            self.maybe_reactive_recovery(queue, issi);
+        }
+    }
+
     fn maybe_reactive_recovery(&mut self, queue: &mut MessageQueue, issi: u32) {
         // Do not launch a second recovery/location-update procedure while this ISSI's
         // registration challenge is already in flight. The radio's RSSI proves presence,
@@ -1253,7 +1306,7 @@ impl MmBs {
         let _ = self.client_mgr.set_client_monitoring_window(issi, mf, mmf);
 
         // Process optional GroupIdentityLocationDemand field
-        let _has_groups = pdu.group_identity_location_demand.is_some();
+        let groups_with_registration = pdu.group_identity_location_demand.is_some();
         let gila = if let Some(mut gild) = pdu.group_identity_location_demand {
             let mut forms = HashMap::new();
             if let Some(giu) = gild.group_identity_uplink.take() {
@@ -1323,7 +1376,7 @@ impl MmBs {
         // Fix: when a *known* MS re-registers without supplying a group report, but we
         // still hold groups for it in client_mgr, re-emit Affiliate for those groups so
         // CMCE's group_listeners (and Brew) are resynced with what the MS believes.
-        if !is_new && !_has_groups {
+        if !is_new && !groups_with_registration {
             let stored_groups: Vec<u32> = self
                 .client_mgr
                 .get_client_by_issi(issi)
@@ -1463,6 +1516,7 @@ impl MmBs {
             }),
         };
         queue.push_back(msg);
+        self.fetch_owed_group_change(queue, issi, groups_with_registration);
 
         if let Some(mni) = visitor_mni {
             if let Some(v) = self.visitors.get(issi)
@@ -1525,7 +1579,7 @@ impl MmBs {
         //  - Motorola handsets (MTM800/MXP600) that answer a COMMAND with another
         //    RoamingLocationUpdating are now known on that second update, so they get no
         //    further COMMAND and can't loop.
-        let has_groups = _has_groups;
+        let has_groups = groups_with_registration;
         if is_new && pdu.location_update_type != LocationUpdateType::ItsiAttach && !has_groups {
             tracing::info!("Sending D-LOCATION UPDATE COMMAND to returning MS {} to request group report", issi);
             self.send_d_location_update_command(queue, issi, handle);
@@ -1944,6 +1998,78 @@ impl MmBs {
         }
     }
 
+    /// Answer a U-ATTACH/DETACH GROUP IDENTITY from a radio without a current registration
+    /// (unknown, or dropped by the presence check).
+    ///
+    /// The request is not processed, so it must not be acknowledged: an acknowledgement
+    /// that lists no group tells the MS every requested group was accepted (TS 100 392-2
+    /// clause 16.8.2 and annex G rules 7 and 8), while the station attached none. The SwMI
+    /// initiates registration instead (clause 16.4.3), which overrides the request (clause
+    /// 16.8.6). The clause does not make the MS repeat it, so for a radio whose groups the
+    /// station still holds the change is noted as owed and the groups are fetched when the
+    /// registration has completed. An unknown radio is asked for its group report with the
+    /// registration command itself, as before.
+    ///
+    /// One command per attempt: the uplink burst that carried the request has normally
+    /// triggered it already (`maybe_reactive_recovery`), and a radio that repeats its request
+    /// gets the next one when that cooldown has lapsed.
+    fn request_registration_for_group_update(&mut self, queue: &mut MessageQueue, issi: u32, handle: u32) {
+        // A (V)ASSI is never one of this network's ISSIs: keep the plain refusal, the radio
+        // has to migrate again (clause 16.4.1.1 b)) and cannot be commanded to re-register.
+        if self.visitors.is_visitor(issi) || self.config.config().multi_network.is_vassi(issi) {
+            tracing::info!("MM: group update from unregistered visitor {}; refused", issi);
+            self.send_d_attach_detach_ack_reject(queue, issi, handle);
+            return;
+        }
+        let known = self.client_mgr.client_is_known(issi);
+        if known {
+            let now = Instant::now();
+            self.group_change_owed.retain(|_, at| now.duration_since(*at) < GROUP_CHANGE_OWED_WINDOW);
+            self.group_change_owed.insert(issi, now);
+        }
+        tracing::info!(
+            "MM: group update from unregistered ISSI {}; registration first{}",
+            issi,
+            if known { ", groups are fetched after it" } else { "" }
+        );
+        // The held registration has to finish first; its accept answers the radio.
+        if self.auth_pending.get(&issi).is_some_and(|pending| {
+            pending.held.is_some() && pending.started.elapsed() < T354
+        }) || self.auth_result_pending.get(&issi).is_some_and(|p| p.started.elapsed() < T354)
+           || self.auth_ack_pending.get(&issi).is_some_and(|(p, _)| p.started.elapsed() < T354) {
+            return;
+        }
+        self.maybe_reactive_recovery(queue, issi);
+        // Reactive recovery can be switched off or limited to an allowlist. A radio the station
+        // knows still has to be told that it is not registered, or its request stays unanswered.
+        let cooldown = std::time::Duration::from_secs(self.config.config().recovery.reactive_cooldown_secs);
+        let commanded = self.reactive_recovery_cooldown.get(&issi).is_some_and(|at| at.elapsed() < cooldown);
+        if known && !commanded && !self.recovery_attempts.contains_key(&issi) {
+            let now = std::time::Instant::now();
+            self.reactive_recovery_cooldown.insert(issi, now);
+            if let Some(receipt) = self.send_registration_check(queue, issi, true) {
+                self.client_mgr.queue_registration_command(issi, now);
+                self.registration_probe_receipts.insert(issi, receipt);
+            }
+        }
+    }
+
+    /// The registration of a radio that owed a group change has completed (its accept is
+    /// queued). A radio that sent its groups with the registration is up to date; any other is
+    /// asked for its group report (clause 16.8.3).
+    fn fetch_owed_group_change(&mut self, queue: &mut MessageQueue, issi: u32, groups_with_registration: bool) {
+        let Some(owed_at) = self.group_change_owed.remove(&issi) else {
+            return;
+        };
+        if groups_with_registration || owed_at.elapsed() >= GROUP_CHANGE_OWED_WINDOW {
+            return;
+        }
+        tracing::info!("MM: ISSI {} registered after a deferred group update; requesting its group report", issi);
+        self.group_report_requested_at.insert(issi, std::time::Instant::now());
+        self.mark_group_report_pending(issi);
+        self.send_d_group_report_request(queue, issi);
+    }
+
     fn rx_u_attach_detach_group_identity(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_u_attach_detach_group_identity");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
@@ -1997,9 +2123,8 @@ impl MmBs {
         // A group report cannot establish registration or bypass authentication.
         // Ask an unknown/expired subscriber to finish registration first.
         if !self.client_mgr.client_is_known(issi) || !self.config.state_read().subscribers.is_registered(issi) {
-            tracing::info!("MM: group update from unregistered ISSI {}; requesting registration", issi);
-            self.send_d_attach_detach_ack_reject(queue, issi, prim.handle);
-            self.maybe_reactive_recovery(queue, issi);
+            let handle = prim.handle;
+            self.request_registration_for_group_update(queue, issi, handle);
             return;
         }
 
@@ -3789,6 +3914,7 @@ impl TetraEntityTrait for MmBs {
         self.follow_location_area(queue, ts);
         self.follow_air_change(queue, ts);
         self.drive_registration_checks(queue, ts, Instant::now(), rf_ready);
+        self.drive_reactive_recovery(queue);
 
         // Restart recovery: replay D-LOCATION-UPDATE-COMMANDs to cached terminals awaiting
         // re-registration (no-op once the sweep drains / when recovery is disabled), then flush
@@ -3827,8 +3953,9 @@ impl TetraEntityTrait for MmBs {
                         // This RSSI sample proves `issi` is RF-present on the uplink right now. If
                         // MM has no record of it (registry lost to a restart while the radio stayed
                         // camped), command it to re-register immediately rather than waiting for its
-                        // periodic T351 or a manual DMO/TMO toggle.
-                        self.maybe_reactive_recovery(queue, issi);
+                        // periodic T351 or a manual DMO/TMO toggle. Not on this burst itself: it
+                        // may be the start of the radio's own registration.
+                        self.note_unregistered_uplink(issi);
                         // Emit RSSI telemetry for dashboard
                         if let Some(sink) = &self.telemetry {
                             sink.send(crate::net_telemetry::TelemetryEvent::MsRssi { issi, rssi_dbfs });
@@ -5473,6 +5600,242 @@ mod presence_tests {
         assert!(mm.client_mgr.get_client_by_issi(100).unwrap().groups.contains(&268));
         mm.maybe_reactive_recovery(&mut queue, 100);
         assert!(queue.pop_front().is_none(), "a burst of returning PTT samples must not flood MCCH");
+    }
+
+    fn group_update_ind(issi: u32, sdu: BitBuffer) -> SapMsg {
+        SapMsg {
+            sap: Sap::LmmSap,
+            src: TetraEntity::Mle,
+            dest: TetraEntity::Mm,
+            msg: SapMsgInner::LmmMleUnitdataInd(tetra_saps::lmm::LmmMleUnitdataInd {
+                rx_ack: None,
+                encrypted: false,
+                sdu,
+                handle: 0,
+                received_address: TetraAddress::issi(issi),
+            }),
+        }
+    }
+
+    /// The radio selects `gssi`: the MAC sees the burst first (RSSI sample), then the PDU reaches MM.
+    fn radio_selects_group(mm: &mut MmBs, queue: &mut MessageQueue, issi: u32, gssi: u32) {
+        let pdu = UAttachDetachGroupIdentity {
+            group_identity_report: false,
+            group_identity_attach_detach_mode: true,
+            group_report_response: None,
+            group_identity_uplink: Some(vec![tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink {
+                class_of_usage: Some(4),
+                group_identity_detachment_uplink: None,
+                gssi: Some(gssi),
+                address_extension: None,
+                vgssi: None,
+            }]),
+            proprietary: None,
+        };
+        let mut sdu = BitBuffer::new_autoexpand(128);
+        pdu.to_bitbuf(&mut sdu).unwrap();
+        sdu.seek(0);
+        mm.client_mgr.update_client_rssi(issi, -60.0);
+        mm.maybe_reactive_recovery(queue, issi);
+        mm.rx_u_attach_detach_group_identity(queue, group_update_ind(issi, sdu));
+    }
+
+    /// The radio registers on the command, with or without its groups in the registration.
+    fn radio_answers_command(mm: &mut MmBs, queue: &mut MessageQueue, issi: u32, groups: Option<&[u32]>) {
+        use tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocationDemand;
+        use tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink;
+        let pdu = ULocationUpdateDemand {
+            location_update_type: LocationUpdateType::DemandLocationUpdating,
+            request_to_append_la: false,
+            cipher_control: false,
+            ciphering_parameters: None,
+            class_of_ms: None,
+            energy_saving_mode: None,
+            la_information: None,
+            ssi: Some(issi as u64),
+            address_extension: None,
+            group_identity_location_demand: groups.map(|groups| GroupIdentityLocationDemand {
+                group_identity_attach_detach_mode: 1,
+                group_identity_uplink: Some(
+                    groups
+                        .iter()
+                        .map(|&gssi| GroupIdentityUplink {
+                            class_of_usage: Some(4),
+                            group_identity_detachment_uplink: None,
+                            gssi: Some(gssi),
+                            address_extension: None,
+                            vgssi: None,
+                        })
+                        .collect(),
+                ),
+            }),
+            group_report_response: None,
+            authentication_uplink: None,
+            extended_capabilities: None,
+            proprietary: None,
+        };
+        let mut sdu = BitBuffer::new_autoexpand(512);
+        pdu.to_bitbuf(&mut sdu).unwrap();
+        sdu.seek(0);
+        mm.rx_u_location_update_demand(queue, group_update_ind(issi, sdu));
+    }
+
+    /// What MM sent, in the queue's order.
+    #[derive(Debug, Default, PartialEq)]
+    struct Sent {
+        /// Group report bit of every D-LOCATION UPDATE COMMAND.
+        commands: Vec<u64>,
+        /// D-ATTACH/DETACH GROUP IDENTITY ACKNOWLEDGEMENTs.
+        acks: usize,
+        /// D-LOCATION UPDATE ACCEPTs.
+        accepts: usize,
+        /// D-ATTACH/DETACH GROUP IDENTITY with the group report request set (clause 16.8.3).
+        report_requests: usize,
+    }
+
+    fn sent(queue: &mut MessageQueue) -> Sent {
+        use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
+        let mut sent = Sent::default();
+        while let Some(message) = queue.pop_front() {
+            let SapMsgInner::LmmMleUnitdataReq(mut request) = message.msg else { continue };
+            let pdu_type = request.sdu.read_field(4, "pdu_type").unwrap();
+            if pdu_type == MmPduTypeDl::DLocationUpdateCommand.into_raw() {
+                sent.commands.push(request.sdu.read_field(1, "group_report").unwrap());
+            } else if pdu_type == MmPduTypeDl::DAttachDetachGroupIdentityAcknowledgement.into_raw() {
+                sent.acks += 1;
+            } else if pdu_type == MmPduTypeDl::DLocationUpdateAccept.into_raw() {
+                sent.accepts += 1;
+            } else if pdu_type == MmPduTypeDl::DAttachDetachGroupIdentity.into_raw() {
+                assert_eq!(request.sdu.read_field(1, "group_identity_report").unwrap(), 1);
+                sent.report_requests += 1;
+            }
+        }
+        sent
+    }
+
+    fn groups_of(mm: &mut MmBs, issi: u32) -> Vec<u32> {
+        let mut groups: Vec<u32> = mm.client_mgr.get_client_by_issi(issi).unwrap().groups.iter().copied().collect();
+        groups.sort();
+        groups
+    }
+
+    /// A radio the presence check dropped: MM keeps the client and its groups.
+    fn dropped_radio(mm: &mut MmBs, issi: u32) {
+        radio(mm, issi);
+        mm.config.state_write().subscribers.deregister(issi);
+    }
+
+    #[test]
+    fn group_change_of_a_dropped_radio_gets_one_plain_command_and_no_empty_ack() {
+        let (mut mm, _) = station();
+        dropped_radio(&mut mm, 100);
+        let mut queue = MessageQueue::new();
+
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        let first = sent(&mut queue);
+        assert_eq!(first.acks, 0, "an acknowledgement without a group list means 'all accepted' (annex G rule 8)");
+        assert_eq!(first.commands, vec![0], "one command to register (clause 16.4.3), the groups are fetched after it");
+        assert_eq!(first.report_requests, 0);
+        assert!(!mm.config.state_read().subscribers.is_registered(100));
+        assert_eq!(groups_of(&mut mm, 100), vec![268], "the unprocessed request must not change the groups");
+
+        // The radio repeats the attach before it has acted on the command: nothing more.
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        assert_eq!(sent(&mut queue), Sent::default());
+    }
+
+    #[test]
+    fn owed_group_change_is_fetched_with_a_group_report_request_after_the_registration() {
+        let (mut mm, _) = station();
+        dropped_radio(&mut mm, 100);
+        let mut queue = MessageQueue::new();
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        sent(&mut queue);
+
+        // The radio registers without its groups: the station asks for them (clause 16.8.3).
+        radio_answers_command(&mut mm, &mut queue, 100, None);
+        assert!(mm.config.state_read().subscribers.is_registered(100));
+        let after_registration = sent(&mut queue);
+        assert_eq!(after_registration.accepts, 1);
+        assert_eq!(after_registration.report_requests, 1);
+        assert_eq!(after_registration.commands, Vec::<u64>::new());
+
+        // The report: detach all, attach the selected group.
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        let after_report = sent(&mut queue);
+        assert_eq!((after_report.acks, after_report.report_requests), (1, 0));
+        assert_eq!(groups_of(&mut mm, 100), vec![300]);
+        assert_eq!(mm.config.state_read().subscribers.attached_groups_of(100), vec![300]);
+
+        // Fetched once: the next registration is a plain one again.
+        radio_answers_command(&mut mm, &mut queue, 100, None);
+        assert_eq!(sent(&mut queue).report_requests, 0);
+    }
+
+    #[test]
+    fn owed_group_change_needs_no_report_request_when_the_registration_carries_the_groups() {
+        let (mut mm, _) = station();
+        dropped_radio(&mut mm, 100);
+        let mut queue = MessageQueue::new();
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        sent(&mut queue);
+
+        radio_answers_command(&mut mm, &mut queue, 100, Some(&[300]));
+        let after_registration = sent(&mut queue);
+        assert_eq!((after_registration.accepts, after_registration.report_requests), (1, 0));
+        assert_eq!(groups_of(&mut mm, 100), vec![300]);
+
+        radio_answers_command(&mut mm, &mut queue, 100, None);
+        assert_eq!(sent(&mut queue).report_requests, 0, "nothing is owed any more");
+    }
+
+    #[test]
+    fn plain_return_of_a_dropped_radio_is_not_asked_for_its_groups() {
+        let (mut mm, _) = station();
+        dropped_radio(&mut mm, 100);
+        let mut queue = MessageQueue::new();
+        mm.client_mgr.update_client_rssi(100, -60.0);
+        mm.maybe_reactive_recovery(&mut queue, 100);
+        assert_eq!(sent(&mut queue).commands, vec![0]);
+
+        radio_answers_command(&mut mm, &mut queue, 100, None);
+        let after_registration = sent(&mut queue);
+        assert_eq!((after_registration.accepts, after_registration.report_requests), (1, 0));
+        assert_eq!(groups_of(&mut mm, 100), vec![268]);
+    }
+
+    #[test]
+    fn repeated_group_change_is_commanded_again_once_the_cooldown_has_lapsed() {
+        let (mut mm, _) = station();
+        dropped_radio(&mut mm, 100);
+        let mut queue = MessageQueue::new();
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        assert_eq!(sent(&mut queue).commands, vec![0]);
+
+        let cooldown = Duration::from_secs(mm.config.config().recovery.reactive_cooldown_secs);
+        *mm.reactive_recovery_cooldown.get_mut(&100).unwrap() = Instant::now() - cooldown;
+        radio_selects_group(&mut mm, &mut queue, 100, 300);
+        let again = sent(&mut queue);
+        assert_eq!((again.commands, again.acks), (vec![0], 0));
+    }
+
+    #[test]
+    fn group_update_of_an_unknown_radio_gets_the_one_recovery_command_and_no_ack() {
+        let (mut mm, _) = station();
+        let mut queue = MessageQueue::new();
+        // The uplink activity already triggered the command; the PDU itself adds nothing.
+        radio_selects_group(&mut mm, &mut queue, 200, 300);
+        assert_eq!(sent(&mut queue), Sent { commands: vec![1], ..Sent::default() });
+        assert!(!mm.client_mgr.client_is_known(200));
+
+        // Reactive recovery switched off: an unknown radio is not commanded and, as the
+        // request is not processed, not acknowledged either.
+        let (mut mm, _) = station();
+        let mut cfg = (*mm.config.config()).clone();
+        cfg.recovery.reactive_enabled = false;
+        mm.config = SharedConfig::from_parts(cfg, None);
+        radio_selects_group(&mut mm, &mut queue, 200, 300);
+        assert_eq!(sent(&mut queue), Sent::default());
     }
 
     #[test]
