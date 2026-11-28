@@ -378,6 +378,15 @@ pub struct CfgCellInfo {
     /// pattern, with frame 18 monitoring pattern 0.
     pub traffic_monitoring_pattern: u8,
 
+    /// Test switch: the D-RELEASE sent on the traffic channel of a group call in hangtime
+    /// carries a channel allocation with "timeslot assigned" 0000, which sends the radios to
+    /// the common control channel (TS 100 392-2 clause 23.5.4.3.2). Default: false.
+    pub group_release_to_mcch: bool,
+
+    /// Test switch: TDMA frames the traffic channel of a group call stays up in signalling mode
+    /// after its D-RELEASE went out on it. Default: 0; range: 0 to 90 (about 5 s).
+    pub group_release_hold_frames: u8,
+
     /// Remote control via SDS U-STATUS to ISSI 9999. None = disabled.
     pub sds_command_control: Option<CfgSdsCommandControl>,
 
@@ -522,6 +531,13 @@ pub struct CellInfoDto {
     /// Test switch: monitoring pattern of a call's channel allocation, 0 or 1. Default: 1.
     pub traffic_monitoring_pattern: Option<u8>,
 
+    /// Test switch: D-RELEASE on the traffic channel with a "go to the common control channel"
+    /// channel allocation. Default: false.
+    pub group_release_to_mcch: Option<bool>,
+
+    /// Test switch: frames the traffic channel stays up after its D-RELEASE, 0 to 90. Default: 0.
+    pub group_release_hold_frames: Option<u8>,
+
     /// Remote control via SDS U-STATUS. Optional section.
     pub sds_command_control: Option<SdsCommandControlDto>,
 
@@ -636,6 +652,8 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
         presence_response_secs: ci.presence_response_secs.unwrap_or(30).clamp(10, 300),
         group_release_on_facch: ci.group_release_on_facch.unwrap_or(true),
         traffic_monitoring_pattern: ci.traffic_monitoring_pattern.unwrap_or(1).min(1),
+        group_release_to_mcch: ci.group_release_to_mcch.unwrap_or(false),
+        group_release_hold_frames: ci.group_release_hold_frames.unwrap_or(0).min(90),
         sds_command_control: ci.sds_command_control.map(|dto| CfgSdsCommandControl {
             authorized_issis: dto.authorized_issis,
             commands: dto
@@ -726,6 +744,9 @@ mod presence_config_tests {
     fn call_test_switches_default_to_the_current_behaviour() {
         let defaults = cell_dto_to_cfg(CellInfoDto::default());
         assert_eq!((defaults.group_release_on_facch, defaults.traffic_monitoring_pattern), (true, 1));
+        assert_eq!((defaults.group_release_to_mcch, defaults.group_release_hold_frames), (false, 0));
+        let held = cell_dto_to_cfg(CellInfoDto { group_release_to_mcch: Some(true), group_release_hold_frames: Some(200), ..Default::default() });
+        assert_eq!((held.group_release_to_mcch, held.group_release_hold_frames), (true, 90));
         let set = cell_dto_to_cfg(CellInfoDto {
             group_release_on_facch: Some(false),
             traffic_monitoring_pattern: Some(0),

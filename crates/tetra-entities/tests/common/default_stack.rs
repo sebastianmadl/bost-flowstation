@@ -112,6 +112,8 @@ pub fn default_cell_info(freq_info: FreqInfo) -> CfgCellInfo {
         presence_response_secs: 30,
         group_release_on_facch: true,
         traffic_monitoring_pattern: 1,
+        group_release_to_mcch: false,
+        group_release_hold_frames: 0,
         sds_command_control: None,
         release_group_on_same_speaker_retake: false,
         dgna_use_ss_facility: true,

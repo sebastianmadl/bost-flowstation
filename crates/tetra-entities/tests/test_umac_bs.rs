@@ -2199,8 +2199,14 @@ fn resources_for_listener(slots: &[tetra_saps::tmv::TmvUnitdataReqSlot], ts: u8)
 /// Call on TS2 with the floor released (hangtime, downlink in signalling mode), as after a
 /// network over ends or while the BS holds a new network talker back.
 fn call_in_hangtime() -> ComponentTest {
+    call_in_hangtime_with(|_| {})
+}
+
+fn call_in_hangtime_with(configure: impl FnOnce(&mut tetra_config::bluestation::StackConfig)) -> ComponentTest {
     let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 4 }; // uplink message time is ts2
-    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
+    configure(&mut config);
+    let mut test = ComponentTest::from_config(config, Some(dltime));
     test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac, TetraEntity::Cmce]);
     test.submit_message(open_shared_voice_circuit(2));
     test.submit_message(floor_released(2));
@@ -2712,4 +2718,46 @@ fn test_release_in_traffic_mode_is_still_stolen() {
     let msgs = test.dump_sinks();
     assert_eq!(stch_slots(msgs, 2).len(), 1, "a channel in traffic mode gets the D-RELEASE on a stolen slot");
     assert!(!umac_of(&mut test).channel_scheduler.circuit_is_active(Direction::Dl, 2));
+}
+
+/// Test switch `group_release_to_mcch`: the D-RELEASE on the channel in hangtime carries a channel
+/// allocation with "timeslot assigned" 0000, "go to the appropriate common control channel"
+/// (TS 100 392-2 clauses 21.5.2 and 23.5.4.3.2).
+#[test]
+fn test_release_in_hangtime_sends_the_radios_to_the_mcch_with_the_test_switch() {
+    debug::setup_logging_verbose();
+    let mut test = call_in_hangtime_with(|config| config.cell.group_release_to_mcch = true);
+
+    release_group_call(&mut test, 2);
+    test.run_stack(Some(24));
+
+    let slots = downlink_slots(test.dump_sinks());
+    let resources = resources_for_group(&slots, 2);
+    assert_eq!(resources.len(), 1);
+    let alloc = resources[0].1.chan_alloc_element.as_ref().expect("channel allocation with the D-RELEASE");
+    assert_eq!(alloc.alloc_type, ChanAllocType::Replace);
+    assert_eq!(alloc.ts_assigned, [false; 4], "timeslot assigned 0000 = common control channel");
+    assert!(!alloc.cell_change_flag);
+    assert_eq!(alloc.carrier_num, MAIN_CARRIER);
+    assert!(resources[0].1.usage_marker.is_none());
+    assert!(!umac_of(&mut test).channel_scheduler.circuit_is_active(Direction::Dl, 2));
+}
+
+/// Test switch `group_release_hold_frames`: the channel stays up in signalling mode for that many
+/// frames after the D-RELEASE went out on it.
+#[test]
+fn test_release_in_hangtime_keeps_the_channel_for_the_configured_frames() {
+    debug::setup_logging_verbose();
+    let mut test = call_in_hangtime_with(|config| config.cell.group_release_hold_frames = 10);
+
+    release_group_call(&mut test, 2);
+    test.run_stack(Some(40));
+    let umac = umac_of(&mut test);
+    assert!(umac.channel_scheduler.circuit_is_active(Direction::Dl, 2), "still held 10 frames after the release");
+    assert!(umac.channel_scheduler.in_signalling_mode(2));
+
+    test.run_stack(Some(16));
+    assert!(!umac_of(&mut test).channel_scheduler.circuit_is_active(Direction::Dl, 2), "closed after the hold");
+    let slots = downlink_slots(test.dump_sinks());
+    assert_eq!(resources_for_group(&slots, 2).len(), 1, "the D-RELEASE is not repeated");
 }

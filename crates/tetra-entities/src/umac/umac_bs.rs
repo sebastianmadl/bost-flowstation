@@ -108,6 +108,9 @@ struct PendingCircuitClose {
     ul: bool,
     /// Timeslots this close has waited for signalling queued on the channel to go out.
     waited: u8,
+    /// Timeslots the channel stays up after that signalling went out (test switch
+    /// `group_release_hold_frames`).
+    hold: u16,
 }
 
 /// Longest a deferred circuit close waits for signalling queued on the channel: four TDMA frames.
@@ -427,11 +430,17 @@ impl UmacBs {
             c.cell.circuit_mode_data_service,
             wap
         );
-        if !c.cell.group_release_on_facch || c.cell.traffic_monitoring_pattern != 1 {
+        if !c.cell.group_release_on_facch
+            || c.cell.traffic_monitoring_pattern != 1
+            || c.cell.group_release_to_mcch
+            || c.cell.group_release_hold_frames != 0
+        {
             tracing::warn!(
-                "Test switches active: group_release_on_facch={} traffic_monitoring_pattern={}",
+                "Test switches active: group_release_on_facch={} traffic_monitoring_pattern={} group_release_to_mcch={} group_release_hold_frames={}",
                 c.cell.group_release_on_facch,
-                c.cell.traffic_monitoring_pattern
+                c.cell.traffic_monitoring_pattern,
+                c.cell.group_release_to_mcch,
+                c.cell.group_release_hold_frames
             );
         }
 
@@ -1952,6 +1961,31 @@ impl UmacBs {
                         slot_granting_element: None,
                         chan_alloc_element: None,
                     };
+                    let (to_mcch, hold_frames) = {
+                        let cfg = self.config.config();
+                        (cfg.cell.group_release_to_mcch, cfg.cell.group_release_hold_frames)
+                    };
+                    if to_mcch {
+                        // Test switch. "Timeslot assigned" 0000 sends the radios to their common
+                        // control channel (clauses 21.5.2 and 23.5.4.3.2); with a TM-SDU in the
+                        // PDU the CC accepts the change for a D-RELEASE (clauses 23.5.4.2.3 a) 2)
+                        // and 14.5.2.3). The text gives no values for the other elements in this
+                        // case: both directions, no monitoring pattern.
+                        pdu.chan_alloc_element = Some(ChanAllocElement {
+                            alloc_type: ChanAllocType::Replace,
+                            ts_assigned: [false; 4],
+                            ul_dl_assigned: UlDlAssignment::Both,
+                            clch_permission: false,
+                            cell_change_flag: false,
+                            carrier_num: requested_carrier,
+                            ext: None,
+                            mon_pattern: 0,
+                            frame18_mon_pattern: Some(0),
+                        });
+                    }
+                    if let Some(pending) = self.pending_circuit_closes.get_mut(&(requested_carrier, ts)) {
+                        pending.hold = hold_frames as u16 * 4;
+                    }
                     sdu.seek(0);
                     pdu.update_len_and_fill_ind(sdu.get_len());
                     tracing::info!(
@@ -2636,6 +2670,13 @@ impl UmacBs {
             {
                 if let Some(pending) = self.pending_circuit_closes.get_mut(&(carrier_num, ts)) {
                     pending.waited += 1;
+                }
+                continue;
+            }
+
+            if pending.hold > 0 && self.scheduler_for(carrier_num).in_signalling_mode(ts) {
+                if let Some(pending) = self.pending_circuit_closes.get_mut(&(carrier_num, ts)) {
+                    pending.hold -= 1;
                 }
                 continue;
             }
