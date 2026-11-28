@@ -1152,7 +1152,10 @@ impl CcBsSubentity {
         // Also deliver D-RELEASE via FACCH on the call's traffic timeslot (Miura / Sepura):
         // the MCCH copy alone can be missed while the MS still monitors the traffic channel
         // through hangtime, causing RDC_fail + band rescan instead of a clean release.
-        if let Some(call) = self.active_calls.get(&call_id) {
+        // `[cell_info] group_release_on_facch = false` leaves it out: the radios then leave the
+        // channel on its ACCESS-ASSIGN (TS 100 392-2 clause 23.5.6.1.1).
+        let on_facch = self.config.config().cell.group_release_on_facch;
+        if let Some(call) = self.active_calls.get(&call_id).filter(|_| on_facch) {
             let sdu_facch = Self::build_d_release_from_d_setup(&cached.pdu, disconnect_cause);
             let facch_msg =
                 Self::build_sapmsg_stealing(sdu_facch, self.dltime, dest_addr, call.carrier_num, call.ts, None);

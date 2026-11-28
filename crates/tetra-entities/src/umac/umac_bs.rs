@@ -422,6 +422,13 @@ impl UmacBs {
             c.cell.circuit_mode_data_service,
             wap
         );
+        if !c.cell.group_release_on_facch || c.cell.traffic_monitoring_pattern != 1 {
+            tracing::warn!(
+                "Test switches active: group_release_on_facch={} traffic_monitoring_pattern={}",
+                c.cell.group_release_on_facch,
+                c.cell.traffic_monitoring_pattern
+            );
+        }
 
         let mac_sync_pdu = MacSync {
             system_code: c.cell.system_code,
@@ -540,6 +547,7 @@ impl UmacBs {
         // We grant clch permission for Replace and Additional allocations on the uplink
         let clch_permission = (chan_alloc.alloc_type == ChanAllocType::Replace || chan_alloc.alloc_type == ChanAllocType::Additional)
             && (chan_alloc.ul_dl_assigned == UlDlAssignment::Ul || chan_alloc.ul_dl_assigned == UlDlAssignment::Both);
+        let mon_pattern = self.config.config().cell.traffic_monitoring_pattern;
         Some(ChanAllocElement {
             alloc_type: chan_alloc.alloc_type,
             ts_assigned: chan_alloc.timeslots,
@@ -551,8 +559,10 @@ impl UmacBs {
             // Explicit MPN 1 (ETSI EN 300 392-2 clause 9.6). With mon_pattern=0 +
             // frame18_mon_pattern=0, some MSs (Sepura SRP2000) interrupt UL sync during long
             // continuous PTT (~8-9s+) until UL-inactivity fires. Motorola unaffected by 0.
-            mon_pattern: 1,
-            frame18_mon_pattern: None,
+            // `[cell_info] traffic_monitoring_pattern = 0` sends that earlier form again; the
+            // frame 18 monitoring pattern is present only with monitoring pattern 0 (clause 21.5.2).
+            mon_pattern,
+            frame18_mon_pattern: (mon_pattern == 0).then_some(0),
         })
     }
 
@@ -2942,6 +2952,41 @@ fn pack_ul_acelp_bits(bits: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod live_carrier_tests {
     use super::*;
+
+    /// `[cell_info] traffic_monitoring_pattern`: 1 by default without a frame 18 pattern; 0 sends
+    /// "no monitoring pattern" with the frame 18 pattern that element then requires
+    /// (TS 100 392-2 clause 21.5.2).
+    #[test]
+    fn the_monitoring_pattern_of_a_call_follows_the_test_switch() {
+        let alloc = CmceChanAllocReq {
+            usage: Some(4),
+            carrier: None,
+            timeslots: [false, true, false, false],
+            alloc_type: ChanAllocType::Replace,
+            ul_dl_assigned: UlDlAssignment::Both,
+            cell_change: false,
+        };
+        let element = |pattern: Option<u8>| {
+            let mut cfg = tetra_config::bluestation::from_toml_str(include_str!("../../../../example_config/config.toml")).unwrap();
+            if let Some(pattern) = pattern {
+                cfg.cell.traffic_monitoring_pattern = pattern;
+            }
+            let carrier = cfg.cell.main_carrier;
+            let umac = UmacBs::new(SharedConfig::from_parts(cfg, None), None);
+            umac.cmce_to_mac_chanalloc(&alloc, carrier).unwrap()
+        };
+        let default = element(None);
+        assert_eq!((default.mon_pattern, default.frame18_mon_pattern), (1, None));
+        let test = element(Some(0));
+        assert_eq!((test.mon_pattern, test.frame18_mon_pattern), (0, Some(0)));
+        let mut bits = BitBuffer::new_autoexpand(64);
+        test.to_bitbuf(&mut bits);
+        assert_eq!(bits.get_len() - {
+            let mut d = BitBuffer::new_autoexpand(64);
+            default.to_bitbuf(&mut d);
+            d.get_len()
+        }, 2, "monitoring pattern 0 adds the 2-bit frame 18 pattern");
+    }
 
     /// A live carrier change: the secondary carrier's scheduler sends on the new number, the main
     /// carrier comes with the rebuilt broadcast PDUs.

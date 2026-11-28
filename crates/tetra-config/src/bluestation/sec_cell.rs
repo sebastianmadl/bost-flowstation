@@ -367,6 +367,17 @@ pub struct CfgCellInfo {
     /// Response grace for an independent presence check. Default: 30; range: 10–300.
     pub presence_response_secs: u32,
 
+    /// Test switch: also send the D-RELEASE of a group call on the call's traffic timeslot
+    /// (stolen half slot), not only on the MCCH. Default: true. With false the release goes
+    /// out on the MCCH only and the radios leave the channel on its ACCESS-ASSIGN
+    /// (TS 100 392-2 clause 23.5.6.1.1).
+    pub group_release_on_facch: bool,
+
+    /// Test switch: "monitoring pattern" element of the channel allocation of a call
+    /// (TS 100 392-2 clause 21.5.2). 1 = one monitoring pattern (default); 0 = no monitoring
+    /// pattern, with frame 18 monitoring pattern 0.
+    pub traffic_monitoring_pattern: u8,
+
     /// Remote control via SDS U-STATUS to ISSI 9999. None = disabled.
     pub sds_command_control: Option<CfgSdsCommandControl>,
 
@@ -505,6 +516,12 @@ pub struct CellInfoDto {
     /// Response grace for independent presence checks. Default: 30.
     pub presence_response_secs: Option<u32>,
 
+    /// Test switch: D-RELEASE of a group call also on the traffic timeslot. Default: true.
+    pub group_release_on_facch: Option<bool>,
+
+    /// Test switch: monitoring pattern of a call's channel allocation, 0 or 1. Default: 1.
+    pub traffic_monitoring_pattern: Option<u8>,
+
     /// Remote control via SDS U-STATUS. Optional section.
     pub sds_command_control: Option<SdsCommandControlDto>,
 
@@ -617,6 +634,8 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
             if v == 0 { 0 } else { v.clamp(5, 3600) }
         },
         presence_response_secs: ci.presence_response_secs.unwrap_or(30).clamp(10, 300),
+        group_release_on_facch: ci.group_release_on_facch.unwrap_or(true),
+        traffic_monitoring_pattern: ci.traffic_monitoring_pattern.unwrap_or(1).min(1),
         sds_command_control: ci.sds_command_control.map(|dto| CfgSdsCommandControl {
             authorized_issis: dto.authorized_issis,
             commands: dto
@@ -702,6 +721,29 @@ mod cell_reselect_tests {
 #[cfg(test)]
 mod presence_config_tests {
     use super::*;
+
+    #[test]
+    fn call_test_switches_default_to_the_current_behaviour() {
+        let defaults = cell_dto_to_cfg(CellInfoDto::default());
+        assert_eq!((defaults.group_release_on_facch, defaults.traffic_monitoring_pattern), (true, 1));
+        let set = cell_dto_to_cfg(CellInfoDto {
+            group_release_on_facch: Some(false),
+            traffic_monitoring_pattern: Some(0),
+            ..Default::default()
+        });
+        assert_eq!((set.group_release_on_facch, set.traffic_monitoring_pattern), (false, 0));
+        let high = cell_dto_to_cfg(CellInfoDto { traffic_monitoring_pattern: Some(3), ..Default::default() });
+        assert_eq!(high.traffic_monitoring_pattern, 1, "only 0 and 1 are offered");
+
+        // The keys as the example config documents them.
+        let example = include_str!("../../../../example_config/config.toml");
+        let toml = example
+            .replace("# group_release_on_facch  = true ", "group_release_on_facch = false ")
+            .replace("# traffic_monitoring_pattern = 1 ", "traffic_monitoring_pattern = 0 ");
+        assert_ne!(toml, example);
+        let cfg = crate::bluestation::from_toml_str(&toml).unwrap();
+        assert_eq!((cfg.cell.group_release_on_facch, cfg.cell.traffic_monitoring_pattern), (false, 0));
+    }
 
     #[test]
     fn presence_defaults_bounds_and_explicit_disable_preserve_t351() {

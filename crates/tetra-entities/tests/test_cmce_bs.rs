@@ -2306,6 +2306,48 @@ fn test_group_d_setup_uses_unacknowledged_llc() {
     );
 }
 
+/// The D-RELEASE of a group call goes out on the MCCH and, stolen, on the call's traffic
+/// timeslot. `[cell_info] group_release_on_facch = false` leaves the stolen copy out.
+#[test]
+fn test_group_d_release_on_the_traffic_slot_follows_the_test_switch() {
+    debug::setup_logging_verbose();
+
+    let releases = |on_facch: bool| {
+        let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+        let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
+        config.cell.group_release_on_facch = on_facch;
+        let mut test = ComponentTest::from_config(config, Some(dltime));
+        test.populate_entities(
+            vec![TetraEntity::Cmce],
+            vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew],
+        );
+        register_subscriber(&mut test, TEST_ISSI, TEST_GSSI);
+        test.submit_message(build_u_setup_msg(TEST_ISSI, TEST_GSSI));
+        test.run_stack(Some(1));
+        let call_id = first_d_setup_call_id(&test.dump_sinks(), TEST_GSSI);
+        test.submit_message(build_u_disconnect_msg(TEST_ISSI, call_id));
+        test.run_stack(Some(1));
+        let stolen: Vec<bool> = test
+            .dump_sinks()
+            .iter()
+            .filter_map(|msg| match &msg.msg {
+                SapMsgInner::LcmcMleUnitdataReq(prim)
+                    if msg.dest == TetraEntity::Mle
+                        && prim.main_address.ssi == TEST_GSSI
+                        && dl_pdu_type(&prim.sdu) == Some(CmcePduTypeDl::DRelease) =>
+                {
+                    Some(prim.stealing_permission)
+                }
+                _ => None,
+            })
+            .collect();
+        stolen
+    };
+
+    assert_eq!(releases(true), vec![false, true], "MCCH copy, then the stolen copy on the traffic slot");
+    assert_eq!(releases(false), vec![false], "MCCH copy only");
+}
+
 #[test]
 fn test_group_d_release_uses_unacknowledged_llc() {
     debug::setup_logging_verbose();
